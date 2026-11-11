@@ -1,0 +1,202 @@
+use cairn_core::blame::{self, BlameLine, LineVersion};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use rust_i18n::t;
+
+use crate::repo_view::{Page, RepoView};
+use crate::widgets::{avatar, empty_state, hstack, icon, relative_time, tr};
+
+pub(crate) struct BlameState {
+    pub files: Vec<String>,
+    pub filter: Entity<InputState>,
+    pub file: Option<String>,
+    pub lines: Vec<BlameLine>,
+    pub loading: bool,
+    pub selected: Option<u32>,
+    pub history: Vec<LineVersion>,
+    pub version: usize,
+    _sub: Option<Subscription>,
+}
+
+impl BlameState {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<RepoView>) -> Self {
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr("blame.filter")));
+        let sub = cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify());
+        Self { files: Vec::new(), filter, file: None, lines: Vec::new(), loading: false, selected: None, history: Vec::new(), version: 0, _sub: Some(sub) }
+    }
+}
+
+impl RepoView {
+    pub(crate) fn load_blame_files(&mut self, cx: &mut Context<Self>) {
+        if !self.blame.files.is_empty() {
+            return;
+        }
+        let git = self.git();
+        self.spawn_bg(move || git.run(["ls-files"]).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>(), |this, files, _| this.blame.files = files, cx);
+    }
+
+    pub(crate) fn open_blame(&mut self, path: String, cx: &mut Context<Self>) {
+        self.page = Page::Blame;
+        self.load_blame_files(cx);
+        self.blame.file = Some(path.clone());
+        self.blame.loading = true;
+        self.blame.selected = None;
+        self.blame.history.clear();
+        let git = self.git();
+        self.spawn_bg(move || blame::blame(&git, &path, Some("HEAD")).unwrap_or_default(), |this, lines, _| {
+            this.blame.lines = lines;
+            this.blame.loading = false;
+        }, cx);
+    }
+
+    fn select_blame_line(&mut self, number: u32, cx: &mut Context<Self>) {
+        let Some(path) = self.blame.file.clone() else { return };
+        self.blame.selected = Some(number);
+        self.blame.history.clear();
+        let git = self.git();
+        self.spawn_bg(move || blame::line_history(&git, &path, number, number).unwrap_or_default(), |this, h, _| {
+            this.blame.history = h;
+            this.blame.version = 0;
+        }, cx);
+    }
+
+    pub(crate) fn render_blame(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let filter = self.blame.filter.read(cx).value().to_lowercase();
+        let files: Vec<String> = self.blame.files.iter().filter(|f| filter.is_empty() || f.to_lowercase().contains(&filter)).take(400).cloned().collect();
+        let mut file_list = v_flex().gap_0p5();
+        for f in &files {
+            let path = f.clone();
+            let on = self.blame.file.as_deref() == Some(f.as_str());
+            file_list = file_list.child(
+                div()
+                    .id(SharedString::from(format!("bf-{f}")))
+                    .px_2()
+                    .py_1()
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .text_xs()
+                    .truncate()
+                    .when(on, |d| d.bg(theme.list_active))
+                    .when(!on, |d| d.hover(|s| s.bg(theme.list_hover)))
+                    .child(f.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_blame(path.clone(), cx))),
+            );
+        }
+        let center = if self.blame.loading {
+            div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element()
+        } else if self.blame.file.is_none() {
+            empty_state(IconName::FileClock, tr("blame.pick_title"), tr("blame.pick_body"), cx).into_any_element()
+        } else {
+            let lines = self.blame.lines.clone();
+            let count = lines.len();
+            let mono = theme.mono_font_family.clone();
+            uniform_list(
+                "blame-lines",
+                count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    let theme = cx.theme().clone();
+                    range
+                        .map(|i| {
+                            let l = &lines[i];
+                            let prev_same = i > 0 && lines[i - 1].commit == l.commit;
+                            let selected = this.blame.selected == Some(l.number);
+                            let age_days = ((chrono::Utc::now().timestamp() - l.time) / 86_400).max(0);
+                            let heat = if age_days < 7 { theme.primary } else if age_days < 60 { theme.primary.opacity(0.45) } else { theme.border };
+                            let n = l.number;
+                            h_flex()
+                                .id(("bl", i))
+                                .h(px(22.))
+                                .w_full()
+                                .text_xs()
+                                .font_family(mono.clone())
+                                .cursor_pointer()
+                                .when(selected, |d| d.bg(theme.list_active))
+                                .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
+                                .child(div().w(px(3.)).h_full().bg(heat))
+                                .child(
+                                    hstack()
+                                        .w(px(230.))
+                                        .px_2()
+                                        .gap_2()
+                                        .text_color(theme.muted_foreground)
+                                        .when(!prev_same, |d| d.child(div().w(px(56.)).child(l.commit.chars().take(7).collect::<String>())).child(div().w(px(90.)).truncate().child(l.author.clone())).child(div().truncate().child(relative_time(l.time)))),
+                                )
+                                .child(div().w(px(44.)).pr_2().text_right().text_color(theme.muted_foreground).child(l.number.to_string()))
+                                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(l.text.replace('\t', "    ")))
+                                .on_click(cx.listener(move |this, _, _, cx| this.select_blame_line(n, cx)))
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .size_full()
+            .into_any_element()
+        };
+        let history = self.blame.history.clone();
+        let right = match self.blame.selected {
+            None => div().p_4().text_sm().text_color(theme.muted_foreground).child(tr("blame.click_line")).into_any_element(),
+            Some(n) => {
+                let total = history.len();
+                let mut col = v_flex().gap_2().p_4();
+                col = col
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(t!("blame.history_of", n = n).to_string()))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("blame.versions", total)));
+                for (i, v) in history.iter().enumerate() {
+                    let on = i == self.blame.version;
+                    let id = v.commit.clone();
+                    col = col.child(
+                        v_flex()
+                            .id(("ver", i))
+                            .gap_1()
+                            .p_2()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(if on { theme.primary } else { theme.border })
+                            .bg(if on { theme.list_active } else { theme.background })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.blame.version = i;
+                                this.page = Page::History;
+                                this.select_commit(id.clone(), cx);
+                                if let Some(ix) = this.commits.iter().position(|c| c.id == id) {
+                                    this.history_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+                                }
+                            }))
+                            .child(hstack().gap_2().text_xs().child(div().font_family(theme.mono_font_family.clone()).text_color(theme.primary).child(v.commit.chars().take(7).collect::<String>())).child(avatar(&v.author, px(16.), cx)).child(div().flex_1().truncate().child(v.summary.clone())).child(div().text_color(theme.muted_foreground).child(relative_time(v.time))))
+                            .child(v_flex().px_2().py_1().rounded(px(4.)).bg(theme.muted).text_xs().font_family(theme.mono_font_family.clone()).children(v.text.iter().map(|l| div().child(l.clone())))),
+                    );
+                }
+                if total > 0 {
+                    col = col.child(div().text_xs().text_color(theme.muted_foreground).child(tr("blame.open_hint")));
+                }
+                col.into_any_element()
+            }
+        };
+        h_flex()
+            .size_full()
+            .child(
+                v_flex()
+                    .flex_none()
+                    .w(px(260.))
+                    .h_full()
+                    .bg(theme.sidebar)
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .child(div().p_2().child(Input::new(&self.blame.filter).small().prefix(icon(IconName::Search).small())))
+                    .child(div().id("blame-files").flex_1().min_h_0().overflow_y_scroll().px_1().child(file_list)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .when_some(self.blame.file.clone(), |d, f| d.child(hstack().h(px(32.)).px_3().border_b_1().border_color(theme.border).text_sm().font_family(theme.mono_font_family.clone()).child(f)))
+                    .child(div().flex_1().min_h_0().child(center)),
+            )
+            .child(div().id("blame-history").flex_none().w(px(360.)).h_full().overflow_y_scroll().bg(theme.sidebar).border_l_1().border_color(theme.border).child(right))
+    }
+}
