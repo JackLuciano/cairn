@@ -1,0 +1,27 @@
+pub mod absorb;
+pub mod bisect;
+pub mod blame;
+pub mod changelog;
+pub mod checks;
+pub mod conflicts;
+pub mod diff;
+pub mod error;
+pub mod git;
+pub mod graph;
+pub mod library;
+pub mod log;
+pub mod ops;
+pub mod oplog;
+pub mod patch;
+pub mod paths;
+pub mod rebase;
+pub mod refs;
+pub mod repo;
+pub mod settings;
+pub mod stack;
+pub mod status;
+pub mod workspace;
+
+pub use error::{Error, Result};
+pub use git::Git;
+pub use repo::Repository;

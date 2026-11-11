@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JackLuciano/cairn"
+authors = ["JackLuciano"]
+
+[workspace.dependencies]
+cairn-core = { path = "crates/core" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+gpui-kit = { version = "0.9.1", features = ["syntect"] }
+rust-i18n = "4.2"
+smol = "2"
+tempfile = "3"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
