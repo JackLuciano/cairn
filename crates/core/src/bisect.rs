@@ -61,8 +61,10 @@ pub fn state(git: &Git) -> Result<BisectState> {
             range.insert(0, (g.clone(), m.trim().to_string()));
         }
         s.range = range;
-        if let Ok(out) = git.run(["bisect", "visualize", "--format=%H", "--"]) {
-            let remaining: Vec<&str> = out.lines().collect();
+        let mut candidates = vec!["rev-list".to_string(), bad.clone()];
+        candidates.extend(s.good.iter().map(|g| format!("^{g}")));
+        if let Ok(out) = git.run(&candidates) {
+            let remaining: Vec<&str> = out.lines().filter(|l| !s.skipped.iter().any(|k| k == l)).collect();
             if remaining.len() == 1 && Some(remaining[0]) == s.bad.as_deref() {
                 s.first_bad = s.bad.clone();
             }
