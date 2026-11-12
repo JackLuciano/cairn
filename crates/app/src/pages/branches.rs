@@ -146,6 +146,7 @@ impl RepoView {
         let mut col = v_flex().id("branches-scroll").size_full().overflow_y_scroll().p_5().gap_4();
         col = col.child(
             hstack()
+                .flex_none()
                 .items_start()
                 .child(page_heading(tr("page.branches"), t!("branches.subtitle", local = local.len(), remote = remote.len(), tags = tags.len()).to_string(), cx))
                 .child(spacer())
