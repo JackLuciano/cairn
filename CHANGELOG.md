@@ -5,6 +5,13 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-12
+
+### Fixed
+
+- Repository tabs, Search, the sidebar toggle and Settings in the title bar now respond to clicks
+  on Windows.
+
 ## [0.1.0] - 2026-11-12
 
 The first public release of Cairn.
