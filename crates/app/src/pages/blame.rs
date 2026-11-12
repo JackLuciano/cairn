@@ -1,13 +1,14 @@
 use cairn_core::blame::{self, BlameLine, LineVersion};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::{Page, RepoView};
-use crate::widgets::{avatar, empty_state, hstack, icon, relative_time, tr};
+use crate::widgets::{Tone, avatar, empty_state, framed, hstack, icon, icon_tile, relative_time, spacer, tr};
 
 pub(crate) struct BlameState {
     pub files: Vec<String>,
@@ -71,18 +72,28 @@ impl RepoView {
         for f in &files {
             let path = f.clone();
             let on = self.blame.file.as_deref() == Some(f.as_str());
+            let (dir, name) = match f.rsplit_once('/') {
+                Some((d, n)) => (d.to_string(), n.to_string()),
+                None => (String::new(), f.clone()),
+            };
             file_list = file_list.child(
-                div()
+                hstack()
                     .id(SharedString::from(format!("bf-{f}")))
+                    .gap_2()
                     .px_2()
-                    .py_1()
-                    .rounded(px(5.))
+                    .py_1p5()
+                    .rounded(px(8.))
                     .cursor_pointer()
-                    .text_xs()
-                    .truncate()
                     .when(on, |d| d.bg(theme.list_active))
                     .when(!on, |d| d.hover(|s| s.bg(theme.list_hover)))
-                    .child(f.clone())
+                    .child(icon(IconName::FileCode).small().text_color(if on { theme.primary } else { theme.muted_foreground }))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().truncate().when(on, |d| d.font_weight(FontWeight::SEMIBOLD)).child(name))
+                            .when(!dir.is_empty(), |d| d.child(div().text_xs().truncate().text_color(theme.muted_foreground).child(dir))),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.open_blame(path.clone(), cx))),
             );
         }
@@ -138,15 +149,54 @@ impl RepoView {
         };
         let history = self.blame.history.clone();
         let right = match self.blame.selected {
-            None => div().p_4().text_sm().text_color(theme.muted_foreground).child(tr("blame.click_line")).into_any_element(),
+            None => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_6()
+                .child(icon_tile(IconName::FileClock, theme.primary).size(px(44.)).rounded(px(12.)))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("blame.versions_title")))
+                .child(div().text_sm().text_center().text_color(theme.muted_foreground).child(tr("blame.click_line")))
+                .into_any_element(),
             Some(n) => {
                 let total = history.len();
-                let mut col = v_flex().gap_2().p_4();
-                col = col
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(t!("blame.history_of", n = n).to_string()))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("blame.versions", total)));
+                let version = self.blame.version.min(total.saturating_sub(1));
+                let mut col = v_flex().gap_3().p_4();
+                col = col.child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(t!("blame.history_of", n = n).to_string()))
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("blame.versions", total))),
+                );
+                if total > 1 {
+                    let when = history.get(version).map(|v| relative_time(v.time)).unwrap_or_default();
+                    col = col.child(
+                        v_flex()
+                            .gap_1p5()
+                            .child(
+                                hstack()
+                                    .text_xs()
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).child(t!("blame.version_of", n = total - version, total = total).to_string()))
+                                    .child(spacer())
+                                    .child(div().text_color(theme.muted_foreground).child(when)),
+                            )
+                            .child(
+                                hstack()
+                                    .gap_2()
+                                    .child(framed(Button::new("ver-older"), Tone::Plain, cx).flex_1().icon(icon(IconName::ChevronLeft)).label(tr("blame.older")).disabled(version + 1 >= total).on_click(cx.listener(|this, _, _, cx| {
+                                        this.blame.version += 1;
+                                        cx.notify();
+                                    })))
+                                    .child(framed(Button::new("ver-newer"), Tone::Plain, cx).flex_1().label(tr("blame.newer")).icon(icon(IconName::ChevronRight)).disabled(version == 0).on_click(cx.listener(|this, _, _, cx| {
+                                        this.blame.version = this.blame.version.saturating_sub(1);
+                                        cx.notify();
+                                    }))),
+                            ),
+                    );
+                }
                 for (i, v) in history.iter().enumerate() {
-                    let on = i == self.blame.version;
+                    let on = i == version;
                     let id = v.commit.clone();
                     col = col.child(
                         v_flex()
@@ -160,18 +210,22 @@ impl RepoView {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.blame.version = i;
-                                this.page = Page::History;
-                                this.select_commit(id.clone(), cx);
-                                if let Some(ix) = this.commits.iter().position(|c| c.id == id) {
-                                    this.history_scroll.scroll_to_item(ix, ScrollStrategy::Center);
-                                }
+                                cx.notify();
                             }))
                             .child(hstack().gap_2().text_xs().child(div().font_family(theme.mono_font_family.clone()).text_color(theme.primary).child(v.commit.chars().take(7).collect::<String>())).child(avatar(&v.author, px(16.), cx)).child(div().flex_1().truncate().child(v.summary.clone())).child(div().text_color(theme.muted_foreground).child(relative_time(v.time))))
-                            .child(v_flex().px_2().py_1().rounded(px(4.)).bg(theme.muted).text_xs().font_family(theme.mono_font_family.clone()).children(v.text.iter().map(|l| div().child(l.clone())))),
+                            .child(v_flex().px_2().py_1().rounded(px(4.)).bg(theme.muted).text_xs().font_family(theme.mono_font_family.clone()).children(v.text.iter().map(|l| div().child(l.clone()))))
+                            .when(on, |d| {
+                                d.child(
+                                    Button::new(("ver-open", i)).xsmall().ghost().icon(icon(IconName::ExternalLink)).label(tr("blame.open_commit")).on_click(cx.listener(move |this, _, _, cx| {
+                                        this.page = Page::History;
+                                        this.select_commit(id.clone(), cx);
+                                        if let Some(ix) = this.commits.iter().position(|c| c.id == id) {
+                                            this.history_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+                                        }
+                                    })),
+                                )
+                            }),
                     );
-                }
-                if total > 0 {
-                    col = col.child(div().text_xs().text_color(theme.muted_foreground).child(tr("blame.open_hint")));
                 }
                 col.into_any_element()
             }

@@ -14,7 +14,7 @@ use rust_i18n::t;
 use uuid::Uuid;
 
 use crate::repo_view::RepoView;
-use crate::widgets::{empty_state, hstack, icon, section_label, spacer, tr};
+use crate::widgets::{count_chip, empty_state, hstack, icon, section_label, spacer, tr};
 
 pub(crate) struct CairnApp {
     pub library: Library,
@@ -117,7 +117,10 @@ impl CairnApp {
         {
             tab.update(cx, |v, cx| v.debug_page(&page, cx));
         }
-        if std::env::var("CAIRN_DEBUG_SETTINGS").is_ok() {
+        if let Ok(section) = std::env::var("CAIRN_DEBUG_SETTINGS") {
+            if section != "1" {
+                crate::settings_dialog::request_category(Box::leak(section.into_boxed_str()));
+            }
             crate::settings_dialog::open(cx.entity(), self.settings.clone(), window, cx);
         }
         match std::env::var("CAIRN_DEBUG_DIALOG").as_deref() {
@@ -541,14 +544,23 @@ impl CairnApp {
         let branch = read_branch(&entry.path).unwrap_or_default();
         let view = cx.entity();
         let entry_menu = entry.clone();
+        let (changed, ahead, conflicts) = self
+            .tabs
+            .iter()
+            .find(|t| same(&t.read(cx).repo.root, &entry.path))
+            .map(|t| {
+                let s = &t.read(cx).status;
+                (s.files.len(), s.branch.ahead as usize, s.conflicted().count())
+            })
+            .unwrap_or_default();
         div()
             .id(SharedString::from(format!("side-repo-{}", entry.path.display())))
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(10.))
             .pl_5()
             .pr_2()
-            .py_1()
+            .py(px(6.))
             .rounded(px(6.))
             .cursor_pointer()
             .when(is_active, |d| d.bg(theme.list_active))
@@ -558,18 +570,104 @@ impl CairnApp {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().text_color(if missing { theme.muted_foreground } else { theme.foreground }).child(entry.name.clone()))
+                    .gap(px(1.))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().text_color(if missing { theme.muted_foreground } else { theme.foreground }).child(entry.name.clone()))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(11.))
                             .truncate()
+                            .font_family(theme.mono_font_family.clone())
                             .text_color(theme.muted_foreground)
                             .child(if missing { t!("repo.missing").to_string() } else { branch }),
                     ),
             )
+            .when(conflicts > 0, |d| d.child(count_chip(conflicts.to_string(), theme.red.opacity(0.15), theme.red)))
+            .when(changed > 0 && conflicts == 0, |d| d.child(count_chip(changed.to_string(), theme.yellow.opacity(0.15), theme.yellow)))
+            .when(ahead > 0, |d| d.child(count_chip(format!("↑{ahead}"), theme.primary.opacity(0.15), theme.primary)))
             .on_click(cx.listener(move |this, _, window, cx| this.open_repo(&path, window, cx)))
             .context_menu(move |menu, _, cx| view.read(cx).repo_menu(menu, &entry_menu, view.clone()))
             .into_any_element()
+    }
+
+    fn render_repo_sections(&self, tab: Entity<RepoView>, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let (branches, worktrees, stashes) = {
+            let v = tab.read(cx);
+            let local: Vec<cairn_core::refs::Branch> = v.branches.iter().filter(|b| !b.is_remote).cloned().collect();
+            let worktrees: Vec<cairn_core::refs::Worktree> = v.worktrees.iter().filter(|w| !w.is_main).cloned().collect();
+            (local, worktrees, v.stashes.clone())
+        };
+        let row = |id: SharedString, cx: &App| {
+            let hover = cx.theme().list_hover;
+            div().id(id).flex().items_center().gap(px(10.)).px_2().py(px(5.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(hover))
+        };
+        let mut col = v_flex().gap(px(18.)).pt_4().pb_2();
+        let mut branch_list = v_flex().gap(px(2.)).child(crate::widgets::caps_heading(tr("sidebar.branches"), Some(branches.len()), cx));
+        for b in branches.iter().take(12) {
+            let name = b.name.clone();
+            let t = tab.clone();
+            let meta = match (b.ahead, b.behind) {
+                (0, 0) => crate::widgets::relative_time(b.last_commit_time).to_string(),
+                (a, 0) => format!("↑{a}"),
+                (0, r) => format!("↓{r}"),
+                (a, r) => format!("↑{a} ↓{r}"),
+            };
+            branch_list = branch_list.child(
+                row(SharedString::from(format!("side-branch-{}", b.name)), cx)
+                    .when(b.is_head, |d| d.bg(theme.list_active))
+                    .child(icon(IconName::GitBranch).xsmall().text_color(if b.is_head { theme.magenta } else { theme.muted_foreground }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .font_weight(if b.is_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                            .text_color(if b.is_head { theme.foreground } else { theme.muted_foreground })
+                            .child(b.name.clone()),
+                    )
+                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(meta))
+                    .on_click(move |_, window, cx| {
+                        let name = name.clone();
+                        t.update(cx, |v, cx| v.checkout(name, false, window, cx));
+                    }),
+            );
+        }
+        col = col.child(branch_list);
+        if !worktrees.is_empty() {
+            let mut list = v_flex().gap(px(2.)).child(crate::widgets::caps_heading(tr("sidebar.worktrees"), Some(worktrees.len()), cx));
+            for w in &worktrees {
+                let path = w.path.clone();
+                list = list.child(
+                    row(SharedString::from(format!("side-wt-{}", w.path.display())), cx)
+                        .child(icon(IconName::Layers).xsmall().text_color(theme.cyan))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_xs().font_weight(FontWeight::MEDIUM).truncate().child(crate::widgets::display_path(&w.path)))
+                                .child(div().text_size(px(11.)).font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).truncate().child(w.branch.clone().unwrap_or_default())),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_repo(&path, window, cx))),
+                );
+            }
+            col = col.child(list);
+        }
+        if !stashes.is_empty() {
+            let mut list = v_flex().gap(px(2.)).child(crate::widgets::caps_heading(tr("sidebar.stashes"), Some(stashes.len()), cx));
+            for s in stashes.iter().take(6) {
+                let t = tab.clone();
+                list = list.child(
+                    row(SharedString::from(format!("side-stash-{}", s.index)), cx)
+                        .child(icon(IconName::Archive).xsmall().text_color(theme.muted_foreground))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(format!("stash@{{{}}}: {}", s.index, s.message)))
+                        .on_click(move |_, window, cx| t.update(cx, |v, cx| v.open_page(crate::repo_view::Page::Branches, window, cx))),
+                );
+            }
+            col = col.child(list);
+        }
+        col.border_t_1().border_color(theme.border).mt_3()
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -681,7 +779,8 @@ impl CairnApp {
                             el = el.child(self.render_sidebar_repo(r, cx));
                         }
                         el
-                    }),
+                    })
+                    .when_some(self.active_tab(), |d, tab| d.child(self.render_repo_sections(tab, cx))),
             )
             .child(
                 v_flex()
@@ -804,23 +903,27 @@ impl CairnApp {
                     hstack()
                         .id("titlebar-actions")
                         .occlude()
-                        .gap_1()
+                        .gap(px(6.))
                         .pr_2()
                         .when_some(self.update_ready.as_ref().map(|(v, _)| v.clone()), |d, v| d.child(crate::updater::update_pill(&v, cx)))
+                        .when(self.active.is_none(), |d| {
+                            d.child(
+                                crate::widgets::framed(Button::new("open-palette"), crate::widgets::Tone::Plain, cx)
+                                    .h(px(28.))
+                                    .rounded(px(7.))
+                                    .text_color(theme.muted_foreground)
+                                    .icon(icon(IconName::Search))
+                                    .label(tr("palette.button"))
+                                    .tooltip(tr("palette.tooltip"))
+                                    .on_click(cx.listener(|_, _, window, cx| crate::palette::open(cx.entity(), window, cx))),
+                            )
+                        })
                         .child(
-                            Button::new("open-palette")
-                                .xsmall()
-                                .ghost()
-                                .icon(icon(IconName::Search))
-                                .label(tr("palette.button"))
-                                .tooltip(tr("palette.tooltip"))
-                                .on_click(cx.listener(|_, _, window, cx| crate::palette::open(cx.entity(), window, cx))),
-                        )
-                        .child(
-                            Button::new("toggle-sidebar")
-                                .xsmall()
-                                .ghost()
-                                .icon(icon(if self.sidebar_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen }))
+                            crate::widgets::framed(Button::new("toggle-sidebar"), crate::widgets::Tone::Plain, cx)
+                                .size(px(28.))
+                                .px_0()
+                                .rounded(px(7.))
+                                .icon(icon(if self.sidebar_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen }).text_color(theme.muted_foreground))
                                 .tooltip(tr("tabs.toggle_sidebar"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.sidebar_open = !this.sidebar_open;
@@ -828,10 +931,11 @@ impl CairnApp {
                                 })),
                         )
                         .child(
-                            Button::new("open-settings")
-                                .xsmall()
-                                .ghost()
-                                .icon(icon(IconName::Settings))
+                            crate::widgets::framed(Button::new("open-settings"), crate::widgets::Tone::Plain, cx)
+                                .size(px(28.))
+                                .px_0()
+                                .rounded(px(7.))
+                                .icon(icon(IconName::Settings).text_color(theme.muted_foreground))
                                 .tooltip(tr("settings.title"))
                                 .on_click(cx.listener(|this, _, window, cx| crate::settings_dialog::open(cx.entity(), this.settings.clone(), window, cx))),
                         ),
@@ -1094,13 +1198,12 @@ fn category_menu(menu: PopupMenu, view: Entity<CairnApp>, id: Uuid) -> PopupMenu
     }))
 }
 
-fn add_repo_button(id: &'static str, category: Option<Uuid>, view: Entity<CairnApp>, _cx: &mut Context<CairnApp>) -> impl IntoElement {
-    Button::new(id)
-        .small()
-        .primary()
+fn add_repo_button(id: &'static str, category: Option<Uuid>, view: Entity<CairnApp>, cx: &mut Context<CairnApp>) -> impl IntoElement {
+    let tone = if id == "side-add" { crate::widgets::Tone::Plain } else { crate::widgets::Tone::Accent };
+    crate::widgets::framed(Button::new(id), tone, cx)
+        .when(id == "side-add", |b| b.w_full().text_color(cx.theme().muted_foreground))
         .icon(icon(IconName::Plus))
         .label(tr("repo.add"))
-        .dropdown_caret(true)
         .dropdown_menu(move |menu, _, _| {
             let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
             menu.item(PopupMenuItem::new(t!("repo.add_existing").to_string()).icon(icon(IconName::FolderOpen)).on_click(move |_, window, cx| {

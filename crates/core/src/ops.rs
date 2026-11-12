@@ -275,6 +275,77 @@ pub fn revert(git: &Git, id: &str) -> Result<String> {
     git.run(["revert", "--no-edit", id])
 }
 
+/// Puts commits in the order they were made, oldest first, whatever order they were picked in.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `ids` - the commits
+///
+/// # Returns
+/// The same commits, oldest first. Commits git cannot order keep their relative position at the end.
+pub fn oldest_first(git: &Git, ids: &[String]) -> Vec<String> {
+    let full: Vec<String> = ids
+        .iter()
+        .map(|id| git.run(["rev-parse".to_string(), "--verify".into(), "--quiet".into(), format!("{id}^{{commit}}")]).map(|s| s.trim().to_string()).unwrap_or_else(|_| id.clone()))
+        .collect();
+    let mut args: Vec<String> = vec!["rev-list".into(), "--topo-order".into(), "--reverse".into()];
+    args.extend(full.iter().cloned());
+    let mut base_args: Vec<String> = vec!["merge-base".into(), "--octopus".into()];
+    base_args.extend(full.iter().cloned());
+    if let Ok(base) = git.run(&base_args) {
+        let base = base.trim();
+        if !base.is_empty() && !full.iter().any(|f| f == base) {
+            args.push(format!("^{base}"));
+        }
+    }
+    match git.run(&args) {
+        Ok(out) => {
+            let mut ordered: Vec<String> = out
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .filter_map(|l| full.iter().position(|f| *f == l).map(|i| ids[i].clone()))
+                .collect();
+            for id in ids {
+                if !ordered.iter().any(|o| o.starts_with(id.as_str()) || id.starts_with(o.as_str())) {
+                    ordered.push(id.clone());
+                }
+            }
+            ordered
+        }
+        Err(_) => ids.to_vec(),
+    }
+}
+
+/// Copies several commits onto the current branch, oldest first.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `ids` - commits to copy, in any order
+///
+/// # Returns
+/// Git's output. Stops on the first conflict, leaving it for the conflict editor.
+pub fn cherry_pick_many(git: &Git, ids: &[String]) -> Result<String> {
+    let mut args: Vec<String> = vec!["cherry-pick".into()];
+    args.extend(oldest_first(git, ids));
+    git.run(&args)
+}
+
+/// Undoes several commits with new commits, newest first so later changes are taken back before
+/// the ones they build on.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `ids` - commits to revert, in any order
+///
+/// # Returns
+/// Git's output.
+pub fn revert_many(git: &Git, ids: &[String]) -> Result<String> {
+    let mut args: Vec<String> = vec!["revert".into(), "--no-edit".into()];
+    args.extend(oldest_first(git, ids).into_iter().rev());
+    git.run(&args)
+}
+
 /// How far `reset` moves the working tree and index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResetMode {

@@ -287,16 +287,34 @@ pub(crate) fn suggest_conflict(settings: &Settings, path: &str, before: &[String
     Ok(strip_fences(&text).lines().map(str::to_string).collect())
 }
 
-pub(crate) fn commit_message(settings: &Settings, staged_diff: &str) -> Result<(String, String), String> {
+/// Writes a commit message for the staged changes.
+///
+/// # Arguments
+/// * `settings` - AI connection and commit message settings, including the user's own instructions
+/// * `staged_diff` - the staged diff
+/// * `repo_instructions` - the repository's `.cairn/commit-message.md`, when it has one
+///
+/// # Returns
+/// `(summary, body)`, or an error message for the user.
+pub(crate) fn commit_message(settings: &Settings, staged_diff: &str, repo_instructions: Option<&str>) -> Result<(String, String), String> {
     let style = if settings.commits.conventional {
         "Use Conventional Commits: type(scope): summary, where scope is the main folder or module touched."
     } else {
         "Write a plain, imperative summary."
     };
-    let system = format!(
+    let mut system = format!(
         "You write git commit messages. {style} The summary must be at most {} characters. After a blank line, add a short body only when the change needs explaining. Reply with only the commit message.",
         settings.commits.summary_limit
     );
+    let own = settings.commits.ai_instructions.trim();
+    if !own.is_empty() {
+        system.push_str("\n\nThe user's instructions, which take priority over the style above:\n");
+        system.push_str(own);
+    }
+    if let Some(repo) = repo_instructions.map(str::trim).filter(|r| !r.is_empty()) {
+        system.push_str("\n\nThis repository's commit message rules, which take priority over everything above:\n");
+        system.push_str(repo);
+    }
     let text = complete(settings, Tier::Fast, &system, &sanitize_diff(settings, staged_diff))?;
     let text = strip_fences(&text);
     let (summary, body) = text.split_once("\n\n").map(|(a, b)| (a.trim().to_string(), b.trim().to_string())).unwrap_or((text.trim().to_string(), String::new()));

@@ -7,7 +7,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::RepoView;
-use crate::widgets::{badge, empty_state, hstack, icon, section_label, spacer, tr};
+use crate::widgets::{Tone, badge, empty_state, framed, hstack, icon, section_label, spacer, tr};
 
 #[derive(Default)]
 pub(crate) struct StackState {
@@ -242,14 +242,36 @@ impl RepoView {
                     .child(
                         hstack()
                             .gap_2()
-                            .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("stack.title")))
+                            .flex_wrap()
+                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("stack.title")))
                             .child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("stack.summary", self.stack.branches.len())))
                             .child(spacer())
                             .child(Button::new("stack-refresh").small().ghost().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| this.load_stack(cx))))
-                            .child(Button::new("stack-restack").small().outline().label(tr("stack.restack")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.restack(window, cx))))
-                            .child(Button::new("stack-submit").small().primary().icon(icon(IconName::GitPullRequestCreate)).label(tr("stack.submit")).disabled(self.busy.is_some() || self.stack.gh_error.is_some()).on_click(cx.listener(|this, _, window, cx| this.submit_stack(window, cx)))),
+                            .child(framed(Button::new("stack-add"), Tone::Plain, cx).icon(icon(IconName::GitBranchPlus)).label(tr("stack.add_on_top")).on_click(cx.listener(|_, _, window, cx| {
+                                crate::dialogs::new_branch(cx.entity(), None, window, cx);
+                            })))
+                            .child({
+                                let open = self.stack.branches.iter().filter(|b| b.pr.is_some()).count();
+                                let label = if open > 0 { crate::widgets::plural("stack.submit_update", open) } else { tr("stack.submit").to_string() };
+                                framed(Button::new("stack-submit"), Tone::Accent, cx).icon(icon(IconName::GitPullRequestCreate)).label(label).disabled(self.busy.is_some() || self.stack.gh_error.is_some()).on_click(cx.listener(|this, _, window, cx| this.submit_stack(window, cx)))
+                            }),
                     )
-                    .when(needs_restack, |d| d.child(hstack().gap_2().p_3().rounded(px(8.)).bg(theme.yellow.opacity(0.12)).child(icon(IconName::TriangleAlert).text_color(theme.yellow)).child(div().text_sm().child(tr("stack.restack_hint")))))
+                    .when(needs_restack, |d| {
+                        d.child(
+                            hstack()
+                                .flex_wrap()
+                                .gap(px(10.))
+                                .px_4()
+                                .py(px(10.))
+                                .rounded(px(8.))
+                                .bg(theme.yellow.opacity(0.12))
+                                .border_1()
+                                .border_color(theme.yellow.opacity(0.35))
+                                .child(icon(IconName::TriangleAlert).text_color(theme.yellow))
+                                .child(div().flex_1().text_sm().child(tr("stack.restack_hint")))
+                                .child(framed(Button::new("stack-restack"), Tone::Plain, cx).label(tr("stack.restack")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.restack(window, cx)))),
+                        )
+                    })
                     .when_some(self.stack.gh_error.clone(), |d, e| d.child(div().p_3().rounded(px(8.)).bg(theme.muted).text_xs().text_color(theme.muted_foreground).child(e)))
                     .child(col),
             )

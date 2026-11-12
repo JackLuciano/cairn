@@ -4,7 +4,6 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 use velopack::sources::GithubSource;
@@ -28,13 +27,21 @@ pub(crate) fn is_installed() -> bool {
 }
 
 fn check_and_download() -> Option<Arc<UpdateInfo>> {
-    let um = manager()?;
-    match um.check_for_updates().ok()? {
+    check_now().ok().flatten()
+}
+
+/// Checks GitHub for a newer release and downloads it in the background.
+///
+/// # Returns
+/// The downloaded update, `None` when Cairn is up to date, or an error message.
+pub(crate) fn check_now() -> Result<Option<Arc<UpdateInfo>>, String> {
+    let um = manager().ok_or_else(|| tr("update.dev_only").to_string())?;
+    match um.check_for_updates().map_err(|e| e.to_string())? {
         UpdateCheck::UpdateAvailable(info) => {
-            um.download_updates(&info, None).ok()?;
-            Some(Arc::new(*info))
+            um.download_updates(&info, None).map_err(|e| e.to_string())?;
+            Ok(Some(Arc::new(*info)))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -92,23 +99,23 @@ pub(crate) fn update_pill(version: &str, cx: &mut Context<CairnApp>) -> impl Int
 }
 
 pub(crate) fn about_line(reduce_motion: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let link = theme.primary;
     h_flex()
-        .gap_2()
+        .gap_1p5()
         .items_center()
+        .text_xs()
+        .whitespace_nowrap()
+        .text_color(theme.muted_foreground)
+        .child(t!("update.version", version = current_version()).to_string())
+        .child("·")
         .child(
             div()
-                .text_xs()
-                .whitespace_nowrap()
-                .text_color(cx.theme().muted_foreground)
-                .child(t!("update.version", version = current_version()).to_string())
-                .when(!is_installed(), |d| d.child(tr("update.dev_build"))),
-        )
-        .child(
-            Button::new("open-whats-new")
-                .xsmall()
-                .ghost()
-                .icon(icon(IconName::Sparkles))
-                .label(tr("whats_new.button"))
+                .id("open-whats-new")
+                .cursor_pointer()
+                .text_color(link)
+                .hover(|s| s.underline())
+                .child(tr("whats_new.button"))
                 .on_click(move |_, window, cx| crate::whats_new::open(reduce_motion, window, cx)),
         )
 }

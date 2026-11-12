@@ -4,15 +4,16 @@ use cairn_core::settings::{DateFormat, GraphStyle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::ContextMenuExt;
-use gpui_kit::component::{ActiveTheme, Selectable, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
+use rust_i18n::t;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::diff_view::render_file_diff;
 use crate::repo_view::RepoView;
-use crate::widgets::{avatar, empty_state, full_time, hstack, icon, lane_color, relative_time, spacer, status_letter, tr};
+use crate::widgets::{avatar, empty_state, full_time, hstack, icon, lane_color, relative_time, spacer, status_letter, toggle_pill, tr};
 
-pub(crate) const ROW_H: f32 = 30.;
+pub(crate) const ROW_H: f32 = 34.;
 const LANE_W: f32 = 14.;
 const GRAPH_PAD: f32 = 10.;
 
@@ -61,6 +62,69 @@ fn paint_graph(row: &GraphRow, is_head: bool, is_merge: bool, style: GraphStyle,
 }
 
 impl RepoView {
+    /// Handles a click on a commit row: plain click selects it, Ctrl adds or removes it from the
+    /// selection, Shift selects the range from the last clicked row.
+    ///
+    /// # Arguments
+    /// * `ix` - row index
+    /// * `id` - the commit
+    /// * `mods` - keyboard modifiers held during the click
+    pub(crate) fn click_commit(&mut self, ix: usize, id: String, mods: Modifiers, cx: &mut Context<Self>) {
+        if mods.shift
+            && let Some(anchor) = self.last_clicked
+        {
+            let (a, b) = if anchor <= ix { (anchor, ix) } else { (ix, anchor) };
+            self.multi_select = self.commits[a..=b.min(self.commits.len().saturating_sub(1))].iter().map(|c| c.id.clone()).collect();
+            cx.notify();
+            return;
+        }
+        if mods.control || mods.platform {
+            if self.multi_select.is_empty()
+                && let Some(cur) = self.selected_commit.clone()
+            {
+                self.multi_select.push(cur);
+            }
+            if let Some(pos) = self.multi_select.iter().position(|c| *c == id) {
+                self.multi_select.remove(pos);
+            } else {
+                self.multi_select.push(id.clone());
+            }
+            if self.multi_select.len() <= 1 {
+                self.multi_select.clear();
+            }
+            self.last_clicked = Some(ix);
+            self.select_commit(id, cx);
+            return;
+        }
+        self.multi_select.clear();
+        self.last_clicked = Some(ix);
+        self.select_commit(id, cx);
+    }
+
+    /// Copies the hashes of the selected commits, oldest first, one per line.
+    pub(crate) fn copy_selected_hashes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ordered = cairn_core::ops::oldest_first(&self.repo.git, &self.multi_select);
+        let n = ordered.len();
+        cx.write_to_clipboard(ClipboardItem::new_string(ordered.join("\n")));
+        window.push_notification(gpui_kit::component::notification::Notification::success(crate::widgets::plural("history.copied_hashes", n)), cx);
+    }
+
+    /// Cherry-picks every selected commit onto the current branch, oldest first.
+    pub(crate) fn cherry_pick_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.multi_select.clone();
+        let n = ids.len();
+        self.multi_select.clear();
+        self.run_op(tr("op.cherry_pick"), Some(crate::widgets::plural("undo.cherry_pick_n", n)), move |git| cairn_core::ops::cherry_pick_many(git, &ids), window, cx);
+    }
+
+    /// Reverts every selected commit with new commits.
+    pub(crate) fn revert_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.multi_select.clone();
+        let n = ids.len();
+        self.multi_select.clear();
+        self.run_op(tr("op.revert"), Some(crate::widgets::plural("undo.revert_n", n)), move |git| cairn_core::ops::revert_many(git, &ids), window, cx);
+    }
+
     fn format_time(&self, ts: i64) -> SharedString {
         match self.settings.graph.date_format {
             DateFormat::Relative => relative_time(ts),
@@ -138,10 +202,10 @@ impl RepoView {
         let commit = self.commits[ix].clone();
         let row = self.rows[ix].clone();
         let theme = cx.theme().clone();
-        let selected = self.selected_commit.as_deref() == Some(commit.id.as_str());
+        let selected = if self.multi_select.is_empty() { self.selected_commit.as_deref() == Some(commit.id.as_str()) } else { self.multi_select.contains(&commit.id) };
         let is_head = commit.refs.iter().any(|r| r.is_head);
-        let lanes = self.rows.iter().skip(ix.saturating_sub(40)).take(80).map(|r| r.width).max().unwrap_or(1).min(12);
-        let graph_w = GRAPH_PAD * 2. + (lanes.max(1) - 1) as f32 * LANE_W + 4.;
+        let graph_w = self.graph_w;
+        let show_graph = self.show_graph;
         let colors: Vec<Hsla> = (0..8).map(|i| lane_color(i, cx)).collect();
         let bg = if selected { theme.list_active } else { theme.background };
         let style = self.settings.graph.style;
@@ -163,16 +227,21 @@ impl RepoView {
             .border_color(theme.border.opacity(0.4))
             .when(!selected, |d| d.hover(|s| s.bg(cx.theme().list_hover)))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| this.select_commit(id.clone(), cx)))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(graph_w))
-                    .h_full()
-                    .child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
-                        paint_graph(&row, is_head, is_merge, style, bounds, &colors, bg, window)
-                    }).size_full()),
-            )
+            .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.click_commit(ix, id.clone(), ev.modifiers(), cx)))
+            .pl_3()
+            .pr_4()
+            .gap(px(10.))
+            .when(show_graph, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .w(px(graph_w))
+                        .h_full()
+                        .child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+                            paint_graph(&row, is_head, is_merge, style, bounds, &colors, bg, window)
+                        }).size_full()),
+                )
+            })
             .child(
                 hstack()
                     .flex_1()
@@ -189,20 +258,19 @@ impl RepoView {
                             .child(commit.summary.clone()),
                     ),
             )
-            .child(
-                hstack()
-                    .flex_none()
-                    .gap_2()
-                    .px_3()
-                    .when(self.settings.appearance.show_avatars, |d| d.child(avatar(&commit.author, px(20.), cx)))
-                    .child(div().w(px(110.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone()))
-                    .child(div().w(px(76.)).text_right().text_xs().text_color(theme.muted_foreground).child(time))
-                    .child(div().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(short)),
-            )
-            .context_menu(move |menu, _window, _cx| {
+            .when(self.settings.appearance.show_avatars, |d| d.child(avatar(&commit.author, px(22.), cx)))
+            .child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone()))
+            .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(theme.muted_foreground).child(time))
+            .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(short))
+            .context_menu(move |menu, _window, cx| {
                 let v = view.clone();
                 let id = menu_id.clone();
-                crate::commit_menu::build(menu, v, id)
+                let selected = v.read(cx).multi_select.clone();
+                if selected.len() > 1 && selected.contains(&id) {
+                    crate::commit_menu::build_multi(menu, v, selected.len())
+                } else {
+                    crate::commit_menu::build(menu, v, id)
+                }
             })
             .into_any_element()
     }
@@ -216,6 +284,9 @@ impl RepoView {
                 .into_any_element();
         }
         let count = self.commits.len();
+        let lanes = self.rows.iter().take(80).map(|r| r.width).max().unwrap_or(1).min(12);
+        let graph_header_w = (GRAPH_PAD * 2. + (lanes.max(1) - 1) as f32 * LANE_W + 4.).max(52.);
+        self.graph_w = graph_header_w;
         let list = uniform_list(
             "history-list",
             count,
@@ -235,38 +306,70 @@ impl RepoView {
                     .h_full()
                     .child(
                         hstack()
-                            .h(px(28.))
-                            .px_3()
+                            .flex_wrap()
+                            .px_4()
+                            .py(px(10.))
                             .gap_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(crate::widgets::plural("history.commits_shown", count))
-                            .child(div().w(px(260.)).child(gpui_kit::component::input::Input::new(&self.search).xsmall().prefix(icon(IconName::Search).xsmall())))
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(if self.settings.graph.first_parent { tr("history.first_parent_title") } else { tr("history.all_branches") }))
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("history.commits_shown", count)))
+                            .child(div().w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
                             .child(spacer())
-                            .child(
-                                Button::new("first-parent")
-                                    .xsmall()
-                                    .ghost()
-                                    .label(tr("history.first_parent"))
-                                    .selected(self.settings.graph.first_parent)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings.graph.first_parent = !this.settings.graph.first_parent;
-                                        this.reload(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("show-remotes")
-                                    .xsmall()
-                                    .ghost()
-                                    .label(tr("history.show_remotes"))
-                                    .selected(self.settings.graph.show_remotes)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings.graph.show_remotes = !this.settings.graph.show_remotes;
-                                        this.reload(cx);
-                                    })),
-                            ),
+                            .child(toggle_pill("toggle-graph", tr("history.graph"), self.show_graph, cx).on_click(cx.listener(|this, _, _, cx| {
+                                this.show_graph = !this.show_graph;
+                                cx.notify();
+                            })))
+                            .child(toggle_pill("first-parent", tr("history.first_parent"), self.settings.graph.first_parent, cx).on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.graph.first_parent = !this.settings.graph.first_parent;
+                                this.reload(cx);
+                            })))
+                            .child(toggle_pill("hide-remotes", tr("history.hide_remotes"), !self.settings.graph.show_remotes, cx).on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.graph.show_remotes = !this.settings.graph.show_remotes;
+                                this.reload(cx);
+                            }))),
+                    )
+                    .when(self.multi_select.len() > 1, |d| {
+                        let n = self.multi_select.len();
+                        d.child(
+                            hstack()
+                                .flex_wrap()
+                                .gap_2()
+                                .px_4()
+                                .py_2()
+                                .bg(theme.primary.opacity(0.10))
+                                .border_b_1()
+                                .border_color(theme.primary.opacity(0.35))
+                                .child(div().size(px(22.)).rounded_full().flex().items_center().justify_center().bg(theme.primary).text_xs().font_weight(FontWeight::BOLD).text_color(theme.primary_foreground).child(n.to_string()))
+                                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("history.selected_n", n = n).to_string()))
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(tr("history.multi_hint")))
+                                .child(spacer())
+                                .child(crate::widgets::framed(Button::new("multi-copy"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::Copy)).label(tr("history.copy_hashes")).on_click(cx.listener(|this, _, window, cx| this.copy_selected_hashes(window, cx))))
+                                .child(crate::widgets::framed(Button::new("multi-pick"), crate::widgets::Tone::Accent, cx).icon(icon(IconName::GitCommitHorizontal)).label(tr("history.cherry_pick_n")).on_click(cx.listener(|this, _, window, cx| this.cherry_pick_selected(window, cx))))
+                                .child(crate::widgets::framed(Button::new("multi-revert"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::Undo2)).label(tr("history.revert_n")).on_click(cx.listener(|this, _, window, cx| this.revert_selected(window, cx))))
+                                .child(Button::new("multi-clear").small().ghost().icon(icon(IconName::X)).tooltip(tr("history.clear_selection")).on_click(cx.listener(|this, _, _, cx| {
+                                    this.multi_select.clear();
+                                    cx.notify();
+                                }))),
+                        )
+                    })
+                    .child(
+                        hstack()
+                            .h(px(30.))
+                            .pl_3()
+                            .pr_4()
+                            .gap(px(10.))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.6))
+                            .when(self.show_graph, |d| d.child(div().w(px(graph_header_w)).whitespace_nowrap().overflow_hidden().child(tr("history.col_graph").to_uppercase())))
+                            .child(div().flex_1().child(tr("history.col_description").to_uppercase()))
+                            .when(self.settings.appearance.show_avatars, |d| d.child(div().w(px(22.))))
+                            .child(div().w(px(110.)).child(tr("history.col_author").to_uppercase()))
+                            .child(div().w(px(76.)).text_right().child(tr("history.col_date").to_uppercase()))
+                            .child(div().w(px(64.)).child(tr("history.col_commit").to_uppercase())),
                     )
                     .child(div().flex_1().min_h_0().child(list)),
             )
@@ -376,6 +479,18 @@ impl RepoView {
                                         }))
                                 })),
                         )
+                    })
+                    .child({
+                        let ahead = self.status.branch.ahead as usize;
+                        let (text, color): (String, Hsla) = match &self.detail_pushed {
+                            Some((remote, true)) => (t!("history.pushed_yes", remote = remote.clone()).to_string(), theme.green),
+                            Some((remote, false)) => (t!("history.pushed_no", n = ahead.max(1), remote = remote.clone()).to_string(), theme.yellow),
+                            None => (t!("history.pushed_local").to_string(), theme.muted_foreground),
+                        };
+                        hstack()
+                            .gap_2()
+                            .child(div().w(px(64.)).text_xs().text_color(theme.muted_foreground).child(tr("history.pushed")))
+                            .child(div().text_xs().text_color(color).child(text))
                     }),
             )
             .child(div().h(px(1.)).bg(theme.border))

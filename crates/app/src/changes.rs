@@ -14,16 +14,20 @@ use rust_i18n::t;
 
 use crate::diff_view::render_file_diff;
 use crate::repo_view::{RepoView, SelectedChange};
-use crate::widgets::{empty_state, hstack, icon, section_label, spacer, status_letter, tr};
+use crate::widgets::{Tone, empty_state, framed, hstack, icon, section_label, spacer, status_letter, tr};
 
 pub(crate) fn hunk_buttons(h: usize, staged: bool, cx: &mut Context<RepoView>) -> impl IntoElement {
+    let theme = cx.theme().clone();
     hstack()
-        .gap_1()
+        .gap_1p5()
         .when(!staged, |d| {
             d.child(
                 Button::new(("discard-hunk", h))
                     .xsmall()
-                    .ghost()
+                    .outline()
+                    .rounded(px(6.))
+                    .border_color(theme.border)
+                    .text_color(theme.red)
                     .label(tr("changes.discard_hunk"))
                     .on_click(cx.listener(move |this, _, window, cx| this.confirm_discard_hunk(h, window, cx))),
             )
@@ -32,6 +36,11 @@ pub(crate) fn hunk_buttons(h: usize, staged: bool, cx: &mut Context<RepoView>) -
             Button::new(("stage-hunk", h))
                 .xsmall()
                 .outline()
+                .rounded(px(6.))
+                .border_color(theme.primary)
+                .bg(theme.primary.opacity(0.14))
+                .text_color(theme.primary)
+                .font_weight(FontWeight::SEMIBOLD)
                 .label(if staged { tr("changes.unstage_hunk") } else { tr("changes.stage_hunk") })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     let Some(diff) = this.change_diff.clone() else { return };
@@ -176,8 +185,19 @@ impl RepoView {
     }
 
     pub(crate) fn suggest_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings.ai.enabled {
+            window.push_notification(gpui_kit::component::notification::Notification::info(tr("changes.ai_off_body")).title(tr("changes.ai_off_title")), cx);
+            crate::settings_dialog::request_category("ai");
+            window.dispatch_action(Box::new(crate::palette::OpenSettings), cx);
+            return;
+        }
+        if self.status.staged().count() == 0 {
+            window.push_notification(gpui_kit::component::notification::Notification::warning(tr("changes.nothing_staged")), cx);
+            return;
+        }
         let git = self.git();
         let settings = self.settings.clone();
+        let repo_rules = std::fs::read_to_string(self.repo.root.join(".cairn").join("commit-message.md")).ok();
         self.busy = Some(tr("changes.writing_message"));
         cx.notify();
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -188,7 +208,7 @@ impl RepoView {
                     if diff.trim().is_empty() {
                         return Err(t!("changes.nothing_staged").to_string());
                     }
-                    crate::ai::commit_message(&settings, &diff)
+                    crate::ai::commit_message(&settings, &diff, repo_rules.as_deref())
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -279,20 +299,20 @@ impl RepoView {
             .items_center()
             .gap_2()
             .px_2()
-            .h(px(28.))
-            .rounded(px(5.))
+            .py(px(6.))
+            .rounded(px(6.))
             .cursor_pointer()
             .when(selected, |d| d.bg(theme.list_active))
             .when(!selected, |d| d.hover(|s| s.bg(cx.theme().list_hover)))
             .on_click(cx.listener(move |this, _, _, cx| this.select_change(change.clone(), cx)))
             .child(status_letter(letter, cx))
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .child(h_flex().child(name).child(div().ml_1p5().text_xs().text_color(theme.muted_foreground).child(dir))),
+                    .gap(px(1.))
+                    .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
+                    .when(!dir.is_empty(), |d| d.child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(dir.trim_end_matches('/').to_string()))),
             )
             .child(
                 div()
@@ -393,9 +413,11 @@ impl RepoView {
                                 .on_click(cx.listener(move |this, _, window, cx| this.confirm_discard_files(discard_all.clone(), window, cx))),
                         )
                         .child(
-                            Button::new("stage-all")
-                                .xsmall()
-                                .ghost()
+                            crate::widgets::framed(Button::new("stage-all"), crate::widgets::Tone::Plain, cx)
+                                .h(px(26.))
+                                .px_2()
+                                .text_xs()
+                                .icon(icon(IconName::Plus))
                                 .label(tr("changes.stage_all"))
                                 .on_click(cx.listener(move |this, _, window, cx| this.stage_paths(all_unstaged_paths.clone(), false, window, cx))),
                         )
@@ -413,9 +435,11 @@ impl RepoView {
                     .child(spacer())
                     .when(!staged.is_empty(), |d| {
                         d.child(
-                            Button::new("unstage-all")
-                                .xsmall()
-                                .ghost()
+                            crate::widgets::framed(Button::new("unstage-all"), crate::widgets::Tone::Plain, cx)
+                                .h(px(26.))
+                                .px_2()
+                                .text_xs()
+                                .icon(icon(IconName::Minus))
                                 .label(tr("changes.unstage_all"))
                                 .on_click(cx.listener(move |this, _, window, cx| this.stage_paths(all_staged_paths.clone(), true, window, cx))),
                         )
@@ -435,50 +459,76 @@ impl RepoView {
         let too_long = self.settings.commits.warn_long_summary && summary_len > limit;
         let can_commit = (staged > 0 || self.amend) && summary_len > 0 && self.busy.is_none();
         let amend = self.amend;
+        let sign = self.settings.commits.sign;
+        let field_label = |text: SharedString, cx: &App| div().text_xs().text_color(cx.theme().muted_foreground).child(text);
         v_flex()
-            .gap_2()
-            .p_3()
-            .border_t_1()
-            .border_color(theme.border)
+            .size_full()
+            .gap_3()
+            .p_4()
             .bg(theme.sidebar)
             .child(
                 hstack()
                     .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("changes.commit_title")))
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("changes.commit_title")))
                     .child(spacer())
-                    .when(self.settings.ai.enabled && self.settings.commits.ai_messages != cairn_core::settings::AiSuggest::Never, |d| {
-                        d.child(
-                            Button::new("ai-message")
-                                .xsmall()
-                                .ghost()
-                                .icon(icon(IconName::Sparkles))
-                                .label(tr("changes.write_message"))
-                                .disabled(staged == 0 || self.busy.is_some())
-                                .on_click(cx.listener(|this, _, window, cx| this.suggest_message(window, cx))),
-                        )
-                    })
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("changes.staged_files", staged))),
+            )
+            .when(self.settings.commits.ai_messages != cairn_core::settings::AiSuggest::Never, |d| {
+                d.child(
+                    framed(Button::new("ai-message"), Tone::Ai, cx)
+                        .w_full()
+                        .h(px(34.))
+                        .icon(icon(IconName::Sparkles))
+                        .label(tr("changes.write_message"))
+                        .tooltip(tr("changes.write_message_tip"))
+                        .disabled(self.busy.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| this.suggest_message(window, cx))),
+                )
+            })
+            .child(
+                v_flex()
+                    .gap_1p5()
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(if too_long { theme.red } else { theme.muted_foreground })
-                            .child(format!("{summary_len}/{limit}")),
+                        hstack()
+                            .child(field_label(tr("changes.summary_label"), cx))
+                            .child(spacer())
+                            .child(div().text_xs().text_color(if too_long { theme.red } else { theme.muted_foreground }).child(format!("{summary_len}/{limit}"))),
+                    )
+                    .child(Input::new(&self.summary)),
+            )
+            .child(v_flex().gap_1p5().child(field_label(tr("changes.description_label"), cx)).child(Textarea::new(&self.body)))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p(px(10.))
+                    .rounded(px(8.))
+                    .bg(theme.secondary)
+                    .child(
+                        Switch::new("amend")
+                            .small()
+                            .checked(amend)
+                            .label(tr("changes.amend"))
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_amend(window, cx))),
+                    )
+                    .child(
+                        Switch::new("sign")
+                            .small()
+                            .checked(sign)
+                            .label(tr("changes.sign_commit"))
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                this.settings.commits.sign = *on;
+                                cx.notify();
+                            })),
                     ),
             )
-            .child(Input::new(&self.summary))
-            .child(Textarea::new(&self.body))
-            .child(
-                Switch::new("amend")
-                    .checked(amend)
-                    .label(tr("changes.amend"))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_amend(window, cx))),
-            )
+            .child(div().flex_1())
             .child(
                 hstack()
                     .gap_2()
                     .child(
-                        Button::new("commit")
+                        framed(Button::new("commit"), Tone::Accent, cx)
                             .flex_1()
-                            .primary()
+                            .h(px(36.))
                             .icon(icon(IconName::Check))
                             .label(if amend {
                                 tr("changes.amend_button")
@@ -489,9 +539,8 @@ impl RepoView {
                             .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
                     )
                     .child(
-                        Button::new("commit-push")
-                            .outline()
-                            .icon(icon(IconName::ArrowUpToLine))
+                        framed(Button::new("commit-push"), Tone::Plain, cx)
+                            .h(px(36.))
                             .label(tr("changes.commit_push"))
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
@@ -568,7 +617,14 @@ impl RepoView {
                             })
                             .when(sel_count == 0 && !untracked, |d| {
                                 d.child(div().text_xs().text_color(theme.muted_foreground).child(tr("changes.click_lines_hint")))
-                            }),
+                            })
+                            .child(
+                                crate::widgets::toggle_pill("ignore-ws", tr("changes.ignore_whitespace"), self.settings.diffs.ignore_whitespace, cx).on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings.diffs.ignore_whitespace = !this.settings.diffs.ignore_whitespace;
+                                    this.line_selection.clear();
+                                    this.load_change_diff(cx);
+                                })),
+                            ),
                     )
                     .child(div().flex_1().min_h_0().child(render_file_diff("change-diff", &diff, Some(&self.line_selection), &self.settings, window, cx)))
                     .into_any_element()
@@ -582,15 +638,23 @@ impl RepoView {
             .child(
                 v_flex()
                     .flex_none()
-                    .w(px(340.))
+                    .w(px(280.))
                     .h_full()
                     .border_r_1()
                     .border_color(theme.border)
                     .bg(theme.sidebar)
-                    .child(div().flex_1().min_h_0().child(self.render_file_list(cx)))
-                    .child(self.render_commit_box(cx)),
+                    .child(div().flex_1().min_h_0().child(self.render_file_list(cx))),
             )
             .child(div().flex_1().min_w_0().h_full().child(diff_panel))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(330.))
+                    .h_full()
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .child(self.render_commit_box(cx)),
+            )
             .into_any_element()
     }
 }

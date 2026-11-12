@@ -5,6 +5,51 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
+A fresh look that follows the Cairn design, plus a few long-requested extras.
+
+### Changed
+
+- New toolbar: repository and branch buttons, a big "Search or run a command" box, and framed
+  Undo, Ask AI, Fetch, Pull and Push buttons with counts.
+- The interface now uses the Inter font, bundled with Cairn.
+- Taller page tabs with colored counts, and a sidebar that shows each repository's changes and
+  the open repository's branches, worktrees and stashes.
+- History has column headers, roomier rows, Graph / First parent / Hide remotes toggles and a
+  "Pushed" line in the commit details.
+- Changes has three columns: files, diff and a commit panel with Ignore whitespace and
+  per-commit signing.
+- Interactive rebase shows a preview of the result, colored actions and the undo history with
+  Restore buttons right next to it.
+- The category workspace shows each repository's state, the files in a linked change and a
+  "Ship this change" panel with the push order.
+- A redesigned Settings window with section icons, cards, theme previews and accent swatches.
+- A modern conflict editor: clickable Ours / Base / Theirs cards, a progress bar per conflict,
+  Previous / Next, a result card with its status and a bottom bar for whole-file choices.
+- Branches, Absorb & split, Bisect, Line history, Ask AI and repository settings were rebuilt
+  with cards, icon tiles and the new framed buttons.
+- Rounder, taller buttons and inputs across the whole app, and a cleaner title bar.
+
+### Added
+
+- Select several commits in History with Ctrl+click or Shift+click, then copy their hashes,
+  cherry-pick them or revert them in one go. They are applied in the order they were made.
+
+- "Check now" in Settings → Updates.
+- Your own instructions for AI commit messages in Settings → Commits, plus a shared
+  `.cairn/commit-message.md` per repository. "Write message from diff" is always visible and
+  explains how to turn AI on when it is off.
+- Skip commit during a rebase, with the current step shown in the banner.
+- Bisect results can be opened in History, explained by AI or reverted in one click.
+- Line history lets you step through older and newer versions of a line.
+- Press ? for a keyboard shortcut map, also in the command palette.
+- "Add branch on top" on the Stack page.
+
+### Fixed
+
+- The "What's new" window no longer shows an empty section for unreleased changes.
+
 ## [0.1.1] - 2026-11-12
 
 ### Fixed

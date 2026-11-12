@@ -1,5 +1,6 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
@@ -56,10 +57,179 @@ pub(crate) fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
         .px_2()
         .pt_3()
         .pb_1()
-        .text_xs()
+        .text_size(px(11.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(cx.theme().muted_foreground)
         .child(text.into().to_uppercase())
+}
+
+/// A rounded, bordered panel that groups related rows, as on the Branches page.
+///
+/// # Returns
+/// The empty card; add a `card_header` and rows as children.
+pub(crate) fn card(cx: &App) -> Div {
+    let t = cx.theme();
+    v_flex().w_full().rounded(px(12.)).border_1().border_color(t.border).bg(t.sidebar).overflow_hidden()
+}
+
+/// The header strip of a `card`: an icon, a title, an optional count and room for actions.
+///
+/// # Arguments
+/// * `ic` - icon shown before the title
+/// * `title` - card title
+/// * `count` - shown as a chip after the title when set
+///
+/// # Returns
+/// The header row; add buttons as children to put them on the right.
+pub(crate) fn card_header(ic: IconName, title: impl Into<SharedString>, count: Option<usize>, cx: &App) -> Div {
+    let t = cx.theme();
+    h_flex()
+        .h(px(44.))
+        .px(px(14.))
+        .gap_2()
+        .items_center()
+        .border_b_1()
+        .border_color(t.border)
+        .child(icon(ic).small().text_color(t.muted_foreground))
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title.into()))
+        .when_some(count, |d, n| d.child(count_chip(n.to_string(), t.secondary, t.muted_foreground)))
+        .child(div().flex_1())
+}
+
+/// A square tinted tile holding an icon, used at the start of list rows.
+///
+/// # Arguments
+/// * `ic` - the icon
+/// * `color` - tint for the icon and its background
+///
+/// # Returns
+/// The 30 px tile.
+pub(crate) fn icon_tile(ic: IconName, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .size(px(30.))
+        .rounded(px(8.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(color.opacity(0.14))
+        .child(icon(ic).small().text_color(color))
+}
+
+/// A page title with a muted subtitle underneath, used at the top of each repository page.
+///
+/// # Arguments
+/// * `title` - the page title
+/// * `subtitle` - one line explaining the page or summarising its contents
+///
+/// # Returns
+/// The heading block.
+pub(crate) fn page_heading(title: impl Into<SharedString>, subtitle: impl Into<SharedString>, cx: &App) -> Div {
+    v_flex()
+        .gap_0p5()
+        .child(div().text_xl().font_weight(FontWeight::BOLD).child(title.into()))
+        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(subtitle.into()))
+}
+
+/// How a framed toolbar button is colored.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tone {
+    Plain,
+    Accent,
+    Ai,
+}
+
+/// Styles a button as the design's framed 32 px toolbar button.
+///
+/// # Arguments
+/// * `button` - the button to style
+/// * `tone` - plain, accent (the main action) or AI
+///
+/// # Returns
+/// The styled button.
+pub(crate) fn framed(button: gpui_kit::component::button::Button, tone: Tone, cx: &App) -> gpui_kit::component::button::Button {
+    use gpui_kit::component::button::ButtonVariants as _;
+    let t = cx.theme();
+    let (bg, border, fg) = match tone {
+        Tone::Plain => (t.secondary, t.border, t.foreground),
+        Tone::Accent => (t.primary, t.primary, t.primary_foreground),
+        Tone::Ai => (t.magenta.opacity(0.12), t.magenta.opacity(0.4), t.magenta),
+    };
+    let base = match tone {
+        Tone::Accent => button.primary(),
+        _ => button.outline(),
+    };
+    let styled = base.h(px(32.)).px(px(10.)).rounded(px(8.)).border_1().border_color(border).bg(bg).text_color(fg).text_sm();
+    if tone == Tone::Plain { styled.font_weight(FontWeight::MEDIUM) } else { styled.font_weight(FontWeight::SEMIBOLD) }
+}
+
+/// A small rounded count chip, as on the Push button and page tabs.
+///
+/// # Arguments
+/// * `text` - the count
+/// * `bg` - chip background
+/// * `fg` - chip text color
+///
+/// # Returns
+/// The chip element.
+pub(crate) fn count_chip(text: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
+    div()
+        .flex_none()
+        .px(px(6.))
+        .rounded(px(9.))
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .bg(bg)
+        .text_color(fg)
+        .child(text.into())
+}
+
+/// A two-state filter button, as in the History header.
+///
+/// # Arguments
+/// * `id` - element id
+/// * `label` - button text
+/// * `on` - whether the filter is active
+///
+/// # Returns
+/// The button; the caller adds `on_click`.
+pub(crate) fn toggle_pill(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, cx: &App) -> Stateful<Div> {
+    let t = cx.theme();
+    let hover = t.list_hover;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(28.))
+        .px(px(10.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(t.border)
+        .text_xs()
+        .cursor_pointer()
+        .when(on, |d| d.bg(t.primary.opacity(0.14)).text_color(t.primary).font_weight(FontWeight::MEDIUM))
+        .when(!on, |d| d.text_color(t.muted_foreground).hover(move |s| s.bg(hover)))
+        .child(label.into())
+}
+
+/// The design's uppercase, letter-spaced section heading with an optional count on the right.
+///
+/// # Arguments
+/// * `text` - heading text
+/// * `count` - shown on the right when set
+///
+/// # Returns
+/// The heading element.
+pub(crate) fn caps_heading(text: impl Into<SharedString>, count: Option<usize>, cx: &App) -> Div {
+    h_flex()
+        .px_2()
+        .pb_1()
+        .justify_between()
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into().to_uppercase())
+        .when_some(count, |d, n| d.child(n.to_string()))
 }
 
 pub(crate) fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
@@ -67,7 +237,7 @@ pub(crate) fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
         .flex_none()
         .px(px(6.))
         .py(px(1.))
-        .rounded(px(4.))
+        .rounded(px(9.))
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
         .bg(color.opacity(0.16))

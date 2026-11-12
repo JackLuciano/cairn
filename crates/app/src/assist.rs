@@ -1,5 +1,5 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -8,7 +8,7 @@ use rust_i18n::t;
 
 use crate::ai::{self, Finding, Question};
 use crate::repo_view::RepoView;
-use crate::widgets::{badge, hstack, icon, spacer, tr};
+use crate::widgets::{Tone, badge, framed, hstack, icon, icon_tile, spacer, tr};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -133,14 +133,27 @@ enum Outcome {
 impl Render for AssistPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let tab_button = |id: &'static str, tab: Tab, label: &str, cx: &mut Context<Self>| {
-            let b = Button::new(id).small().label(tr(label)).on_click(cx.listener(move |this, _, _, cx| {
-                this.tab = tab;
-                this.answer = None;
-                this.error = None;
-                cx.notify();
-            }));
-            if self.tab == tab { b.primary() } else { b.ghost() }
+        let current = self.tab;
+        let tab_button = |id: &'static str, tab: Tab, ic: IconName, label: &str, cx: &mut Context<Self>| {
+            let on = current == tab;
+            let hover = theme.list_hover;
+            hstack()
+                .id(id)
+                .gap_2p5()
+                .h(px(40.))
+                .px_2()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(theme.magenta.opacity(0.12)).text_color(theme.magenta).font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |d| d.hover(move |s| s.bg(hover)))
+                .child(icon_tile(ic, if on { theme.magenta } else { theme.muted_foreground }).size(px(26.)))
+                .child(div().text_sm().truncate().child(tr(label)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.tab = tab;
+                    this.answer = None;
+                    this.error = None;
+                    cx.notify();
+                }))
         };
         let (title, desc) = match self.tab {
             Tab::Explain => ("assist.explain", "assist.explain_desc"),
@@ -151,10 +164,26 @@ impl Render for AssistPanel {
         };
         let mut body = v_flex().gap_2();
         if let Some(e) = self.error.clone() {
-            body = body.child(div().p_3().rounded(px(8.)).bg(theme.red.opacity(0.1)).text_sm().text_color(theme.red).child(e));
+            body = body.child(hstack().items_start().gap_2().p_3().rounded(px(10.)).border_1().border_color(theme.red.opacity(0.4)).bg(theme.red.opacity(0.08)).text_sm().text_color(theme.red).child(icon(IconName::TriangleAlert).small()).child(div().flex_1().child(e)));
         }
         if let Some(a) = self.answer.clone() {
-            body = body.child(div().p_3().rounded(px(8.)).bg(theme.muted).text_sm().whitespace_normal().child(a));
+            body = body.child(div().p_4().rounded(px(12.)).border_1().border_color(theme.border).bg(theme.sidebar).text_sm().whitespace_normal().child(a));
+        }
+        let idle = self.error.is_none() && self.answer.is_none() && self.findings.is_empty() && self.pr.is_none() && !self.running;
+        if idle && self.tab != Tab::Review {
+            body = body.child(
+                v_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .h(px(200.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme.border)
+                    .child(icon_tile(IconName::Sparkles, theme.magenta))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(tr("assist.idle"))),
+            );
         }
         if self.tab == Tab::Review {
             if self.findings.is_empty() && !self.running && self.error.is_none() && self.answer.is_none() {
@@ -192,8 +221,8 @@ impl Render for AssistPanel {
                             d.child(
                                 hstack()
                                     .gap_2()
-                                    .when(has_fix, |d| d.child(Button::new(("apply-fix", i)).xsmall().primary().label(tr("assist.apply_fix")).on_click(cx.listener(move |this, _, window, cx| this.apply_fix(i, window, cx)))))
-                                    .child(Button::new(("dismiss", i)).xsmall().ghost().label(tr("assist.dismiss")).on_click(cx.listener(move |this, _, _, cx| {
+                                    .when(has_fix, |d| d.child(framed(Button::new(("apply-fix", i)), Tone::Accent, cx).h(px(28.)).icon(icon(IconName::Check)).label(tr("assist.apply_fix")).on_click(cx.listener(move |this, _, window, cx| this.apply_fix(i, window, cx)))))
+                                    .child(framed(Button::new(("dismiss", i)), Tone::Plain, cx).h(px(28.)).label(tr("assist.dismiss")).on_click(cx.listener(move |this, _, _, cx| {
                                         if let Some((_, d)) = this.findings.get_mut(i) {
                                             *d = Some(Done::Dismissed);
                                         }
@@ -217,8 +246,8 @@ impl Render for AssistPanel {
                     hstack()
                         .gap_2()
                         .child(spacer())
-                        .child(Button::new("pr-copy").small().ghost().icon(icon(IconName::Copy)).label(tr("assist.copy")).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
-                        .child(Button::new("pr-create").small().primary().icon(icon(IconName::GitPullRequestCreate)).label(tr("assist.create_pr")).on_click(move |_, window, cx| {
+                        .child(framed(Button::new("pr-copy"), Tone::Plain, cx).icon(icon(IconName::Copy)).label(tr("assist.copy")).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
+                        .child(framed(Button::new("pr-create"), Tone::Accent, cx).icon(icon(IconName::GitPullRequestCreate)).label(tr("assist.create_pr")).on_click(move |_, window, cx| {
                             let (t, b) = (t2.clone(), b2.clone());
                             repo.update(cx, |v, cx| {
                                 let base = v.repo.upstream_or_default().and_then(|u| u.split_once('/').map(|(_, b)| b.to_string())).unwrap_or_else(|| "main".into());
@@ -229,22 +258,38 @@ impl Render for AssistPanel {
                         })),
                 );
         }
-        v_flex()
+        h_flex()
             .w_full()
-            .gap_3()
+            .items_start()
+            .gap_4()
             .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(tab_button("as-explain", Tab::Explain, "assist.explain", cx))
-                    .child(tab_button("as-risk", Tab::Risk, "assist.risk", cx))
-                    .child(tab_button("as-today", Tab::Today, "assist.today", cx))
-                    .child(tab_button("as-review", Tab::Review, "assist.review", cx))
-                    .child(tab_button("as-pr", Tab::PullRequest, "assist.pr", cx)),
+                v_flex()
+                    .flex_none()
+                    .w(px(210.))
+                    .gap_0p5()
+                    .pr_3()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .child(tab_button("as-explain", Tab::Explain, IconName::BookOpen, "assist.explain", cx))
+                    .child(tab_button("as-risk", Tab::Risk, IconName::ShieldAlert, "assist.risk", cx))
+                    .child(tab_button("as-today", Tab::Today, IconName::CalendarDays, "assist.today", cx))
+                    .child(tab_button("as-review", Tab::Review, IconName::ScanSearch, "assist.review", cx))
+                    .child(tab_button("as-pr", Tab::PullRequest, IconName::GitPullRequest, "assist.pr", cx)),
             )
-            .child(v_flex().gap_1().child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr(title))).child(div().text_sm().text_color(theme.muted_foreground).child(tr(desc))))
-            .child(hstack().child(Button::new("assist-run").small().primary().icon(icon(IconName::Sparkles)).label(tr("assist.run")).loading(self.running).disabled(self.running).on_click(cx.listener(|this, _, _, cx| this.run(cx)))))
-            .child(div().id("assist-body").max_h(px(460.)).overflow_y_scroll().child(body))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_3()
+                    .child(
+                        hstack()
+                            .items_start()
+                            .gap_3()
+                            .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_lg().font_weight(FontWeight::BOLD).child(tr(title))).child(div().text_sm().text_color(theme.muted_foreground).child(tr(desc))))
+                            .child(framed(Button::new("assist-run"), Tone::Ai, cx).icon(icon(IconName::Sparkles)).label(tr("assist.run")).loading(self.running).disabled(self.running).on_click(cx.listener(|this, _, _, cx| this.run(cx)))),
+                    )
+                    .child(div().id("assist-body").max_h(px(460.)).overflow_y_scroll().child(body)),
+            )
     }
 }
 
@@ -262,5 +307,5 @@ fn open_now(repo: Entity<RepoView>, window: &mut Window, cx: &mut App) {
         return;
     }
     let panel = cx.new(|_| AssistPanel { repo, tab: Tab::Explain, running: false, answer: None, error: None, findings: Vec::new(), pr: None });
-    window.open_dialog(cx, move |dialog, _, _| dialog.title(tr("assist.title")).w(px(760.)).close_button(true).child(panel.clone()));
+    window.open_dialog(cx, move |dialog, _, _| dialog.title(tr("assist.title")).w(px(820.)).close_button(true).child(panel.clone()));
 }

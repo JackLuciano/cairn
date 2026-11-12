@@ -8,53 +8,69 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::RepoView;
-use crate::widgets::{badge, empty_state, hstack, icon, relative_time, section_label, spacer, tr};
+use crate::widgets::{Tone, card, card_header, count_chip, empty_state, framed, hstack, icon, icon_tile, page_heading, relative_time, spacer, tr};
 
 impl RepoView {
-    fn branch_row(&mut self, b: &Branch, cx: &mut Context<Self>) -> AnyElement {
+    fn branch_row(&mut self, b: &Branch, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let view = cx.entity();
         let name = b.name.clone();
         let remote = b.is_remote;
+        let tint = if b.is_head { theme.primary } else if remote { theme.cyan } else { theme.muted_foreground };
         h_flex()
             .id(SharedString::from(format!("branch-row-{}", b.full_ref)))
             .items_center()
             .gap_3()
-            .px_3()
-            .py_2()
-            .rounded(px(6.))
-            .when(b.is_head, |d| d.bg(theme.list_active))
+            .px(px(14.))
+            .py(px(10.))
+            .when(!first, |d| d.border_t_1().border_color(theme.border))
+            .when(b.is_head, |d| d.bg(theme.primary.opacity(0.08)))
             .when(!b.is_head, |d| d.hover(|s| s.bg(theme.list_hover)))
-            .child(icon(if remote { IconName::Cloud } else { IconName::GitBranch }).small().text_color(if b.is_head { theme.primary } else { theme.muted_foreground }))
+            .child(icon_tile(if remote { IconName::Cloud } else { IconName::GitBranch }, tint))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .gap_0p5()
                     .child(
                         hstack()
                             .gap_2()
-                            .child(div().text_sm().font_weight(if b.is_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL }).font_family(theme.mono_font_family.clone()).child(b.name.clone()))
-                            .when(b.is_head, |d| d.child(badge(tr("branches.current"), theme.primary)))
-                            .when(b.ahead > 0, |d| d.child(badge(format!("↑{}", b.ahead), theme.blue)))
-                            .when(b.behind > 0, |d| d.child(badge(format!("↓{}", b.behind), theme.cyan)))
-                            .when(b.upstream_gone, |d| d.child(badge(tr("branches.gone"), theme.red))),
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).font_family(theme.mono_font_family.clone()).text_color(if b.is_head { theme.primary } else { theme.foreground }).child(b.name.clone()))
+                            .when(b.is_head, |d| d.child(count_chip(tr("branches.current"), theme.primary.opacity(0.18), theme.primary)))
+                            .when(b.ahead > 0, |d| d.child(count_chip(format!("↑{}", b.ahead), theme.blue.opacity(0.16), theme.blue)))
+                            .when(b.behind > 0, |d| d.child(count_chip(format!("↓{}", b.behind), theme.cyan.opacity(0.16), theme.cyan)))
+                            .when(b.upstream_gone, |d| d.child(count_chip(tr("branches.gone"), theme.red.opacity(0.16), theme.red))),
                     )
-                    .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} · {}", relative_time(b.last_commit_time), b.subject))),
+                    .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} · {}", b.subject, relative_time(b.last_commit_time)))),
             )
-            .when_some(b.upstream.clone(), |d, up| d.child(div().text_xs().text_color(theme.muted_foreground).child(format!("→ {up}"))))
+            .when_some(b.upstream.clone(), |d, up| {
+                d.child(
+                    hstack()
+                        .flex_none()
+                        .gap_1()
+                        .h(px(24.))
+                        .px_2()
+                        .rounded(px(6.))
+                        .bg(theme.secondary)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(icon(IconName::Cloud).xsmall())
+                        .child(div().font_family(theme.mono_font_family.clone()).child(up)),
+                )
+            })
             .when(!b.is_head, |d| {
                 let n = name.clone();
                 d.child(
-                    Button::new(SharedString::from(format!("co-{}", b.full_ref)))
-                        .xsmall()
-                        .outline()
+                    framed(Button::new(SharedString::from(format!("co-{}", b.full_ref))), Tone::Plain, cx)
+                        .h(px(28.))
+                        .icon(icon(IconName::LogIn))
                         .label(tr("branches.checkout"))
                         .on_click(cx.listener(move |this, _, window, cx| this.checkout(n.clone(), remote, window, cx))),
                 )
             })
             .child(
                 Button::new(SharedString::from(format!("more-{}", b.full_ref)))
-                    .xsmall()
+                    .small()
                     .ghost()
                     .icon(icon(IconName::Ellipsis))
                     .dropdown_menu(move |menu, _, _| {
@@ -127,46 +143,50 @@ impl RepoView {
             return empty_state(IconName::GitBranch, tr("branches.empty_title"), tr("branches.empty_body"), cx).into_any_element();
         }
         let view = cx.entity();
-        let mut col = v_flex().id("branches-scroll").size_full().overflow_y_scroll().p_4().gap_1();
+        let mut col = v_flex().id("branches-scroll").size_full().overflow_y_scroll().p_5().gap_4();
         col = col.child(
             hstack()
-                .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("page.branches")))
+                .items_start()
+                .child(page_heading(tr("page.branches"), t!("branches.subtitle", local = local.len(), remote = remote.len(), tags = tags.len()).to_string(), cx))
                 .child(spacer())
                 .child(
-                    Button::new("branches-new")
-                        .small()
-                        .primary()
+                    framed(Button::new("branches-new"), Tone::Accent, cx)
                         .icon(icon(IconName::GitBranchPlus))
                         .label(tr("toolbar.new_branch"))
                         .on_click(move |_, window, cx| crate::dialogs::new_branch(view.clone(), None, window, cx)),
                 ),
         );
-        col = col.child(section_label(t!("branches.local", n = local.len()).to_string(), cx).px_0());
-        for b in &local {
-            col = col.child(self.branch_row(b, cx));
+        let mut local_card = card(cx).child(card_header(IconName::GitBranch, tr("branches.local"), Some(local.len()), cx));
+        for (i, b) in local.iter().enumerate() {
+            local_card = local_card.child(self.branch_row(b, i == 0, cx));
         }
+        col = col.child(local_card);
         if !remote.is_empty() {
-            col = col.child(section_label(t!("branches.remote", n = remote.len()).to_string(), cx).px_0());
-            for b in &remote {
-                col = col.child(self.branch_row(b, cx));
+            let mut remote_card = card(cx).child(card_header(IconName::Cloud, tr("branches.remote"), Some(remote.len()), cx));
+            for (i, b) in remote.iter().enumerate() {
+                remote_card = remote_card.child(self.branch_row(b, i == 0, cx));
             }
+            col = col.child(remote_card);
         }
         if !tags.is_empty() {
-            col = col.child(section_label(t!("branches.tags", n = tags.len()).to_string(), cx).px_0());
             let theme = cx.theme().clone();
-            col = col.child(h_flex().flex_wrap().gap_1p5().children(tags.iter().map(|tg| {
+            col = col.child(card(cx).child(card_header(IconName::Tag, tr("branches.tags"), Some(tags.len()), cx)).child(h_flex().flex_wrap().gap_2().p(px(14.)).children(tags.iter().map(|tg| {
                 let name = tg.name.clone();
                 div()
                     .id(SharedString::from(format!("tag-{}", tg.name)))
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(4.))
-                    .bg(theme.yellow.opacity(0.14))
+                    .gap_1p5()
+                    .h(px(28.))
+                    .pl_2p5()
+                    .pr_1()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.yellow.opacity(0.35))
+                    .bg(theme.yellow.opacity(0.1))
                     .text_color(theme.yellow)
-                    .text_xs()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
                     .child(icon(IconName::Tag).xsmall())
                     .child(tg.name.clone())
                     .child(
@@ -180,17 +200,15 @@ impl RepoView {
                                 this.run_op(tr("op.delete_tag"), Some(t!("undo.delete_tag", name = n.clone()).to_string()), move |git| cairn_core::refs::delete_tag(git, &n).map(|_| String::new()), window, cx);
                             })),
                     )
-            })));
+            }))));
         }
         let worktrees = self.worktrees.clone();
         {
             let theme = cx.theme().clone();
             let view = cx.entity();
-            col = col.child(
-                hstack()
-                    .child(section_label(t!("branches.worktrees", n = worktrees.len()).to_string(), cx).px_0())
-                    .child(spacer())
-                    .child(Button::new("wt-new").xsmall().ghost().icon(icon(IconName::Plus)).label(tr("branches.new_worktree")).on_click(move |_, window, cx| {
+            let mut wt_card = card(cx).child(
+                card_header(IconName::Layers, tr("branches.worktrees"), Some(worktrees.len()), cx)
+                    .child(framed(Button::new("wt-new"), Tone::Plain, cx).h(px(28.)).icon(icon(IconName::Plus)).label(tr("branches.new_worktree")).on_click(move |_, window, cx| {
                         let v = view.clone();
                         crate::dialogs::text_prompt(tr("branches.new_worktree"), tr("branches.new_worktree_body"), tr("branch.name_placeholder"), String::new(), tr("branches.create_worktree"), window, cx, move |branch, window, cx| {
                             v.update(cx, |this, cx| {
@@ -207,55 +225,57 @@ impl RepoView {
                         });
                     })),
             );
-            for wt in worktrees.iter() {
+            for (i, wt) in worktrees.iter().enumerate() {
                 let path = wt.path.clone();
                 let p2 = wt.path.clone();
                 let is_main = wt.is_main;
-                col = col.child(
+                wt_card = wt_card.child(
                     hstack()
                         .gap_3()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(6.))
+                        .px(px(14.))
+                        .py(px(10.))
+                        .when(i > 0, |d| d.border_t_1().border_color(theme.border))
                         .hover(|st| st.bg(theme.list_hover))
-                        .child(icon(IconName::Layers).small().text_color(theme.cyan))
-                        .child(v_flex().flex_1().min_w_0().child(div().text_sm().truncate().child(crate::widgets::display_path(&wt.path))).child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(wt.branch.clone().unwrap_or_else(|| wt.head.chars().take(7).collect()))))
-                        .when(is_main, |d| d.child(badge(tr("branches.main_worktree"), theme.muted_foreground)))
+                        .child(icon_tile(IconName::Layers, theme.cyan))
+                        .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(crate::widgets::display_path(&wt.path))).child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(wt.branch.clone().unwrap_or_else(|| wt.head.chars().take(7).collect()))))
+                        .when(is_main, |d| d.child(count_chip(tr("branches.main_worktree"), theme.secondary, theme.muted_foreground)))
                         .when(!is_main, |d| {
-                            d.child(Button::new(SharedString::from(format!("wt-open-{}", wt.path.display()))).xsmall().outline().label(tr("repo.open")).on_click(cx.listener(move |_, _, _, cx| cx.emit(crate::repo_view::OpenRepoEvent(path.clone())))))
-                                .child(Button::new(SharedString::from(format!("wt-rm-{}", wt.path.display()))).xsmall().ghost().icon(icon(IconName::Trash)).tooltip(tr("branches.remove_worktree")).on_click(cx.listener(move |this, _, window, cx| {
+                            d.child(framed(Button::new(SharedString::from(format!("wt-open-{}", wt.path.display()))), Tone::Plain, cx).h(px(28.)).icon(icon(IconName::FolderOpen)).label(tr("repo.open")).on_click(cx.listener(move |_, _, _, cx| cx.emit(crate::repo_view::OpenRepoEvent(path.clone())))))
+                                .child(Button::new(SharedString::from(format!("wt-rm-{}", wt.path.display()))).small().ghost().icon(icon(IconName::Trash)).tooltip(tr("branches.remove_worktree")).on_click(cx.listener(move |this, _, window, cx| {
                                     let p = p2.clone();
                                     this.run_op(tr("op.remove_worktree"), None, move |git| cairn_core::refs::remove_worktree(git, &p, false), window, cx);
                                 })))
                         }),
                 );
             }
+            col = col.child(wt_card);
         }
         if !stashes.is_empty() {
-            col = col.child(section_label(t!("branches.stashes", n = stashes.len()).to_string(), cx).px_0());
             let theme = cx.theme().clone();
-            for s in &stashes {
+            let mut stash_card = card(cx).child(card_header(IconName::Archive, tr("branches.stashes"), Some(stashes.len()), cx));
+            for (i, s) in stashes.iter().enumerate() {
                 let idx = s.index;
-                col = col.child(
+                stash_card = stash_card.child(
                     hstack()
                         .gap_3()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(6.))
+                        .px(px(14.))
+                        .py(px(10.))
+                        .when(i > 0, |d| d.border_t_1().border_color(theme.border))
                         .hover(|st| st.bg(theme.list_hover))
-                        .child(icon(IconName::Archive).small().text_color(theme.magenta))
-                        .child(v_flex().flex_1().min_w_0().child(div().text_sm().truncate().child(s.message.clone())).child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(s.time))))
-                        .child(Button::new(("stash-pop", idx)).xsmall().outline().label(tr("branches.stash_pop")).on_click(cx.listener(move |this, _, window, cx| {
+                        .child(icon_tile(IconName::Archive, theme.magenta))
+                        .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(s.message.clone())).child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(s.time))))
+                        .child(framed(Button::new(("stash-pop", idx)), Tone::Plain, cx).h(px(28.)).icon(icon(IconName::RotateCcw)).label(tr("branches.stash_pop")).on_click(cx.listener(move |this, _, window, cx| {
                             this.run_op(tr("op.stash_pop"), None, move |git| cairn_core::refs::stash_apply(git, idx, true).map(|_| String::new()), window, cx);
                         })))
-                        .child(Button::new(("stash-apply", idx)).xsmall().ghost().label(tr("branches.stash_apply")).on_click(cx.listener(move |this, _, window, cx| {
+                        .child(Button::new(("stash-apply", idx)).small().ghost().label(tr("branches.stash_apply")).on_click(cx.listener(move |this, _, window, cx| {
                             this.run_op(tr("op.stash_apply"), None, move |git| cairn_core::refs::stash_apply(git, idx, false).map(|_| String::new()), window, cx);
                         })))
-                        .child(Button::new(("stash-drop", idx)).xsmall().ghost().icon(icon(IconName::Trash)).tooltip(tr("branches.stash_drop")).on_click(cx.listener(move |this, _, window, cx| {
+                        .child(Button::new(("stash-drop", idx)).small().ghost().icon(icon(IconName::Trash)).tooltip(tr("branches.stash_drop")).on_click(cx.listener(move |this, _, window, cx| {
                             this.run_op(tr("op.stash_drop"), None, move |git| cairn_core::refs::stash_drop(git, idx).map(|_| String::new()), window, cx);
                         }))),
                 );
             }
+            col = col.child(stash_card);
         }
         col.into_any_element()
     }
