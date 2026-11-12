@@ -205,8 +205,9 @@ The installer is not code-signed yet, so Windows SmartScreen may ask you to conf
 
 **Requirements**
 
-- Windows 10 or 11. macOS and Linux builds are compiled by the "Build (macOS and Linux)" workflow
-  but are not packaged or tested yet.
+- Windows 10 or 11. Experimental macOS (Apple Silicon and Intel) and Linux x64 builds are attached
+  to each release as `.tar.gz` files: plain binaries, not yet signed and without automatic updates.
+  On macOS run `xattr -d com.apple.quarantine cairn` once after unpacking.
 - [Git](https://git-scm.com/download/win) 2.40 or newer on your `PATH`
 - Optional: the [GitHub CLI](https://cli.github.com) for pull requests (run `gh auth login` once)
 
