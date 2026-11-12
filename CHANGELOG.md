@@ -5,6 +5,27 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-12
+
+A new look for pull requests.
+
+### Changed
+
+- Each pull request opens with a header card: who opened it, where it goes, a ring that fills as
+  reviews, checks and conflicts are sorted out, and tiles for files, commits, lines, checks and
+  approvals.
+- The Overview shows the description as a card and the discussion as a chat, with reviews and
+  pushed commits in between. A side panel says what is still needed and holds the merge button.
+- Descriptions and comments are shown as formatted Markdown.
+- Files changed shows a file type badge and a size bar for each file.
+- When nobody has reviewed a pull request that can be merged, Cairn says so instead of
+  "Everything looks good".
+
+### Fixed
+
+- Repositories cloned with a filter (partial clones) were treated as having no remote, so Pull
+  requests, Fetch and Push did not work in them.
+
 ## [0.3.1] - 2026-11-12
 
 ### Fixed

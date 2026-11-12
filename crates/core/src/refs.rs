@@ -136,15 +136,19 @@ pub fn list_tags(git: &Git) -> Result<Vec<Tag>> {
 /// # Returns
 /// Remotes in configuration order.
 pub fn list_remotes(git: &Git) -> Result<Vec<Remote>> {
-    let out = git.run(["remote", "-v"])?;
+    Ok(parse_remotes(&git.run(["remote", "-v"])?))
+}
+
+fn parse_remotes(out: &str) -> Vec<Remote> {
     let mut remotes: Vec<Remote> = Vec::new();
-    for line in out.lines().filter(|l| l.ends_with("(fetch)")) {
+    for line in out.lines() {
         let mut parts = line.split_whitespace();
-        if let (Some(name), Some(url)) = (parts.next(), parts.next()) {
+        let (Some(name), Some(url)) = (parts.next(), parts.next()) else { continue };
+        if parts.next() == Some("(fetch)") && !remotes.iter().any(|r| r.name == name) {
             remotes.push(Remote { name: name.to_string(), url: url.to_string() });
         }
     }
-    Ok(remotes)
+    remotes
 }
 
 /// Splits git's stash message into what the user wrote and the branch it was made on.
@@ -577,7 +581,17 @@ pub fn is_valid_branch_name(git: &Git, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::stash_title;
+    use super::{parse_remotes, stash_title};
+
+    #[test]
+    fn remotes_parse_with_partial_clone_filters() {
+        let out = "origin\thttps://github.com/acme/server.git (fetch) [blob:none]\norigin\thttps://github.com/acme/server.git (push)\nupstream\tgit@github.com:other/server.git (fetch)\nupstream\tgit@github.com:other/server.git (push)\n";
+        let r = parse_remotes(out);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].name, "origin");
+        assert_eq!(r[0].url, "https://github.com/acme/server.git");
+        assert_eq!(r[1].name, "upstream");
+    }
 
     #[test]
     fn stash_titles_drop_the_branch_prefix() {
