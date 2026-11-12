@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Sizable, TitleBar, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -693,13 +693,14 @@ impl CairnApp {
             )
     }
 
-    fn render_title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let home_active = self.active.is_none();
         let mut tabs = h_flex().h_full().items_end().gap_0p5().ml_2();
         tabs = tabs.child(
             div()
                 .id("tab-home")
+                .occlude()
                 .h(px(30.))
                 .px_3()
                 .flex()
@@ -727,6 +728,7 @@ impl CairnApp {
                 div()
                     .id(("tab", ix))
                     .group("tab")
+                    .occlude()
                     .h(px(30.))
                     .pl_3()
                     .pr_1()
@@ -761,21 +763,47 @@ impl CairnApp {
             );
         }
 
-        TitleBar::new().child(
-            h_flex()
-                .size_full()
+        let maximized = window.is_maximized();
+        let control = |id: &'static str, glyph: IconName, area: WindowControlArea, close: bool, cx: &App| {
+            let theme = cx.theme();
+            div()
+                .id(id)
+                .w(px(46.))
+                .h_full()
+                .flex()
                 .items_center()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .hover(|s| if close { s.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff)) } else { s.bg(theme.list_hover).text_color(theme.foreground) })
+                .window_control_area(area)
+                .child(icon(glyph).small())
+        };
+        h_flex()
+            .id("cairn-title-bar")
+            .flex_none()
+            .w_full()
+            .h(px(36.))
+            .items_center()
+            .bg(theme.title_bar)
+            .border_b_1()
+            .border_color(theme.title_bar_border)
                 .child(
                     hstack()
+                        .id("title-drag-logo")
+                        .h_full()
                         .gap_2()
-                        .pl_2()
+                        .pl_3()
+                        .pr_1()
+                        .window_control_area(WindowControlArea::Drag)
                         .child(logo(px(18.), cx))
                         .child(div().text_sm().font_weight(FontWeight::BOLD).child("Cairn")),
                 )
                 .child(tabs)
-                .child(spacer())
+                .child(div().id("title-drag").flex_1().h_full().window_control_area(WindowControlArea::Drag))
                 .child(
                     hstack()
+                        .id("titlebar-actions")
+                        .occlude()
                         .gap_1()
                         .pr_2()
                         .when_some(self.update_ready.as_ref().map(|(v, _)| v.clone()), |d, v| d.child(crate::updater::update_pill(&v, cx)))
@@ -807,8 +835,10 @@ impl CairnApp {
                                 .tooltip(tr("settings.title"))
                                 .on_click(cx.listener(|this, _, window, cx| crate::settings_dialog::open(cx.entity(), this.settings.clone(), window, cx))),
                         ),
-                ),
-        )
+                )
+                .child(control("win-min", IconName::WindowMinimize, WindowControlArea::Min, false, cx))
+                .child(control("win-max", if maximized { IconName::WindowRestore } else { IconName::WindowMaximize }, WindowControlArea::Max, false, cx))
+                .child(control("win-close", IconName::WindowClose, WindowControlArea::Close, true, cx))
     }
 
     fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1179,7 +1209,7 @@ impl Render for CairnApp {
             .bg(theme.background)
             .text_color(theme.foreground)
             .font_family(theme.font_family.clone())
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 h_flex()
                     .flex_1()
