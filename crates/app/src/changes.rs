@@ -12,46 +12,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
-use crate::diff_view::render_file_diff;
+use crate::diff_view::DiffSource;
 use crate::repo_view::{RepoView, SelectedChange};
 use crate::widgets::{Tone, empty_state, framed, hstack, icon, section_label, spacer, status_letter, tr};
 
-pub(crate) fn hunk_buttons(h: usize, staged: bool, cx: &mut Context<RepoView>) -> impl IntoElement {
-    let theme = cx.theme().clone();
-    hstack()
-        .gap_1p5()
-        .when(!staged, |d| {
-            d.child(
-                Button::new(("discard-hunk", h))
-                    .xsmall()
-                    .outline()
-                    .rounded(px(6.))
-                    .border_color(theme.border)
-                    .text_color(theme.red)
-                    .label(tr("changes.discard_hunk"))
-                    .on_click(cx.listener(move |this, _, window, cx| this.confirm_discard_hunk(h, window, cx))),
-            )
-        })
-        .child(
-            Button::new(("stage-hunk", h))
-                .xsmall()
-                .outline()
-                .rounded(px(6.))
-                .border_color(theme.primary)
-                .bg(theme.primary.opacity(0.14))
-                .text_color(theme.primary)
-                .font_weight(FontWeight::SEMIBOLD)
-                .label(if staged { tr("changes.unstage_hunk") } else { tr("changes.stage_hunk") })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let Some(diff) = this.change_diff.clone() else { return };
-                    let sel = patch::select_hunks(&diff, &[h]);
-                    this.apply_selection(diff, sel, staged, false, window, cx);
-                })),
-        )
-}
-
 impl RepoView {
-    fn apply_selection(&mut self, diff: FileDiff, sel: LineSelection, staged: bool, discard: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply_selection(&mut self, diff: FileDiff, sel: LineSelection, staged: bool, discard: bool, window: &mut Window, cx: &mut Context<Self>) {
         if sel.is_empty() {
             return;
         }
@@ -96,7 +62,7 @@ impl RepoView {
         task.detach();
     }
 
-    fn confirm_discard_hunk(&mut self, h: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_discard_hunk(&mut self, h: usize, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
@@ -548,7 +514,7 @@ impl RepoView {
             )
     }
 
-    pub(crate) fn render_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         if self.status.is_clean() && !self.amend {
             return v_flex()
@@ -626,7 +592,7 @@ impl RepoView {
                                 })),
                             ),
                     )
-                    .child(div().flex_1().min_h_0().child(render_file_diff("change-diff", &diff, Some(&self.line_selection), &self.settings, window, cx)))
+                    .child(div().flex_1().min_h_0().child(self.render_file_diff(DiffSource::Change, &diff, cx)))
                     .into_any_element()
             }
             (Some(_), None) => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),

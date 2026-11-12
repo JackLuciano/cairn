@@ -121,6 +121,8 @@ pub(crate) struct RepoView {
     pub search: Entity<InputState>,
     pub img_mode: u8,
     pub img_amount: f32,
+    pub change_pane: crate::diff_view::DiffPane,
+    pub commit_pane: crate::diff_view::DiffPane,
     pub pending_notice: Option<String>,
     pub rebase: crate::pages::rebase::RebaseState,
     pub absorb: crate::pages::absorb::AbsorbState,
@@ -198,6 +200,8 @@ impl RepoView {
             search,
             img_mode: 0,
             img_amount: 0.5,
+            change_pane: crate::diff_view::DiffPane::new(cx),
+            commit_pane: crate::diff_view::DiffPane::new(cx),
             pending_notice: None,
             rebase: Default::default(),
             absorb: Default::default(),
@@ -317,6 +321,7 @@ impl RepoView {
             _ => {}
         }
         if self.page == Page::Changes {
+            let lines = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_LINES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) } else { 0 };
             let task = cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
                 let _ = this.update(cx, |this, cx| {
@@ -324,6 +329,40 @@ impl RepoView {
                     if let Some(f) = first {
                         this.select_change(SelectedChange { path: f.path.clone(), staged: false, untracked: f.is_untracked() }, cx);
                     }
+                });
+                if lines == 0 {
+                    return;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(diff) = this.change_diff.as_ref() else { return };
+                    let picked: Vec<(usize, usize)> = diff
+                        .hunks
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(h, hunk)| hunk.lines.iter().enumerate().filter(|(_, l)| matches!(l.kind, cairn_core::diff::LineKind::Added | cairn_core::diff::LineKind::Removed)).map(move |(l, _)| (h, l)))
+                        .take(lines)
+                        .collect();
+                    this.line_selection.extend(picked);
+                    cx.notify();
+                });
+            });
+            self._tasks.push(task);
+        }
+        if cfg!(debug_assertions)
+            && self.page == Page::History
+            && let Ok(file) = std::env::var("CAIRN_DEBUG_FILE")
+        {
+            let git = self.git();
+            let task = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                let id = git.run(["log", "-1", "--format=%H", "--", file.as_str()]).map(|s| s.trim().to_string()).unwrap_or_default();
+                if id.is_empty() {
+                    return;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.select_commit(id, cx);
+                    this.open_commit_file(file, cx);
                 });
             });
             self._tasks.push(task);

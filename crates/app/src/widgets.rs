@@ -199,6 +199,8 @@ pub(crate) fn toggle_pill(id: impl Into<ElementId>, label: impl Into<SharedStrin
     div()
         .id(id)
         .flex()
+        .flex_none()
+        .whitespace_nowrap()
         .items_center()
         .h(px(28.))
         .px(px(10.))
