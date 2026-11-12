@@ -32,7 +32,7 @@ use gpui_kit::*;
 rust_i18n::i18n!("locales", fallback = "en");
 
 fn main() {
-    velopack::VelopackApp::build().set_app_user_model_id("dev.cairn.app").run();
+    velopack::VelopackApp::build().run();
     let settings = Settings::load();
     rust_i18n::set_locale(settings.general.language.code());
 
