@@ -23,8 +23,10 @@ impl RepoView {
         }
         self.lfs.loading = true;
         let git = self.git();
-        let with_locks = !self.remotes.is_empty();
-        self.spawn_bg(move || lfs::status(&git, with_locks).unwrap_or_default(), |this, status, _| {
+        self.spawn_bg(move || {
+            let with_locks = cairn_core::refs::list_remotes(&git).map(|r| !r.is_empty()).unwrap_or(false);
+            lfs::status(&git, with_locks).unwrap_or_default()
+        }, |this, status, _| {
             this.lfs.loading = false;
             this.lfs.loaded = true;
             this.lfs.status = status;
