@@ -57,6 +57,7 @@ impl CairnApp {
         cairn_core::git::set_command_logging(app.settings.advanced.log_git_commands);
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
+            crate::window_state::capture(window, cx);
             let Some(app) = weak.upgrade() else { return true };
             let (confirm, busy) = {
                 let a = app.read(cx);
