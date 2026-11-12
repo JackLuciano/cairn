@@ -5,6 +5,26 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-12
+
+A new diff viewer.
+
+### Added
+
+- Syntax highlighting in diffs, a side-by-side layout and long-line wrapping, each with its own
+  switch in Settings → Diffs.
+- Each block of changes has a menu in the gutter to stage, unstage, select or discard it.
+
+### Changed
+
+- Diffs keep their scroll position when the file reloads.
+- Opening a file from a commit in History widens the side panel and wraps long lines, so nothing
+  runs off the screen.
+
+### Fixed
+
+- The History header no longer wraps onto a second line in narrow windows.
+
 ## [0.2.0] - 2026-11-12
 
 A fresh look that follows the Cairn design, plus a few long-requested extras.

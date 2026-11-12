@@ -9,7 +9,7 @@ use rust_i18n::t;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::diff_view::render_file_diff;
+use crate::diff_view::DiffSource;
 use crate::repo_view::RepoView;
 use crate::widgets::{avatar, empty_state, full_time, hstack, icon, lane_color, relative_time, spacer, status_letter, toggle_pill, tr};
 
@@ -306,15 +306,14 @@ impl RepoView {
                     .h_full()
                     .child(
                         hstack()
-                            .flex_wrap()
                             .px_4()
                             .py(px(10.))
                             .gap_2()
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(if self.settings.graph.first_parent { tr("history.first_parent_title") } else { tr("history.all_branches") }))
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("history.commits_shown", count)))
-                            .child(div().w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
+                            .child(div().flex_none().whitespace_nowrap().text_sm().font_weight(FontWeight::SEMIBOLD).child(if self.settings.graph.first_parent { tr("history.first_parent_title") } else { tr("history.all_branches") }))
+                            .child(div().flex_none().whitespace_nowrap().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("history.commits_shown", count)))
+                            .child(div().flex_1().min_w(px(120.)).max_w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
                             .child(spacer())
                             .child(toggle_pill("toggle-graph", tr("history.graph"), self.show_graph, cx).on_click(cx.listener(|this, _, _, cx| {
                                 this.show_graph = !this.show_graph;
@@ -376,7 +375,8 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .w(px(380.))
+                    .when(self.detail_file.is_none(), |d| d.w(px(380.)))
+                    .when(self.detail_file.is_some(), |d| d.w(relative(0.5)).min_w(px(380.)))
                     .h_full()
                     .border_l_1()
                     .border_color(theme.border)
@@ -386,7 +386,7 @@ impl RepoView {
             .into_any_element()
     }
 
-    fn render_commit_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_commit_details(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(d) = self.details.clone() else {
             return div().size_full().child(empty_state(IconName::MousePointerClick, tr("history.pick_title"), tr("history.pick_body"), cx)).into_any_element();
@@ -414,7 +414,7 @@ impl RepoView {
                         )
                         .child(div().min_w_0().truncate().text_sm().font_family(theme.mono_font_family.clone()).child(file.path.clone())),
                 )
-                .child(div().flex_1().min_h_0().child(render_file_diff("commit-file-diff", &file, None, &self.settings, window, cx)))
+                .child(div().flex_1().min_h_0().child(self.render_file_diff(DiffSource::CommitFile, &file, cx)))
                 .into_any_element();
         }
         let short = d.id.chars().take(10).collect::<String>();

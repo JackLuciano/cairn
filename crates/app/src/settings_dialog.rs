@@ -146,6 +146,9 @@ fn schema() -> Vec<Category> {
                 rows: vec![
                     row("highlight", "settings.highlight", Some("settings.highlight_desc"), Control::Choice(&["opt.words", "opt.lines"], |s| (s.diffs.highlight == DiffHighlight::Lines) as usize, |s, i| s.diffs.highlight = if i == 1 { DiffHighlight::Lines } else { DiffHighlight::Words })),
                     row("context", "settings.context_lines", None, Control::Number(|s| f64::from(s.diffs.context_lines), |s, v| s.diffs.context_lines = v as u32, 0., 20., 1., "unit.lines")),
+                    row("diff_layout", "settings.diff_layout", Some("settings.diff_layout_desc"), Control::Choice(&["opt.unified", "opt.split"], |s| (s.diffs.layout == DiffLayout::Split) as usize, |s, i| s.diffs.layout = if i == 1 { DiffLayout::Split } else { DiffLayout::Unified })),
+                    row("syntax", "settings.syntax_highlighting", None, Control::Toggle(|s| s.diffs.syntax_highlighting, |s, v| s.diffs.syntax_highlighting = v)),
+                    row("wrap_lines", "settings.wrap_lines", Some("settings.wrap_lines_desc"), Control::Toggle(|s| s.diffs.wrap_lines, |s, v| s.diffs.wrap_lines = v)),
                     row("ignore_ws", "settings.ignore_whitespace", None, Control::Toggle(|s| s.diffs.ignore_whitespace, |s, v| s.diffs.ignore_whitespace = v)),
                     row("line_numbers", "settings.line_numbers", None, Control::Toggle(|s| s.diffs.line_numbers, |s, v| s.diffs.line_numbers = v)),
                     row("tab_width", "settings.tab_width", None, Control::Number(|s| f64::from(s.diffs.tab_width), |s, v| s.diffs.tab_width = v as u32, 1., 8., 1., "unit.spaces")),
