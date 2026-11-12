@@ -58,7 +58,7 @@ pub(crate) struct PullsState {
 
 impl PullsState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<RepoView>) -> Self {
-        let reply = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 10).placeholder(tr("pulls.reply_placeholder")));
+        let reply = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 10).placeholder(tr("pulls.reply_placeholder")));
         let sub = cx.subscribe(&reply, |_, _, _: &InputEvent, cx| cx.notify());
         let mock = cfg!(debug_assertions) && std::env::var("CAIRN_DEBUG_MOCK_PRS").is_ok();
         let tab = match std::env::var("CAIRN_DEBUG_PR_TAB").as_deref() {
@@ -88,6 +88,18 @@ impl PullsState {
             _sub: sub,
         }
     }
+}
+
+/// Where a pull request stands on its way to being merged.
+struct Readiness {
+    done: usize,
+    ready: bool,
+    tint: Hsla,
+    can_merge: bool,
+    review: (IconName, Hsla, SharedString, SharedString),
+    checks: (IconName, Hsla, SharedString, SharedString),
+    merge: (IconName, Hsla, SharedString, SharedString),
+    next: SharedString,
 }
 
 fn iso_time(s: &str) -> i64 {
@@ -131,15 +143,62 @@ fn state_color(state: &str, cx: &App) -> Hsla {
     }
 }
 
+/// Renders GitHub Markdown text, or nothing when it is blank.
+///
+/// # Arguments
+/// * `id` - element id, unique on the page
+/// * `text` - the Markdown source
+///
+/// # Returns
+/// The rendered text, or `None` for an empty body.
+fn markdown(id: impl Into<ElementId>, text: &str) -> Option<AnyElement> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| gpui_kit::component::text::TextView::markdown(id, text.to_string()).w_full().into_any_element())
+}
+
+fn hash_color(text: &str, cx: &App) -> Hsla {
+    lane_color(text.bytes().fold(7usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)), cx)
+}
+
 fn label_chip(name: &str, cx: &App) -> Div {
-    let hash = name.bytes().fold(7usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
-    let c = lane_color(hash, cx);
+    let c = hash_color(name, cx);
     div().flex_none().px(px(8.)).h(px(20.)).flex().items_center().rounded(px(10.)).text_xs().font_weight(FontWeight::MEDIUM).bg(c.opacity(0.16)).border_1().border_color(c.opacity(0.4)).text_color(c).child(name.to_string())
 }
 
 fn branch_chip(name: &str, cx: &App) -> Div {
     let t = cx.theme();
-    div().flex_none().px(px(6.)).rounded(px(5.)).bg(t.primary.opacity(0.12)).text_color(t.primary).font_family(t.mono_font_family.clone()).text_xs().child(name.to_string())
+    hstack()
+        .flex_none()
+        .gap_1()
+        .px(px(8.))
+        .h(px(22.))
+        .rounded(px(6.))
+        .bg(t.background.opacity(0.6))
+        .border_1()
+        .border_color(t.border)
+        .font_family(t.mono_font_family.clone())
+        .text_xs()
+        .child(icon(IconName::GitBranch).xsmall().text_color(t.magenta))
+        .child(name.to_string())
+}
+
+fn ext_badge(path: &str, cx: &App) -> Div {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let ext = name.rsplit_once('.').map(|(_, e)| e).filter(|e| !e.is_empty() && e.len() <= 4).unwrap_or("·");
+    let c = hash_color(ext, cx);
+    div()
+        .flex_none()
+        .w(px(30.))
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(c.opacity(0.16))
+        .text_color(c)
+        .text_size(px(9.))
+        .font_weight(FontWeight::BOLD)
+        .child(ext.to_uppercase())
 }
 
 /// A donut ring that fills clockwise, with text in the middle.
@@ -155,6 +214,7 @@ fn branch_chip(name: &str, cx: &App) -> Div {
 fn ring(amount: f32, color: Hsla, size: f32, center: SharedString, cx: &App) -> Div {
     let track = cx.theme().muted;
     let amount = amount.clamp(0., 1.);
+    let stroke = (size / 10.).max(4.);
     div()
         .relative()
         .flex_none()
@@ -162,10 +222,10 @@ fn ring(amount: f32, color: Hsla, size: f32, center: SharedString, cx: &App) -> 
         .child(
             canvas(|_, _, _| {}, move |bounds, _, window, _| {
                 let c = bounds.center();
-                let r = bounds.size.width.min(bounds.size.height) / 2. - px(4.);
+                let r = bounds.size.width.min(bounds.size.height) / 2. - px(stroke);
                 let arc = |from: f32, to: f32, color: Hsla, window: &mut Window| {
-                    let steps = ((to - from) * 64.).ceil().max(2.) as usize;
-                    let mut path = PathBuilder::stroke(px(5.));
+                    let steps = ((to - from) * 96.).ceil().max(2.) as usize;
+                    let mut path = PathBuilder::stroke(px(stroke));
                     for i in 0..=steps {
                         let t = from + (to - from) * i as f32 / steps as f32;
                         let a = t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
@@ -188,7 +248,7 @@ fn ring(amount: f32, color: Hsla, size: f32, center: SharedString, cx: &App) -> 
             .absolute()
             .inset_0(),
         )
-        .child(div().absolute().inset_0().flex().items_center().justify_center().text_xs().font_weight(FontWeight::BOLD).text_color(color).child(center))
+        .child(div().absolute().inset_0().flex().items_center().justify_center().text_size(px(size / 4.2)).font_weight(FontWeight::BOLD).text_color(color).child(center))
 }
 
 fn stacked_avatars(names: &[String], cx: &App) -> Div {
@@ -209,9 +269,37 @@ fn diffstat(add: u32, del: u32, cx: &App) -> Div {
         .gap_1p5()
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
-        .child(div().text_color(t.green).child(format!("+{add}")))
-        .child(div().text_color(t.red).child(format!("−{del}")))
+        .child(div().text_color(t.green).child(format!("+{}", thousands(add))))
+        .child(div().text_color(t.red).child(format!("−{}", thousands(del))))
         .child(h_flex().gap(px(2.)).children((0..5).map(|i| div().size(px(8.)).rounded(px(2.)).bg(if i < greens { t.green } else if add + del > 0 { t.red } else { t.muted }))))
+}
+
+fn thousands(n: u32) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn stat_tile(ic: IconName, value: impl IntoElement, label: SharedString, cx: &App) -> Div {
+    let t = cx.theme();
+    v_flex()
+        .flex_none()
+        .min_w(px(112.))
+        .gap_0p5()
+        .px_3()
+        .py_2()
+        .rounded(px(10.))
+        .bg(t.background.opacity(0.55))
+        .border_1()
+        .border_color(t.border.opacity(0.7))
+        .child(div().text_lg().font_weight(FontWeight::BOLD).child(value))
+        .child(hstack().gap_1().text_xs().text_color(t.muted_foreground).child(icon(ic).xsmall()).child(label))
 }
 
 /// Asks for a comment and leaves it on one line of the open pull request's diff.
@@ -249,11 +337,11 @@ impl RepoView {
         if self.pulls.loading {
             return;
         }
+        let wanted = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_PR").ok().and_then(|v| v.parse::<u64>().ok()) } else { None };
         if self.pulls.mock {
             self.pulls.loaded = true;
             self.pulls.me = Some(crate::pages::pulls_mock::ME.into());
             self.pulls.list = crate::pages::pulls_mock::mock_prs().into_iter().map(|m| m.details.pr).collect();
-            let wanted = std::env::var("CAIRN_DEBUG_PR").ok().and_then(|v| v.parse::<u64>().ok());
             if self.pulls.selected.is_none()
                 && let Some(n) = wanted.or_else(|| self.pulls.list.first().map(|p| p.number))
             {
@@ -275,14 +363,14 @@ impl RepoView {
                 })?;
                 Ok((list, stack::gh_account(&git)))
             },
-            |this, result, cx| {
+            move |this, result, cx| {
                 this.pulls.loading = false;
                 this.pulls.loaded = true;
                 match result {
                     Ok((list, me)) => {
                         this.pulls.error = None;
                         this.pulls.me = me;
-                        let keep = this.pulls.selected.filter(|n| list.iter().any(|p| p.number == *n));
+                        let keep = this.pulls.selected.or(wanted).filter(|n| list.iter().any(|p| p.number == *n));
                         let first = keep.or_else(|| list.first().map(|p| p.number));
                         this.pulls.list = list;
                         if let Some(n) = first
@@ -426,6 +514,89 @@ impl RepoView {
             .collect()
     }
 
+    fn readiness(&self, d: &PrDetails, cx: &App) -> Readiness {
+        let theme = cx.theme();
+        let me = self.pulls.me.clone().unwrap_or_default();
+        let approved: Vec<String> = d.reviewers.iter().filter(|r| r.state == "APPROVED").map(|r| r.login.clone()).collect();
+        let changes: Vec<String> = d.reviewers.iter().filter(|r| r.state == "CHANGES_REQUESTED").map(|r| r.login.clone()).collect();
+        let pending: Vec<String> = d.reviewers.iter().filter(|r| r.state == "PENDING").map(|r| r.login.clone()).collect();
+        let (rev_ic, rev_color, rev_title) = if !changes.is_empty() {
+            (IconName::TriangleAlert, theme.red, tr("pulls.status_changes"))
+        } else if !approved.is_empty() && pending.is_empty() {
+            (IconName::CircleCheck, theme.green, tr("pulls.status_approved"))
+        } else if d.reviewers.is_empty() {
+            (IconName::CircleDot, theme.yellow, tr("pulls.status_no_reviews"))
+        } else {
+            (IconName::CircleDot, theme.yellow, tr("pulls.status_review_needed"))
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if !approved.is_empty() {
+            parts.push(t!("pulls.approved_by", who = approved.join(", ")).to_string());
+        }
+        if !changes.is_empty() {
+            parts.push(t!("pulls.changes_by", who = changes.join(", ")).to_string());
+        }
+        if !pending.is_empty() {
+            parts.push(t!("pulls.waiting_for", who = pending.join(", ")).to_string());
+        }
+        if parts.is_empty() {
+            parts.push(t!("pulls.no_reviewers_body").to_string());
+        }
+        let (cstate, passed, total) = checks_state(&d.pr);
+        let failed = d.pr.checks.iter().filter(|c| c.state() == "failed").count();
+        let (chk_ic, chk_title): (IconName, SharedString) = match cstate {
+            "passed" => (IconName::CircleCheck, tr("pulls.checks_passed")),
+            "failed" => (IconName::CircleX, crate::widgets::plural("pulls.checks_failed", failed).into()),
+            "running" => (IconName::LoaderCircle, tr("pulls.checks_running")),
+            _ => (IconName::CircleDot, tr("pulls.checks_none")),
+        };
+        let chk_detail: SharedString = if total == 0 { tr("pulls.checks_none_body") } else { t!("pulls.checks_count", passed = passed, total = total).to_string().into() };
+        let (merge_ic, merge_color, merge_title, merge_detail, can_merge): (IconName, Hsla, SharedString, SharedString, bool) = match d.merge_state.as_str() {
+            "CLEAN" | "HAS_HOOKS" => (IconName::GitMerge, theme.green, tr("pulls.merge_clean"), t!("pulls.merge_clean_body", base = d.pr.base.clone()).to_string().into(), true),
+            "BEHIND" => (IconName::ArrowDownToLine, theme.yellow, tr("pulls.merge_behind"), t!("pulls.merge_behind_body", base = d.pr.base.clone()).to_string().into(), false),
+            "DIRTY" => (IconName::GitMerge, theme.red, tr("pulls.merge_conflicts"), t!("pulls.merge_conflicts_body", base = d.pr.base.clone()).to_string().into(), false),
+            "DRAFT" => (IconName::Pencil, theme.muted_foreground, tr("pulls.merge_draft"), tr("pulls.merge_draft_body"), false),
+            "UNSTABLE" => (IconName::TriangleAlert, theme.yellow, tr("pulls.merge_unstable"), tr("pulls.merge_unstable_body"), true),
+            _ => (IconName::Lock, theme.yellow, tr("pulls.merge_blocked"), tr("pulls.merge_blocked_body"), false),
+        };
+        let rev_ok = changes.is_empty() && !approved.is_empty() && pending.is_empty();
+        let chk_ok = matches!(cstate, "passed" | "none");
+        let done = [rev_ok, chk_ok, can_merge].iter().filter(|b| **b).count();
+        let ready = done == 3 && !d.pr.is_draft;
+        let tint = if ready {
+            theme.green
+        } else if cstate == "failed" || !changes.is_empty() || d.merge_state == "DIRTY" {
+            theme.red
+        } else if d.pr.is_draft {
+            theme.muted_foreground
+        } else {
+            theme.yellow
+        };
+        let next: SharedString = if d.pr.is_draft {
+            if d.author == me { tr("pulls.next_mark_ready") } else { tr("pulls.next_draft") }
+        } else if pending.contains(&me) {
+            tr("pulls.next_your_review")
+        } else if cstate == "failed" {
+            tr("pulls.next_fix_checks")
+        } else if can_merge && approved.is_empty() {
+            tr("pulls.next_merge_unreviewed")
+        } else if can_merge {
+            tr("pulls.next_merge")
+        } else {
+            tr("pulls.next_wait")
+        };
+        Readiness {
+            done,
+            ready,
+            tint,
+            can_merge,
+            review: (rev_ic, rev_color, rev_title, parts.join(" · ").into()),
+            checks: (chk_ic, state_color(cstate, cx), chk_title, chk_detail),
+            merge: (merge_ic, merge_color, merge_title, merge_detail),
+            next,
+        }
+    }
+
     fn render_pr_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let me = self.pulls.me.clone().unwrap_or_default();
@@ -435,7 +606,7 @@ impl RepoView {
             (PrFilter::Mine, "pulls.filter_mine", self.pulls.list.iter().filter(|p| p.author == me).count()),
             (PrFilter::Drafts, "pulls.filter_drafts", self.pulls.list.iter().filter(|p| p.is_draft).count()),
         ];
-        let mut filters = h_flex().flex_wrap().gap_1p5().px_3().pb_2();
+        let mut filters = h_flex().flex_wrap().gap_1p5().px_3().pb_3();
         for (f, label, n) in counts {
             let on = self.pulls.filter == f;
             filters = filters.child(
@@ -445,7 +616,7 @@ impl RepoView {
                 })),
             );
         }
-        let mut list = v_flex().gap_0p5().p_1();
+        let mut list = v_flex().gap_1p5().p_2();
         let shown = self.filtered_pulls();
         if shown.is_empty() {
             list = list.child(div().px_3().py_4().text_sm().text_color(theme.muted_foreground).child(tr("pulls.filter_empty")));
@@ -468,46 +639,44 @@ impl RepoView {
                 theme.blue
             };
             list = list.child(
-                h_flex()
+                v_flex()
                     .id(("pr", p.number as usize))
                     .relative()
-                    .items_start()
-                    .gap_2p5()
+                    .gap_1p5()
                     .pl(px(14.))
-                    .pr_2p5()
+                    .pr_3()
                     .py(px(10.))
-                    .rounded(px(8.))
+                    .rounded(px(12.))
                     .overflow_hidden()
                     .cursor_pointer()
-                    .child(div().absolute().left_0().top(px(8.)).bottom(px(8.)).w(px(3.)).rounded(px(2.)).bg(if on { accent } else { accent.opacity(0.55) }))
-                    .when(on, |d| d.bg(linear_gradient(90., linear_color_stop(accent.opacity(0.14), 0.), linear_color_stop(theme.list_active, 0.6))))
+                    .border_1()
+                    .border_color(if on { accent.opacity(0.5) } else { theme.border.opacity(0.6) })
+                    .bg(if on { theme.list_active } else { theme.background.opacity(0.35) })
+                    .when(on, |d| d.bg(linear_gradient(100., linear_color_stop(accent.opacity(0.18), 0.), linear_color_stop(theme.list_active, 0.7))))
                     .when(!on, |d| d.hover(|s| s.bg(theme.list_hover)))
+                    .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(accent))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_pull(n, cx)))
-                    .child(div().pt(px(2.)).child(icon(IconName::GitPullRequest).small().text_color(if p.is_draft { theme.muted_foreground } else { theme.green })))
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).line_clamp(2).child(p.title.clone()))
-                            .child(
-                                hstack()
-                                    .gap_1p5()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(avatar(&p.author, px(16.), cx))
-                                    .child(div().truncate().child(format!("#{} · {} · {}", p.number, p.author, relative_time(iso_time(&p.created))))),
-                            )
-                            .child(
-                                hstack()
-                                    .gap_1p5()
-                                    .child(crate::widgets::badge(label, color))
-                                    .when(to_review, |d| d.child(crate::widgets::badge(tr("pulls.your_turn"), theme.magenta)))
-                                    .child(spacer())
-                                    .when(!p.review_requests.is_empty(), |d| d.child(stacked_avatars(&p.review_requests, cx)))
-                                    .when(cstate != "none", |d| d.child(div().size(px(8.)).rounded_full().bg(state_color(cstate, cx))))
-                                    .when(p.additions + p.deletions > 0, |d| d.child(div().text_xs().text_color(theme.green).child(format!("+{}", p.additions))).child(div().text_xs().text_color(theme.red).child(format!("−{}", p.deletions)))),
-                            ),
+                        hstack()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(avatar(&p.author, px(18.), cx))
+                            .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(p.author.clone()))
+                            .child(div().child(format!("#{}", p.number)))
+                            .child(spacer())
+                            .child(div().child(relative_time(iso_time(&p.created)))),
+                    )
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).line_clamp(2).child(p.title.clone()))
+                    .child(
+                        hstack()
+                            .gap_1p5()
+                            .child(crate::widgets::badge(label, color))
+                            .when(to_review, |d| d.child(crate::widgets::badge(tr("pulls.your_turn"), theme.magenta)))
+                            .child(spacer())
+                            .when(!p.review_requests.is_empty(), |d| d.child(stacked_avatars(&p.review_requests, cx)))
+                            .when(cstate != "none", |d| d.child(div().size(px(8.)).rounded_full().bg(state_color(cstate, cx))))
+                            .when(p.additions + p.deletions > 0, |d| d.child(div().text_xs().text_color(theme.green).child(format!("+{}", thousands(p.additions)))).child(div().text_xs().text_color(theme.red).child(format!("−{}", thousands(p.deletions))))),
                     ),
             );
         }
@@ -528,77 +697,132 @@ impl RepoView {
                     }))),
             )
             .child(filters)
-            .child(div().id("pr-list").flex_1().min_h_0().overflow_y_scroll().border_t_1().border_color(theme.border).child(list))
+            .child(div().id("pr-list").flex_1().min_h_0().overflow_y_scroll().child(list))
             .into_any_element()
     }
 
-    fn status_row(&self, ic: IconName, color: Hsla, title: SharedString, detail: SharedString, cx: &App) -> Div {
-        let theme = cx.theme();
-        h_flex()
-            .items_start()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .border_t_1()
-            .border_color(theme.border)
-            .child(div().pt(px(1.)).child(icon_tile(ic, color)))
-            .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_xs().text_color(theme.muted_foreground).child(detail)))
+    fn render_hero(&mut self, d: &PrDetails, r: &Readiness, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let number = d.pr.number;
+        let url = d.pr.url.clone();
+        let on_branch = self.current_branch() == Some(d.pr.head.as_str());
+        let (cstate, passed, total) = checks_state(&d.pr);
+        let approvals = d.reviewers.iter().filter(|x| x.state == "APPROVED").count();
+        let state_pill = if d.pr.is_draft {
+            hstack().gap_1().px_2p5().h(px(24.)).rounded(px(12.)).bg(theme.muted_foreground.opacity(0.25)).text_xs().font_weight(FontWeight::SEMIBOLD).child(icon(IconName::Pencil).xsmall()).child(tr("stack.draft"))
+        } else {
+            hstack().gap_1().px_2p5().h(px(24.)).rounded(px(12.)).bg(theme.green).text_color(gpui_kit::white()).text_xs().font_weight(FontWeight::SEMIBOLD).child(icon(IconName::GitPullRequest).xsmall().text_color(gpui_kit::white())).child(tr("pulls.open"))
+        };
+        let ring_caption = if r.ready { tr("pulls.ring_ready") } else { tr("pulls.ring_progress") };
+        v_flex()
+            .m_4()
+            .mb_3()
+            .p_5()
+            .gap_4()
+            .rounded(px(16.))
+            .border_1()
+            .border_color(r.tint.opacity(0.35))
+            .bg(linear_gradient(125., linear_color_stop(r.tint.opacity(0.20), 0.), linear_color_stop(theme.sidebar, 0.6)))
+            .shadow_md()
+            .child(
+                h_flex()
+                    .items_start()
+                    .gap_4()
+                    .child(div().flex_none().p(px(2.)).rounded_full().border_2().border_color(r.tint.opacity(0.6)).child(avatar(&d.author, px(44.), cx)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1p5()
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(state_pill)
+                                    .child(div().font_family(theme.mono_font_family.clone()).child(format!("#{number}")))
+                                    .child(t!("pulls.opened_by", who = d.author.clone(), when = relative_time(iso_time(&d.pr.created)).to_string()).to_string()),
+                            )
+                            .child(div().text_2xl().font_weight(FontWeight::BOLD).child(d.pr.title.clone()))
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(branch_chip(&d.pr.head, cx))
+                                    .child(icon(IconName::ArrowRight).small().text_color(r.tint))
+                                    .child(branch_chip(&d.pr.base, cx))
+                                    .children(d.pr.labels.iter().map(|l| label_chip(l, cx))),
+                            ),
+                    )
+                    .child(v_flex().flex_none().items_center().gap_1().child(ring(r.done as f32 / 3., r.tint, 76., format!("{}/3", r.done).into(), cx)).child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(r.tint).child(ring_caption))),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .items_end()
+                    .gap_2p5()
+                    .child(stat_tile(IconName::Files, thousands(d.pr.changed_files.max(self.pulls.diffs.len() as u32)), tr("pulls.stat_files"), cx))
+                    .child(stat_tile(IconName::GitCommitHorizontal, d.commits.len().to_string(), tr("pulls.stat_commits"), cx))
+                    .child(stat_tile(
+                        IconName::FileDiff,
+                        hstack().gap_2().child(div().text_color(theme.green).child(format!("+{}", thousands(d.pr.additions)))).child(div().text_color(theme.red).child(format!("−{}", thousands(d.pr.deletions)))),
+                        tr("pulls.stat_lines"),
+                        cx,
+                    ))
+                    .child(stat_tile(IconName::ListChecks, div().text_color(state_color(cstate, cx)).child(if total == 0 { "—".to_string() } else { format!("{passed}/{total}") }), tr("pulls.stat_checks"), cx))
+                    .child(stat_tile(IconName::Users, div().text_color(if approvals > 0 { theme.green } else { theme.foreground }).child(format!("{approvals}/{}", d.reviewers.len())), tr("pulls.stat_approvals"), cx))
+                    .child(spacer())
+                    .child(framed_if(Button::new("pr-checkout"), Tone::Plain, !on_branch && self.busy.is_none(), cx).icon(icon(IconName::LogIn)).label(if on_branch { tr("pulls.checked_out") } else { tr("pulls.checkout") }).on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_op(tr("op.checkout_pr"), Some(t!("undo.checkout", name = format!("#{number}")).to_string()), move |git| stack::pr_checkout(git, number), window, cx);
+                    })))
+                    .child(framed(Button::new("pr-web"), Tone::Plain, cx).icon(icon(IconName::ExternalLink)).label(tr("pulls.open_web")).on_click(move |_, _, cx| cx.open_url(&url))),
+            )
+            .into_any_element()
     }
 
-    fn render_merge_card(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tabs(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let tab = self.pulls.tab;
+        let talk = d.conversation.iter().filter(|c| !c.body.trim().is_empty() || c.review_state.as_deref().is_some_and(|s| s != "COMMENTED")).count() + self.pulls.inline.len();
+        let viewed = self.pulls.diffs.iter().filter(|f| self.pulls.viewed.contains(&(d.pr.number, f.path.clone()))).count();
+        let items: [(&'static str, SharedString, String, IconName, PrTab); 4] = [
+            ("pr-tab-conv", tr("pulls.overview"), talk.to_string(), IconName::MessageSquare, PrTab::Conversation),
+            ("pr-tab-files", tr("pulls.files_changed"), format!("{viewed}/{}", self.pulls.diffs.len()), IconName::FileDiff, PrTab::Files),
+            ("pr-tab-commits", tr("pulls.commits"), d.commits.len().to_string(), IconName::GitCommitHorizontal, PrTab::Commits),
+            ("pr-tab-checks", tr("pulls.checks"), d.pr.checks.len().to_string(), IconName::ListChecks, PrTab::Checks),
+        ];
+        let mut group = hstack().p(px(3.)).gap(px(3.)).rounded(px(10.)).bg(theme.secondary).border_1().border_color(theme.border);
+        for (id, label, count, ic, which) in items {
+            let on = tab == which;
+            group = group.child(
+                hstack()
+                    .id(id)
+                    .gap_1p5()
+                    .h(px(30.))
+                    .px(px(12.))
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(on, |d| d.bg(theme.background).shadow_sm().text_color(theme.foreground).font_weight(FontWeight::SEMIBOLD))
+                    .when(!on, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
+                    .child(icon(ic).small().when(on, |i| i.text_color(theme.primary)))
+                    .child(label)
+                    .child(div().px(px(6.)).rounded(px(8.)).text_xs().bg(if on { theme.primary.opacity(0.15) } else { theme.muted }).text_color(if on { theme.primary } else { theme.muted_foreground }).child(count))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pulls.tab = which;
+                        cx.notify();
+                    })),
+            );
+        }
+        hstack().px_4().pb_3().child(group).child(spacer()).child(diffstat(d.pr.additions, d.pr.deletions, cx)).into_any_element()
+    }
+
+    fn render_checklist(&mut self, d: &PrDetails, r: &Readiness, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let me = self.pulls.me.clone().unwrap_or_default();
-        let approved: Vec<String> = d.reviewers.iter().filter(|r| r.state == "APPROVED").map(|r| r.login.clone()).collect();
-        let changes: Vec<String> = d.reviewers.iter().filter(|r| r.state == "CHANGES_REQUESTED").map(|r| r.login.clone()).collect();
-        let pending: Vec<String> = d.reviewers.iter().filter(|r| r.state == "PENDING").map(|r| r.login.clone()).collect();
-        let waiting_on_me = pending.contains(&me);
-        let (rev_ic, rev_color, rev_title) = if !changes.is_empty() {
-            (IconName::TriangleAlert, theme.red, tr("pulls.status_changes"))
-        } else if !approved.is_empty() && pending.is_empty() {
-            (IconName::CircleCheck, theme.green, tr("pulls.status_approved"))
-        } else {
-            (IconName::CircleDot, theme.yellow, tr("pulls.status_review_needed"))
-        };
-        let mut parts: Vec<String> = Vec::new();
-        if !approved.is_empty() {
-            parts.push(t!("pulls.approved_by", who = approved.join(", ")).to_string());
-        }
-        if !changes.is_empty() {
-            parts.push(t!("pulls.changes_by", who = changes.join(", ")).to_string());
-        }
-        if !pending.is_empty() {
-            parts.push(t!("pulls.waiting_for", who = pending.join(", ")).to_string());
-        }
-        if parts.is_empty() {
-            parts.push(t!("pulls.no_reviewers").to_string());
-        }
-        let (cstate, passed, total) = checks_state(&d.pr);
-        let (chk_ic, chk_title) = match cstate {
-            "passed" => (IconName::CircleCheck, tr("pulls.checks_passed")),
-            "failed" => (IconName::CircleX, crate::widgets::plural("pulls.checks_failed", d.pr.checks.iter().filter(|c| c.state() == "failed").count()).into()),
-            "running" => (IconName::LoaderCircle, tr("pulls.checks_running")),
-            _ => (IconName::CircleDot, tr("pulls.checks_none")),
-        };
-        let chk_detail: SharedString = if total == 0 { tr("pulls.checks_none_body") } else { t!("pulls.checks_count", passed = passed, total = total).to_string().into() };
-        let (merge_ic, merge_color, merge_title, merge_detail, can_merge): (IconName, Hsla, SharedString, SharedString, bool) = match d.merge_state.as_str() {
-            "CLEAN" | "HAS_HOOKS" => (IconName::GitMerge, theme.green, tr("pulls.merge_clean"), t!("pulls.merge_clean_body", base = d.pr.base.clone()).to_string().into(), true),
-            "BEHIND" => (IconName::ArrowDownToLine, theme.yellow, tr("pulls.merge_behind"), t!("pulls.merge_behind_body", base = d.pr.base.clone()).to_string().into(), false),
-            "DIRTY" => (IconName::GitMerge, theme.red, tr("pulls.merge_conflicts"), t!("pulls.merge_conflicts_body", base = d.pr.base.clone()).to_string().into(), false),
-            "DRAFT" => (IconName::Pencil, theme.muted_foreground, tr("pulls.merge_draft"), tr("pulls.merge_draft_body"), false),
-            "UNSTABLE" => (IconName::TriangleAlert, theme.yellow, tr("pulls.merge_unstable"), tr("pulls.merge_unstable_body"), true),
-            _ => (IconName::Lock, theme.yellow, tr("pulls.merge_blocked"), tr("pulls.merge_blocked_body"), false),
-        };
-        let next: SharedString = if d.pr.is_draft {
-            if d.author == me { tr("pulls.next_mark_ready") } else { tr("pulls.next_draft") }
-        } else if waiting_on_me {
-            tr("pulls.next_your_review")
-        } else if cstate == "failed" {
-            tr("pulls.next_fix_checks")
-        } else if can_merge {
-            tr("pulls.next_merge")
-        } else {
-            tr("pulls.next_wait")
-        };
         let number = d.pr.number;
         let method = self.pulls.method;
         let method_label = match method {
@@ -608,136 +832,119 @@ impl RepoView {
         };
         let busy = self.pulls.sending;
         let view = cx.entity();
-        let footer = if d.pr.is_draft {
+        let row = |item: &(IconName, Hsla, SharedString, SharedString), last: bool, cx: &App| {
+            let theme = cx.theme();
+            let (ic, color, title, detail) = item.clone();
             h_flex()
-                .gap_2()
-                .px_4()
-                .py_3()
-                .border_t_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .child(div().flex_1().text_sm().child(next.clone()))
-                .child(framed_if(Button::new("pr-ready"), Tone::Plain, d.author == me && !busy, cx).icon(icon(IconName::Eye)).label(tr("pulls.mark_ready")).on_click(cx.listener(move |this, _, window, cx| {
-                    this.send_pr_action(move |git| stack::pr_ready(git, number), tr("pulls.marked_ready"), window, cx);
-                })))
-        } else {
-            h_flex()
-                .gap_2()
-                .px_4()
-                .py_3()
-                .border_t_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .child(div().flex_1().text_sm().child(next.clone()))
-                .child(
-                    h_flex()
-                        .child(framed_if(Button::new("pr-merge"), Tone::Accent, can_merge && !busy, cx).rounded_r_none().icon(icon(IconName::GitMerge)).label(method_label).on_click(cx.listener(move |this, _, window, cx| {
-                            let method = this.pulls.method;
-                            this.send_pr_action(move |git| stack::pr_merge(git, number, method, true), tr("pulls.merged"), window, cx);
-                        })))
-                        .child(
-                            framed_if(Button::new("pr-merge-method"), Tone::Accent, can_merge && !busy, cx)
-                                .rounded_l_none()
-                                .border_l_1()
-                                .px(px(8.))
-                                .icon(icon(IconName::ChevronDown))
-                                .dropdown_menu(move |menu, _, _| {
-                                    let mut menu = menu;
-                                    for (m, key) in [(MergeMethod::Squash, "pulls.squash_merge"), (MergeMethod::Merge, "pulls.merge_commit"), (MergeMethod::Rebase, "pulls.rebase_merge")] {
-                                        let v = view.clone();
-                                        menu = menu.item(PopupMenuItem::new(t!(key).to_string()).checked(m == method).on_click(move |_, _, cx| {
-                                            v.update(cx, |v, cx| {
-                                                v.pulls.method = m;
-                                                cx.notify();
-                                            })
-                                        }));
-                                    }
-                                    menu
-                                }),
-                        ),
-                )
+                .items_start()
+                .gap_3()
+                .py_2p5()
+                .when(!last, |d| d.border_b_1().border_color(theme.border.opacity(0.6)))
+                .child(div().flex_none().size(px(26.)).rounded_full().bg(color.opacity(0.16)).flex().items_center().justify_center().child(icon(ic).small().text_color(color)))
+                .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_xs().text_color(theme.muted_foreground).child(detail)))
         };
-        let rev_ok = changes.is_empty() && !approved.is_empty() && pending.is_empty();
-        let chk_ok = matches!(cstate, "passed" | "none");
-        let done = [rev_ok, chk_ok, can_merge].iter().filter(|b| **b).count();
-        let ready = done == 3 && !d.pr.is_draft;
-        let tint = if ready { theme.green } else if cstate == "failed" || !changes.is_empty() { theme.red } else if d.pr.is_draft { theme.muted_foreground } else { theme.yellow };
-        let (head_title, head_sub): (SharedString, SharedString) = if ready {
-            (tr("pulls.ready_title"), t!("pulls.ready_body", base = d.pr.base.clone()).to_string().into())
+        let action = if d.pr.is_draft {
+            framed_if(Button::new("pr-ready"), Tone::Plain, d.author == me && !busy, cx).w_full().icon(icon(IconName::Eye)).label(tr("pulls.mark_ready")).on_click(cx.listener(move |this, _, window, cx| {
+                this.send_pr_action(move |git| stack::pr_ready(git, number), tr("pulls.marked_ready"), window, cx);
+            })).into_any_element()
         } else {
-            (tr("pulls.status_title"), t!("pulls.status_progress", n = done).to_string().into())
+            h_flex()
+                .w_full()
+                .child(framed_if(Button::new("pr-merge"), Tone::Accent, r.can_merge && !busy, cx).flex_1().h(px(36.)).rounded_r_none().icon(icon(IconName::GitMerge)).label(method_label).on_click(cx.listener(move |this, _, window, cx| {
+                    let method = this.pulls.method;
+                    this.send_pr_action(move |git| stack::pr_merge(git, number, method, true), tr("pulls.merged"), window, cx);
+                })))
+                .child(
+                    framed_if(Button::new("pr-merge-method"), Tone::Accent, r.can_merge && !busy, cx)
+                        .h(px(36.))
+                        .rounded_l_none()
+                        .border_l_1()
+                        .px(px(8.))
+                        .icon(icon(IconName::ChevronDown))
+                        .dropdown_menu(move |menu, _, _| {
+                            let mut menu = menu;
+                            for (m, key) in [(MergeMethod::Squash, "pulls.squash_merge"), (MergeMethod::Merge, "pulls.merge_commit"), (MergeMethod::Rebase, "pulls.rebase_merge")] {
+                                let v = view.clone();
+                                menu = menu.item(PopupMenuItem::new(t!(key).to_string()).checked(m == method).on_click(move |_, _, cx| {
+                                    v.update(cx, |v, cx| {
+                                        v.pulls.method = m;
+                                        cx.notify();
+                                    })
+                                }));
+                            }
+                            menu
+                        }),
+                )
+                .into_any_element()
         };
         v_flex()
-            .flex_none()
             .rounded(px(14.))
             .border_1()
-            .border_color(tint.opacity(0.45))
+            .border_color(r.tint.opacity(0.4))
             .bg(theme.sidebar)
             .overflow_hidden()
-            .shadow_sm()
             .child(
                 hstack()
-                    .gap_3()
+                    .gap_2()
                     .px_4()
                     .py_3()
-                    .bg(linear_gradient(90., linear_color_stop(tint.opacity(0.22), 0.), linear_color_stop(tint.opacity(0.02), 0.85)))
-                    .child(ring(done as f32 / 3., tint, 48., format!("{done}/3").into(), cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_0p5()
-                            .child(hstack().gap_2().child(div().text_base().font_weight(FontWeight::BOLD).child(head_title)).when(ready, |d| d.child(icon(IconName::Rocket).text_color(theme.green))))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(head_sub)),
-                    ),
+                    .bg(linear_gradient(90., linear_color_stop(r.tint.opacity(0.18), 0.), linear_color_stop(theme.sidebar, 1.)))
+                    .child(icon(if r.ready { IconName::Rocket } else { IconName::ListChecks }).text_color(r.tint))
+                    .child(div().text_sm().font_weight(FontWeight::BOLD).child(if r.ready { tr("pulls.ready_title") } else { tr("pulls.status_title") })),
             )
-            .child(self.status_row(rev_ic, rev_color, rev_title, parts.join(" · ").into(), cx))
-            .child(self.status_row(chk_ic, state_color(cstate, cx), chk_title, chk_detail, cx))
-            .child(self.status_row(merge_ic, merge_color, merge_title, merge_detail, cx))
-            .child(footer)
+            .child(v_flex().px_4().child(row(&r.review, false, cx)).child(row(&r.checks, false, cx)).child(row(&r.merge, true, cx)))
+            .child(v_flex().gap_2().px_4().py_3().border_t_1().border_color(theme.border).bg(theme.background.opacity(0.5)).child(div().text_sm().child(r.next.clone())).child(action))
             .into_any_element()
     }
 
-    fn comment_box(author: &str, when: &str, verb: SharedString, body: &str, badge: Option<(SharedString, Hsla)>, highlight: bool, cx: &App) -> Div {
+    fn bubble(&self, id: impl Into<ElementId>, author: &str, when: &str, body: Option<AnyElement>, extra: Option<AnyElement>, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let empty = body.trim().is_empty();
-        h_flex()
-            .items_start()
-            .gap_3()
-            .child(div().flex_none().rounded_full().bg(theme.background).child(avatar(author, px(32.), cx)))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .rounded(px(10.))
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(if highlight { theme.primary.opacity(0.5) } else { theme.border })
-                    .overflow_hidden()
-                    .child(
-                        hstack()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .bg(if highlight { theme.primary.opacity(0.08) } else { theme.sidebar })
-                            .when(!empty, |d| d.border_b_1().border_color(theme.border))
-                            .text_sm()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(author.to_string()))
-                            .child(div().text_color(theme.muted_foreground).child(verb))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(iso_time(when))))
-                            .child(spacer())
-                            .when_some(badge, |d, (label, color)| d.child(crate::widgets::badge(label, color))),
-                    )
-                    .when(!empty, |d| d.child(div().px_3().py_2p5().text_sm().whitespace_normal().child(body.to_string()))),
-            )
+        let mine = self.pulls.me.as_deref() == Some(author);
+        let tint = hash_color(author, cx);
+        let bubble = v_flex()
+            .id(id)
+            .min_w_0()
+            .flex_shrink(1.)
+            .max_w(px(620.))
+            .gap_1()
+            .px_3p5()
+            .py_2p5()
+            .rounded(px(14.))
+            .when(mine, |d| d.rounded_tr(px(4.)).bg(theme.primary.opacity(0.14)).border_1().border_color(theme.primary.opacity(0.3)))
+            .when(!mine, |d| d.rounded_tl(px(4.)).bg(theme.sidebar).border_1().border_color(theme.border))
+            .child(hstack().gap_2().text_xs().child(div().font_weight(FontWeight::BOLD).text_color(if mine { theme.primary } else { tint }).child(author.to_string())).child(div().text_color(theme.muted_foreground).child(relative_time(iso_time(when)))).children(extra))
+            .children(body.map(|b| div().text_sm().child(b)));
+        if mine {
+            h_flex().w_full().items_start().justify_end().gap_2p5().child(bubble).child(avatar(author, px(30.), cx)).into_any_element()
+        } else {
+            h_flex().w_full().items_start().gap_2p5().child(avatar(author, px(30.), cx)).child(bubble).into_any_element()
+        }
     }
 
-    fn render_pr_conversation(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
+    fn event_pill(&self, ic: IconName, color: Hsla, text: String, _cx: &App) -> AnyElement {
+        h_flex()
+            .w_full()
+            .justify_center()
+            .child(hstack().gap_1p5().px_3().h(px(26.)).rounded(px(13.)).bg(color.opacity(0.12)).border_1().border_color(color.opacity(0.3)).text_xs().font_weight(FontWeight::MEDIUM).text_color(color).child(icon(ic).xsmall().text_color(color)).child(text))
+            .into_any_element()
+    }
+
+    fn render_pr_conversation(&mut self, d: &PrDetails, r: &Readiness, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let sending = self.pulls.sending;
         let has_text = !self.pulls.reply.read(cx).value().trim().is_empty();
+        let me = self.pulls.me.clone().unwrap_or_default();
         let mut main = v_flex().gap_4();
-        main = main.child(self.render_merge_card(d, cx));
-        main = main.child(Self::comment_box(&d.author, &d.pr.created, tr("pulls.opened"), if d.body.trim().is_empty() { "" } else { &d.body }, Some((tr("pulls.author"), theme.muted_foreground)), true, cx));
+        main = main.child(
+            v_flex()
+                .rounded(px(14.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.sidebar)
+                .overflow_hidden()
+                .child(hstack().gap_2().px_4().py_2p5().border_b_1().border_color(theme.border).child(icon(IconName::ScrollText).small().text_color(theme.primary)).child(div().text_sm().font_weight(FontWeight::BOLD).child(tr("pulls.story"))).child(spacer()).child(avatar(&d.author, px(18.), cx)).child(div().text_xs().text_color(theme.muted_foreground).child(d.author.clone())))
+                .child(div().px_4().py_3().text_sm().child(markdown(("pr-body", d.pr.number as usize), &d.body).unwrap_or_else(|| div().text_color(theme.muted_foreground).child(tr("pulls.no_description")).into_any_element()))),
+        );
         enum Item<'a> {
             Comment(&'a PrComment),
             Commits(Vec<&'a stack::PrCommit>),
@@ -767,134 +974,96 @@ impl RepoView {
             items.push((created + 1 + i as i64, Item::Inline(c, i)));
         }
         items.sort_by_key(|(ts, _)| *ts);
-        let mut timeline = v_flex().relative().gap_4().child(div().absolute().left(px(15.)).top(px(8.)).bottom(px(8.)).w(px(2.)).bg(theme.border));
+        main = main.child(hstack().gap_2().pt_1().child(icon(IconName::MessageSquare).small().text_color(theme.muted_foreground)).child(div().text_sm().font_weight(FontWeight::BOLD).child(tr("pulls.discussion"))).child(div().h(px(1.)).flex_1().bg(theme.border)));
+        let mut chat = v_flex().gap_3();
         for (_, item) in items {
-            timeline = timeline.child(match item {
+            match item {
                 Item::Comment(c) => {
-                    let badge = match c.review_state.as_deref() {
-                        Some("APPROVED") => Some((tr("stack.approved"), theme.green)),
-                        Some("CHANGES_REQUESTED") => Some((tr("stack.changes_requested"), theme.yellow)),
-                        _ => None,
-                    };
-                    let verb = match c.review_state.as_deref() {
-                        Some("APPROVED") => tr("pulls.verb_approved"),
-                        Some("CHANGES_REQUESTED") => tr("pulls.verb_changes"),
-                        Some(s) if !s.is_empty() && s != "COMMENTED" => tr("pulls.verb_reviewed"),
-                        _ => tr("pulls.verb_commented"),
-                    };
-                    Self::comment_box(&c.author, &c.created, verb, &c.body, badge, false, cx).into_any_element()
+                    match c.review_state.as_deref() {
+                        Some("APPROVED") => chat = chat.child(self.event_pill(IconName::CircleCheck, theme.green, t!("pulls.event_approved", who = c.author.clone()).to_string(), cx)),
+                        Some("CHANGES_REQUESTED") => chat = chat.child(self.event_pill(IconName::TriangleAlert, theme.red, t!("pulls.event_changes", who = c.author.clone()).to_string(), cx)),
+                        _ => {}
+                    }
+                    if let Some(body) = markdown(SharedString::from(format!("pr-c-{}-{}", c.author, c.created)), &c.body) {
+                        chat = chat.child(self.bubble(SharedString::from(format!("pr-b-{}-{}", c.author, c.created)), &c.author, &c.created, Some(body), None, cx));
+                    }
                 }
                 Item::Commits(list) => {
                     let who = list.first().map(|c| c.author.clone()).unwrap_or_default();
-                    h_flex()
-                        .items_start()
-                        .gap_3()
-                        .child(div().flex_none().w(px(32.)).flex().justify_center().child(div().size(px(24.)).rounded_full().bg(theme.secondary).border_1().border_color(theme.border).flex().items_center().justify_center().child(icon(IconName::GitCommitHorizontal).small().text_color(theme.muted_foreground))))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .gap_1()
-                                .child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural_with("pulls.pushed_commits", list.len(), &who)))
-                                .children(list.iter().map(|c| {
-                                    hstack()
-                                        .gap_2()
-                                        .text_sm()
-                                        .child(avatar(&c.author, px(16.), cx))
-                                        .child(div().flex_1().min_w_0().truncate().child(c.headline.clone()))
-                                        .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(c.oid.chars().take(7).collect::<String>()))
-                                })),
-                        )
-                        .into_any_element()
+                    chat = chat.child(
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.event_pill(IconName::GitCommitHorizontal, theme.muted_foreground, crate::widgets::plural_with("pulls.pushed_commits", list.len(), &who), cx))
+                            .children(list.iter().take(4).map(|c| {
+                                hstack().gap_2().text_xs().text_color(theme.muted_foreground).child(div().font_family(theme.mono_font_family.clone()).child(c.oid.chars().take(7).collect::<String>())).child(div().max_w(px(420.)).truncate().child(c.headline.clone()))
+                            }))
+                            .when(list.len() > 4, |d| d.child(div().text_xs().text_color(theme.muted_foreground).child(format!("+{}", list.len() - 4)))),
+                    );
                 }
                 Item::Inline(c, i) => {
                     let path = c.path.clone();
-                    h_flex()
-                        .items_start()
-                        .gap_3()
-                        .child(div().flex_none().rounded_full().bg(theme.background).child(avatar(&c.author, px(32.), cx)))
-                        .child(
-                            v_flex()
-                                .id(("pr-inline", i))
-                                .bg(theme.background)
-                                .flex_1()
-                                .min_w_0()
-                                .rounded(px(10.))
-                                .border_1()
-                                .border_color(theme.border)
-                                .overflow_hidden()
-                                .cursor_pointer()
-                                .hover(|s| s.border_color(theme.primary.opacity(0.5)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.pulls.tab = PrTab::Files;
-                                    this.pulls.file = Some(path.clone());
-                                    cx.notify();
-                                }))
-                                .child(
-                                    hstack()
-                                        .gap_2()
-                                        .px_3()
-                                        .py_2()
-                                        .bg(theme.sidebar)
-                                        .border_b_1()
-                                        .border_color(theme.border)
-                                        .text_sm()
-                                        .child(div().font_weight(FontWeight::SEMIBOLD).child(c.author.clone()))
-                                        .child(div().text_color(theme.muted_foreground).child(tr("pulls.verb_on_line")))
-                                        .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.link).child(format!("{}:{}", c.path, c.line.map(|l| l.to_string()).unwrap_or_default()))),
-                                )
-                                .child(div().px_3().py_2p5().text_sm().whitespace_normal().child(c.body.clone())),
-                        )
-                        .into_any_element()
+                    let chip = div()
+                        .id(("pr-inline-link", i))
+                        .px(px(6.))
+                        .rounded(px(5.))
+                        .bg(theme.blue.opacity(0.14))
+                        .text_color(theme.blue)
+                        .font_family(theme.mono_font_family.clone())
+                        .cursor_pointer()
+                        .child(format!("{}:{}", c.path.rsplit('/').next().unwrap_or(&c.path), c.line.map(|l| l.to_string()).unwrap_or_default()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pulls.tab = PrTab::Files;
+                            this.pulls.file = Some(path.clone());
+                            cx.notify();
+                        }))
+                        .into_any_element();
+                    chat = chat.child(self.bubble(("pr-inline", i), &c.author, &d.pr.created, markdown(("pr-inline-body", i), &c.body), Some(chip), cx));
                 }
-            });
+            }
         }
-        main = main.child(timeline);
+        main = main.child(chat);
         main = main.child(
-            h_flex()
-                .items_start()
-                .gap_3()
-                .child(avatar(self.pulls.me.as_deref().unwrap_or("?"), px(32.), cx))
+            v_flex()
+                .gap_2()
+                .p_3()
+                .rounded(px(14.))
+                .border_1()
+                .border_color(theme.primary.opacity(0.3))
+                .bg(theme.sidebar)
+                .shadow_sm()
+                .child(hstack().gap_2().child(avatar(if me.is_empty() { "?" } else { &me }, px(20.), cx)).child(div().text_xs().text_color(theme.muted_foreground).child(t!("pulls.reply_as", who = me.clone()).to_string())))
+                .child(Textarea::new(&self.pulls.reply))
                 .child(
-                    v_flex()
-                        .flex_1()
+                    hstack()
                         .gap_2()
-                        .p_3()
-                        .rounded(px(10.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.sidebar)
-                        .child(Textarea::new(&self.pulls.reply))
-                        .child(
-                            hstack()
-                                .gap_2()
-                                .child(div().text_xs().text_color(theme.muted_foreground).child(tr("pulls.reply_hint")))
-                                .child(spacer())
-                                .child(framed_if(Button::new("pr-comment"), Tone::Plain, !sending && has_text, cx).icon(icon(IconName::MessageSquare)).label(tr("pulls.comment")).on_click(cx.listener(|this, _, window, cx| this.review(ReviewVerdict::Comment, window, cx))))
-                                .child(framed_if(Button::new("pr-changes"), Tone::Plain, !sending && has_text, cx).label(tr("pulls.request_changes")).on_click(cx.listener(|this, _, window, cx| this.review(ReviewVerdict::RequestChanges, window, cx))))
-                                .child(framed_if(Button::new("pr-approve"), Tone::Accent, !sending && d.author != self.pulls.me.clone().unwrap_or_default(), cx).icon(icon(IconName::Check)).label(tr("pulls.approve")).on_click(cx.listener(|this, _, window, cx| this.review(ReviewVerdict::Approve, window, cx)))),
-                        ),
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(tr("pulls.reply_hint")))
+                        .child(spacer())
+                        .child(framed_if(Button::new("pr-comment"), Tone::Plain, !sending && has_text, cx).icon(icon(IconName::MessageSquare)).label(tr("pulls.comment")).on_click(cx.listener(|this, _, window, cx| this.review(ReviewVerdict::Comment, window, cx))))
+                        .child(framed_if(Button::new("pr-changes"), Tone::Plain, !sending && has_text, cx).label(tr("pulls.request_changes")).on_click(cx.listener(|this, _, window, cx| this.review(ReviewVerdict::RequestChanges, window, cx))))
+                        .child(framed_if(Button::new("pr-approve"), Tone::Accent, !sending && d.author != me, cx).icon(icon(IconName::Check)).label(tr("pulls.approve")).on_click(cx.listener(|this, _, window, cx| this.review(ReviewVerdict::Approve, window, cx)))),
                 ),
         );
         let side_title = |text: SharedString, cx: &App| div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child(text.to_uppercase());
-        let mut side = v_flex().gap_5();
+        let mut side = v_flex().gap_5().child(self.render_checklist(d, r, cx));
         let mut reviewers = v_flex().gap_2().child(side_title(tr("pulls.reviewers"), cx));
         if d.reviewers.is_empty() {
             reviewers = reviewers.child(div().text_sm().text_color(theme.muted_foreground).child(tr("pulls.no_reviewers")));
         }
-        for r in &d.reviewers {
-            let (ic, label) = match r.state.as_str() {
+        for rv in &d.reviewers {
+            let (ic, label) = match rv.state.as_str() {
                 "APPROVED" => (IconName::CircleCheck, tr("stack.approved")),
                 "CHANGES_REQUESTED" => (IconName::TriangleAlert, tr("stack.changes_requested")),
                 "PENDING" => (IconName::CircleDot, tr("pulls.pending")),
                 _ => (IconName::MessageSquare, tr("pulls.verb_commented")),
             };
-            let color = state_color(&r.state, cx);
+            let color = state_color(&rv.state, cx);
             reviewers = reviewers.child(
                 hstack()
                     .gap_2()
                     .text_sm()
-                    .child(avatar(&r.login, px(20.), cx))
-                    .child(v_flex().flex_1().min_w_0().child(div().truncate().child(r.login.clone())).child(div().text_xs().text_color(color).child(label)))
+                    .child(avatar(&rv.login, px(22.), cx))
+                    .child(v_flex().flex_1().min_w_0().child(div().truncate().child(rv.login.clone())).child(div().text_xs().text_color(color).child(label)))
                     .child(icon(ic).small().text_color(color)),
             );
         }
@@ -904,29 +1073,23 @@ impl RepoView {
             assignees = assignees.child(div().text_sm().text_color(theme.muted_foreground).child(tr("pulls.nobody")));
         }
         for a in &d.assignees {
-            assignees = assignees.child(hstack().gap_2().text_sm().child(avatar(a, px(20.), cx)).child(a.clone()));
+            assignees = assignees.child(hstack().gap_2().text_sm().child(avatar(a, px(22.), cx)).child(a.clone()));
         }
         side = side.child(assignees);
         if !d.pr.labels.is_empty() {
             side = side.child(v_flex().gap_2().child(side_title(tr("pulls.labels"), cx)).child(h_flex().flex_wrap().gap_1p5().children(d.pr.labels.iter().map(|l| label_chip(l, cx)))));
         }
-        side = side.child(
-            v_flex()
-                .gap_2()
-                .child(side_title(tr("pulls.branch"), cx))
-                .child(v_flex().gap_1().child(branch_chip(&d.pr.head, cx)).child(div().text_xs().text_color(theme.muted_foreground).child(t!("pulls.into", base = d.pr.base.clone()).to_string()))),
-        );
         h_flex()
             .size_full()
             .items_start()
-            .child(div().id("pr-conversation").flex_1().min_w_0().h_full().overflow_y_scroll().child(div().max_w(px(860.)).p_5().child(main)))
-            .child(div().id("pr-side").flex_none().w(px(240.)).h_full().overflow_y_scroll().p_5().border_l_1().border_color(theme.border).child(side))
+            .child(div().id("pr-conversation").flex_1().min_w_0().h_full().overflow_y_scroll().child(div().max_w(px(900.)).px_4().pb_6().child(main)))
+            .child(div().id("pr-side").flex_none().w(px(310.)).h_full().overflow_y_scroll().pr_4().pb_6().child(side))
             .into_any_element()
     }
 
     fn render_pr_commits(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let mut col = v_flex().gap_4().p_5().max_w(px(900.));
+        let mut col = v_flex().gap_4().px_4().pb_6().max_w(px(960.));
         let mut day = String::new();
         let mut card: Option<Div> = None;
         for (i, c) in d.commits.iter().enumerate() {
@@ -949,7 +1112,7 @@ impl RepoView {
                 .py(px(10.))
                 .border_t_1()
                 .border_color(theme.border)
-                .child(avatar(&c.author, px(24.), cx))
+                .child(avatar(&c.author, px(26.), cx))
                 .child(v_flex().flex_1().min_w_0().child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(c.headline.clone())).child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} · {}", c.author, relative_time(ts)))))
                 .child(div().px_2().py_0p5().rounded(px(6.)).border_1().border_color(theme.border).text_xs().font_family(theme.mono_font_family.clone()).child(c.oid.chars().take(7).collect::<String>()))
                 .child(Button::new(("pr-commit-copy", i)).xsmall().ghost().icon(icon(IconName::Copy)).tooltip(tr("history.copy_hash")).on_click({
@@ -978,15 +1141,16 @@ impl RepoView {
             return empty_state(IconName::ListChecks, tr("pulls.checks_none"), tr("pulls.checks_none_body"), cx).into_any_element();
         }
         let (cstate, passed, total) = checks_state(&d.pr);
+        let failed = d.pr.checks.iter().filter(|c| c.state() == "failed").count();
         let mut card = crate::widgets::card(cx).child(
             hstack()
                 .gap_3()
                 .px_4()
                 .py_3()
-                .child(icon_tile(if cstate == "passed" { IconName::CircleCheck } else if cstate == "failed" { IconName::CircleX } else { IconName::LoaderCircle }, state_color(cstate, cx)))
+                .child(ring(passed as f32 / total.max(1) as f32, state_color(cstate, cx), 44., format!("{passed}/{total}").into(), cx))
                 .child(v_flex().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(match cstate {
                     "passed" => tr("pulls.checks_passed"),
-                    "failed" => crate::widgets::plural("pulls.checks_failed", d.pr.checks.iter().filter(|c| c.state() == "failed").count()).into(),
+                    "failed" => crate::widgets::plural("pulls.checks_failed", failed).into(),
                     _ => tr("pulls.checks_running"),
                 })).child(div().text_xs().text_color(theme.muted_foreground).child(t!("pulls.checks_count", passed = passed, total = total).to_string()))),
         );
@@ -1008,7 +1172,7 @@ impl RepoView {
             };
             card = card.child(hstack().gap_3().px_4().py(px(10.)).border_t_1().border_color(theme.border).child(icon(ic).small().text_color(color)).child(div().flex_1().text_sm().child(c.name.clone())).child(div().text_xs().text_color(color).child(tr(&format!("stack.state_{st}")))));
         }
-        div().id("pr-checks").size_full().overflow_y_scroll().child(div().p_5().max_w(px(900.)).child(card)).into_any_element()
+        div().id("pr-checks").size_full().overflow_y_scroll().child(div().px_4().pb_6().max_w(px(960.)).child(card)).into_any_element()
     }
 
     fn next_unviewed(&self, number: u64) -> Option<String> {
@@ -1026,7 +1190,8 @@ impl RepoView {
         let number = d.pr.number;
         let viewed_n = self.pulls.diffs.iter().filter(|f| self.pulls.viewed.contains(&(number, f.path.clone()))).count();
         let total = self.pulls.diffs.len();
-        let mut tree = v_flex().gap_0p5().p_1();
+        let biggest = self.pulls.diffs.iter().map(|f| f.stats().0 + f.stats().1).max().unwrap_or(1).max(1);
+        let mut tree = v_flex().gap_0p5().p_1p5();
         let mut last_dir = String::new();
         for (i, f) in self.pulls.diffs.iter().enumerate() {
             let (dir, name) = match f.path.rsplit_once('/') {
@@ -1034,43 +1199,59 @@ impl RepoView {
                 None => (String::new(), f.path.clone()),
             };
             if dir != last_dir && !dir.is_empty() {
-                tree = tree.child(hstack().gap_1p5().px_2().pt_2().pb_0p5().text_xs().text_color(theme.muted_foreground).child(icon(IconName::Folder).xsmall()).child(dir.clone()));
+                tree = tree.child(hstack().gap_1p5().px_2().pt_2p5().pb_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(icon(IconName::FolderOpen).xsmall().text_color(theme.yellow)).child(div().truncate().child(dir.clone())));
             }
             last_dir = dir.clone();
             let on = self.pulls.file.as_deref() == Some(f.path.as_str());
             let seen = self.pulls.viewed.contains(&(number, f.path.clone()));
             let notes = self.pulls.inline.iter().filter(|c| c.path == f.path).count();
             let (a, r) = f.stats();
+            let share = (a + r) as f32 / biggest as f32;
             let path = f.path.clone();
             let path2 = f.path.clone();
             tree = tree.child(
-                hstack()
+                v_flex()
                     .id(("pr-file", i))
-                    .gap_2()
-                    .when(!dir.is_empty(), |d| d.pl(px(20.)))
+                    .gap_1()
+                    .when(!dir.is_empty(), |d| d.pl(px(16.)))
                     .when(dir.is_empty(), |d| d.pl_2())
                     .pr_2()
                     .py(px(6.))
-                    .rounded(px(6.))
+                    .rounded(px(8.))
                     .cursor_pointer()
-                    .when(on, |d| d.bg(theme.list_active))
+                    .when(on, |d| d.bg(theme.list_active).border_1().border_color(theme.primary.opacity(0.35)))
                     .when(!on, |d| d.hover(|s| s.bg(theme.list_hover)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.pulls.file = Some(path.clone());
                         cx.notify();
                     }))
-                    .child(Checkbox::new(("pr-viewed", i)).checked(seen).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                        if *v {
-                            this.pulls.viewed.insert((number, path2.clone()));
-                        } else {
-                            this.pulls.viewed.remove(&(number, path2.clone()));
-                        }
-                        cx.notify();
-                    })))
-                    .child(div().flex_1().min_w_0().truncate().text_sm().when(seen, |d| d.text_color(theme.muted_foreground).line_through()).child(name))
-                    .when(notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.blue).child(icon(IconName::MessageSquare).xsmall()).child(notes.to_string())))
-                    .child(div().text_xs().text_color(theme.green).child(format!("+{a}")))
-                    .child(div().text_xs().text_color(theme.red).child(format!("−{r}"))),
+                    .child(
+                        hstack()
+                            .gap_2()
+                            .child(Checkbox::new(("pr-viewed", i)).checked(seen).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                if *v {
+                                    this.pulls.viewed.insert((number, path2.clone()));
+                                } else {
+                                    this.pulls.viewed.remove(&(number, path2.clone()));
+                                }
+                                cx.notify();
+                            })))
+                            .child(ext_badge(&f.path, cx))
+                            .child(div().flex_1().min_w_0().truncate().text_sm().when(seen, |d| d.text_color(theme.muted_foreground).line_through()).child(name))
+                            .when(notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.blue).child(icon(IconName::MessageSquare).xsmall()).child(notes.to_string())))
+                            .child(div().text_xs().text_color(theme.green).child(format!("+{a}")))
+                            .child(div().text_xs().text_color(theme.red).child(format!("−{r}"))),
+                    )
+                    .child(
+                        h_flex()
+                            .ml(px(26.))
+                            .h(px(3.))
+                            .rounded(px(2.))
+                            .bg(theme.muted.opacity(0.6))
+                            .overflow_hidden()
+                            .child(div().h_full().w(relative(share * (a as f32 / (a + r).max(1) as f32))).bg(theme.green.opacity(0.8)))
+                            .child(div().h_full().w(relative(share * (r as f32 / (a + r).max(1) as f32))).bg(theme.red.opacity(0.8))),
+                    ),
             );
         }
         let progress = h_flex().h(px(6.)).w_full().rounded(px(3.)).bg(theme.muted).overflow_hidden().child(div().h_full().w(relative(viewed_n as f32 / total.max(1) as f32)).rounded(px(3.)).bg(linear_gradient(90., linear_color_stop(theme.cyan, 0.), linear_color_stop(theme.green, 1.))));
@@ -1088,10 +1269,11 @@ impl RepoView {
                         hstack()
                             .gap_3()
                             .px_4()
-                            .h(px(44.))
+                            .h(px(46.))
                             .border_b_1()
                             .border_color(theme.border)
                             .bg(theme.sidebar)
+                            .child(ext_badge(&f.path, cx))
                             .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).font_family(theme.mono_font_family.clone()).child(f.path.clone()))
                             .child(diffstat(a, r, cx))
                             .child(spacer())
@@ -1116,22 +1298,22 @@ impl RepoView {
                     )
                     .when(!notes.is_empty(), |el| {
                         el.child(
-                            v_flex().id("pr-notes").max_h(px(200.)).overflow_y_scroll().gap_2().p_3().border_b_1().border_color(theme.border).children(notes.iter().map(|c| {
+                            v_flex().id("pr-notes").max_h(px(220.)).overflow_y_scroll().gap_2().p_3().border_b_1().border_color(theme.border).children(notes.iter().enumerate().map(|(i, c)| {
                                 h_flex()
                                     .items_start()
                                     .gap_2()
                                     .p_2()
-                                    .rounded(px(8.))
+                                    .rounded(px(10.))
                                     .bg(theme.blue.opacity(0.08))
                                     .border_1()
                                     .border_color(theme.blue.opacity(0.3))
-                                    .child(avatar(&c.author, px(20.), cx))
+                                    .child(avatar(&c.author, px(22.), cx))
                                     .child(
                                         v_flex()
                                             .flex_1()
                                             .gap_0p5()
                                             .child(hstack().gap_2().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(c.author.clone())).child(div().font_family(theme.mono_font_family.clone()).text_color(theme.link).child(c.line.map(|l| t!("pulls.line_n", n = l).to_string()).unwrap_or_default())))
-                                            .child(div().text_sm().whitespace_normal().child(c.body.clone())),
+                                            .children(markdown(("pr-note", i), &c.body).map(|b| div().text_sm().child(b))),
                                     )
                             })),
                         )
@@ -1143,10 +1325,12 @@ impl RepoView {
         };
         h_flex()
             .size_full()
+            .border_t_1()
+            .border_color(theme.border)
             .child(
                 v_flex()
                     .flex_none()
-                    .w(px(300.))
+                    .w(px(320.))
                     .h_full()
                     .bg(theme.sidebar)
                     .border_r_1()
@@ -1187,103 +1371,21 @@ impl RepoView {
             None if self.pulls.selected.is_some() => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
             None => empty_state(IconName::GitPullRequest, tr("pulls.pick_title"), tr("pulls.pick_body"), cx).into_any_element(),
             Some(d) => {
-                let number = d.pr.number;
-                let url = d.pr.url.clone();
-                let on_branch = self.current_branch() == Some(d.pr.head.as_str());
-                let tab = self.pulls.tab;
-                let body = match tab {
-                    PrTab::Conversation => self.render_pr_conversation(&d, cx),
+                let r = self.readiness(&d, cx);
+                let hero = self.render_hero(&d, &r, cx);
+                let tabs = self.render_tabs(&d, cx);
+                let body = match self.pulls.tab {
+                    PrTab::Conversation => self.render_pr_conversation(&d, &r, cx),
                     PrTab::Commits => self.render_pr_commits(&d, cx),
                     PrTab::Checks => self.render_pr_checks(&d, cx),
                     PrTab::Files => self.render_pr_files(&d, cx),
                 };
-                let conv_n = d.conversation.iter().filter(|c| !c.body.trim().is_empty() || c.review_state.as_deref().is_some_and(|s| s != "COMMENTED")).count() + self.pulls.inline.len();
-                let tab_el = |id: &'static str, label: SharedString, n: usize, ic: IconName, which: PrTab, cx: &mut Context<Self>| {
-                    let theme = cx.theme().clone();
-                    let on = tab == which;
-                    div()
-                        .id(id)
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .h(px(40.))
-                        .px_3()
-                        .cursor_pointer()
-                        .text_sm()
-                        .border_b_2()
-                        .border_color(if on { theme.primary } else { theme.transparent })
-                        .text_color(if on { theme.foreground } else { theme.muted_foreground })
-                        .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(icon(ic).small())
-                        .child(label)
-                        .child(count_chip(n.to_string(), theme.secondary, theme.muted_foreground))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pulls.tab = which;
-                            cx.notify();
-                        }))
-                };
-                let state_pill = if d.pr.is_draft {
-                    hstack().gap_1().px_2p5().h(px(26.)).rounded(px(13.)).bg(theme.muted_foreground.opacity(0.25)).text_sm().font_weight(FontWeight::SEMIBOLD).child(icon(IconName::GitPullRequest).small()).child(tr("stack.draft"))
-                } else {
-                    hstack().gap_1().px_2p5().h(px(26.)).rounded(px(13.)).bg(theme.green).text_color(gpui_kit::white()).text_sm().font_weight(FontWeight::SEMIBOLD).child(icon(IconName::GitPullRequest).small().text_color(gpui_kit::white())).child(tr("pulls.open"))
-                };
-                let head_tint = if d.pr.is_draft { theme.muted_foreground } else { theme.green };
-                v_flex()
-                    .size_full()
-                    .child(
-                        v_flex()
-                            .gap_2p5()
-                            .px_5()
-                            .pt_4()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .bg(linear_gradient(180., linear_color_stop(head_tint.opacity(0.10), 0.), linear_color_stop(theme.background.opacity(0.), 1.)))
-                            .child(
-                                hstack()
-                                    .items_start()
-                                    .gap_3()
-                                    .child(h_flex().flex_1().min_w_0().flex_wrap().items_baseline().gap_x_2().text_xl().child(div().font_weight(FontWeight::BOLD).child(d.pr.title.clone())).child(div().text_color(theme.muted_foreground).child(format!("#{number}"))))
-                                    .child(framed_if(Button::new("pr-checkout"), Tone::Plain, !on_branch && self.busy.is_none(), cx).icon(icon(IconName::LogIn)).label(if on_branch { tr("pulls.checked_out") } else { tr("pulls.checkout") }).on_click(cx.listener(move |this, _, window, cx| {
-                                        this.run_op(tr("op.checkout_pr"), Some(t!("undo.checkout", name = format!("#{number}")).to_string()), move |git| stack::pr_checkout(git, number), window, cx);
-                                    })))
-                                    .child(framed(Button::new("pr-web"), Tone::Plain, cx).icon(icon(IconName::ExternalLink)).label(tr("pulls.open_web")).on_click(move |_, _, cx| cx.open_url(&url))),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(state_pill)
-                                    .child(avatar(&d.author, px(20.), cx))
-                                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(d.author.clone()))
-                                    .child(crate::widgets::plural("pulls.wants_n", d.commits.len().max(1)))
-                                    .child(branch_chip(&d.pr.base, cx))
-                                    .child(tr("pulls.from"))
-                                    .child(branch_chip(&d.pr.head, cx))
-                                    .child(div().text_xs().child(format!("· {}", relative_time(iso_time(&d.pr.created)))))
-                                    .children(d.pr.labels.iter().map(|l| label_chip(l, cx))),
-                            )
-                            .child(
-                                hstack()
-                                    .gap_0p5()
-                                    .child(tab_el("pr-tab-conv", tr("pulls.conversation"), conv_n, IconName::MessageSquare, PrTab::Conversation, cx))
-                                    .child(tab_el("pr-tab-commits", tr("pulls.commits"), d.commits.len(), IconName::GitCommitHorizontal, PrTab::Commits, cx))
-                                    .child(tab_el("pr-tab-checks", tr("pulls.checks"), d.pr.checks.len(), IconName::ListChecks, PrTab::Checks, cx))
-                                    .child(tab_el("pr-tab-files", tr("pulls.files_changed"), self.pulls.diffs.len(), IconName::FileDiff, PrTab::Files, cx))
-                                    .child(spacer())
-                                    .child(diffstat(d.pr.additions, d.pr.deletions, cx)),
-                            ),
-                    )
-                    .child(div().flex_1().min_h_0().child(body))
-                    .into_any_element()
+                v_flex().size_full().child(hero).child(tabs).child(div().flex_1().min_h_0().child(body)).into_any_element()
             }
         };
         h_flex()
             .size_full()
-            .child(div().flex_none().w(px(330.)).h_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(list))
+            .child(div().flex_none().w(px(340.)).h_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(list))
             .child(div().flex_1().min_w_0().h_full().child(right))
             .into_any_element()
     }
