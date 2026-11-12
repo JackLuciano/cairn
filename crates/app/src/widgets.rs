@@ -69,7 +69,7 @@ pub(crate) fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
 /// The empty card; add a `card_header` and rows as children.
 pub(crate) fn card(cx: &App) -> Div {
     let t = cx.theme();
-    v_flex().w_full().rounded(px(12.)).border_1().border_color(t.border).bg(t.sidebar).overflow_hidden()
+    v_flex().flex_none().w_full().rounded(px(12.)).border_1().border_color(t.border).bg(t.sidebar).overflow_hidden()
 }
 
 /// The header strip of a `card`: an icon, a title, an optional count and room for actions.
@@ -126,6 +126,7 @@ pub(crate) fn icon_tile(ic: IconName, color: Hsla) -> Div {
 /// The heading block.
 pub(crate) fn page_heading(title: impl Into<SharedString>, subtitle: impl Into<SharedString>, cx: &App) -> Div {
     v_flex()
+        .flex_none()
         .gap_0p5()
         .child(div().text_xl().font_weight(FontWeight::BOLD).child(title.into()))
         .child(div().text_sm().text_color(cx.theme().muted_foreground).child(subtitle.into()))

@@ -5,6 +5,14 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-12
+
+### Fixed
+
+- The Branches page scrolls again when a repository has many branches, instead of squeezing
+  the lists to fit the window. Absorb & split, Bisect, Ask AI and repository settings got the
+  same fix.
+
 ## [0.2.3] - 2026-11-12
 
 ### Added
