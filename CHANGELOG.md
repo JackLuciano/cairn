@@ -5,6 +5,14 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-12
+
+### Fixed
+
+- Cairn now opens where you left it: on the same monitor, at the same position and size, and
+  maximized or fullscreen if it was. If that monitor is no longer connected, it opens centered
+  on your main screen.
+
 ## [0.2.1] - 2026-11-12
 
 A new diff viewer.

@@ -21,6 +21,7 @@ mod updater;
 mod watcher;
 mod whats_new;
 mod widgets;
+mod window_state;
 mod workspace_view;
 
 use cairn_core::settings::Settings;
@@ -48,20 +49,29 @@ fn main() {
         theme::apply(&settings, None, cx);
 
         let hidden = cfg!(debug_assertions) && std::env::var_os("CAIRN_DEBUG_HIDDEN").is_some();
-        let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-        if hidden {
+        let (display_id, window_bounds) = if hidden {
+            let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
             bounds.origin = point(px(-6000.), px(0.));
-        }
+            (None, WindowBounds::Windowed(bounds))
+        } else {
+            window_state::restore(cx)
+        };
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(window_bounds),
+            display_id,
             window_min_size: Some(size(px(960.), px(600.))),
             app_id: Some("dev.cairn.app".into()),
             focus: !hidden,
             ..TitleBar::window_options()
         };
-        gpui_kit::open_window(options, cx, |window, cx| {
+        gpui_kit::open_window(options, cx, move |window, cx| {
             window.set_window_title("Cairn");
-            cx.new(|cx| app::CairnApp::new(window, cx))
+            cx.new(|cx| {
+                if !hidden {
+                    window_state::track(window, cx);
+                }
+                app::CairnApp::new(window, cx)
+            })
         })
         .expect("failed to open the Cairn window");
         if !hidden {
