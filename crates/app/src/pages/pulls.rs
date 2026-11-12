@@ -264,10 +264,9 @@ impl RepoView {
         }
         self.pulls.loading = true;
         let git = self.git();
-        let has_remote = !self.remotes.is_empty();
         self.spawn_bg(
             move || {
-                if !has_remote {
+                if cairn_core::refs::list_remotes(&git).map(|r| r.is_empty()).unwrap_or(true) {
                     return Err(t!("stack.no_remote").to_string());
                 }
                 let list = stack::list_prs(&git).map_err(|e| {

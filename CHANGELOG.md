@@ -5,6 +5,13 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-12
+
+### Fixed
+
+- Pull requests no longer says the repository has no remote when it does. This happened when
+  the page opened before Cairn had finished reading the repository.
+
 ## [0.3.0] - 2026-11-12
 
 Find anything, undo anything, and a calmer History.
