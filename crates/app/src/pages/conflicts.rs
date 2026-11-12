@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use cairn_core::conflicts::{self, Resolution, Segment};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -10,7 +10,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::RepoView;
-use crate::widgets::{badge, empty_state, hstack, icon, spacer, tr};
+use crate::widgets::{empty_state, hstack, icon, spacer, tr};
 
 #[derive(Default)]
 pub(crate) struct ConflictState {
@@ -132,24 +132,41 @@ impl RepoView {
         if files.is_empty() {
             return empty_state(IconName::GitMerge, tr("conflicts.none_title"), tr("conflicts.none_body"), cx).into_any_element();
         }
-        let mut list = v_flex().gap_0p5().p_2();
+        let mut list = v_flex().gap(px(2.)).px_2().pb_2();
         for f in &files {
             let selected = self.conflicts.file.as_deref() == Some(f.as_str());
             let path = f.clone();
+            let (dir, name) = match f.rsplit_once('/') {
+                Some((d, n)) => (d.to_string(), n.to_string()),
+                None => (String::new(), f.clone()),
+            };
+            let state = if selected && !self.conflicts.choices.is_empty() {
+                let done = self.conflicts.choices.iter().filter(|c| c.is_some()).count();
+                t!("conflicts.progress", done = done, total = self.conflicts.choices.len()).to_string()
+            } else {
+                tr("conflicts.open_state").to_string()
+            };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("cf-{f}")))
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap(px(10.))
                     .px_2()
-                    .py_1p5()
-                    .rounded(px(6.))
+                    .py(px(7.))
+                    .rounded(px(8.))
                     .cursor_pointer()
                     .when(selected, |d| d.bg(theme.list_active))
                     .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
-                    .child(div().size(px(8.)).rounded_full().bg(theme.red))
-                    .child(div().flex_1().truncate().text_sm().child(f.clone()))
+                    .child(div().flex_none().size(px(28.)).rounded(px(7.)).flex().items_center().justify_center().bg(theme.red.opacity(0.14)).child(icon(IconName::GitMerge).small().text_color(theme.red)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(1.))
+                            .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
+                            .child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(if dir.is_empty() { state } else { format!("{dir} · {state}") })),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.open_conflict_file(path.clone(), cx))),
             );
         }
@@ -163,145 +180,293 @@ impl RepoView {
                 let current = self.conflicts.choices.get(i).cloned().flatten();
                 let suggestion = self.conflicts.suggestions.get(&i).cloned();
                 let mono = theme.mono_font_family.clone();
-                let pane = |title: SharedString, sub: String, color: Hsla, lines: &[String]| {
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(220.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .overflow_hidden()
-                        .child(hstack().gap_2().px_2().py_1().bg(theme.muted).child(div().size(px(8.)).rounded(px(2.)).bg(color)).child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_xs().text_color(theme.muted_foreground).truncate().child(sub)))
+                let code_line = |text: &str, bar: Option<Hsla>, cx: &App| {
+                    let t = cx.theme();
+                    h_flex()
+                        .min_h(px(22.))
+                        .child(div().flex_none().w(px(3.)).h_full().when_some(bar, |d, c| d.bg(c)))
                         .child(
-                            v_flex()
-                                .py_1()
-                                .text_xs()
-                                .font_family(mono.clone())
-                                .children(before.iter().map(|l| div().px_2().text_color(theme.muted_foreground).child(l.clone())))
-                                .children(lines.iter().map(|l| div().px_2().bg(color.opacity(0.14)).child(l.clone())))
-                                .children(after.iter().map(|l| div().px_2().text_color(theme.muted_foreground).child(l.clone()))),
+                            div()
+                                .flex_1()
+                                .px_3()
+                                .whitespace_nowrap()
+                                .when_some(bar, |d, c| d.bg(c.opacity(0.10)).text_color(t.foreground))
+                                .when(bar.is_none(), |d| d.text_color(t.muted_foreground))
+                                .child(if text.is_empty() { " ".to_string() } else { text.replace('\t', "    ") }),
                         )
                 };
-                let choice = |id: &'static str, label: SharedString, r: Resolution, cx: &mut Context<Self>| {
+                let pane = |id: &'static str, title: SharedString, sub: String, color: Hsla, lines: &[String], pick: Option<Resolution>, cx: &mut Context<Self>| {
+                    let chosen = pick.is_some() && current == pick;
+                    let t = cx.theme().clone();
+                    let mut body = v_flex().py_2().text_xs().font_family(mono.clone());
+                    for l in &before {
+                        body = body.child(code_line(l, None, cx));
+                    }
+                    for l in lines {
+                        body = body.child(code_line(l, Some(color), cx));
+                    }
+                    for l in &after {
+                        body = body.child(code_line(l, None, cx));
+                    }
+                    v_flex()
+                        .id(id)
+                        .flex_1()
+                        .min_w(px(240.))
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(if chosen { color } else { t.border })
+                        .bg(t.sidebar)
+                        .overflow_hidden()
+                        .when(chosen, |d| d.shadow_md())
+                        .when(pick.is_some(), |d| d.cursor_pointer().hover(move |s| s.border_color(color.opacity(0.6))))
+                        .child(
+                            hstack()
+                                .gap_2()
+                                .px_3()
+                                .h(px(38.))
+                                .border_b_1()
+                                .border_color(t.border)
+                                .child(div().size(px(10.)).rounded_full().bg(color))
+                                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
+                                .child(div().text_xs().text_color(t.muted_foreground).truncate().child(sub))
+                                .child(spacer())
+                                .when(chosen, |d| d.child(div().size(px(20.)).rounded_full().flex().items_center().justify_center().bg(color).child(icon(IconName::Check).xsmall().text_color(t.background)))),
+                        )
+                        .child(body)
+                        .when_some(pick, |d, r| {
+                            d.on_click(cx.listener(move |this, _, _, cx| {
+                                let i = this.conflicts.index;
+                                if let Some(c) = this.conflicts.choices.get_mut(i) {
+                                    *c = Some(r.clone());
+                                }
+                                cx.notify();
+                            }))
+                        })
+                };
+                let segment = |id: &'static str, glyph: IconName, label: SharedString, r: Resolution, cx: &mut Context<Self>| {
                     let on = current.as_ref() == Some(&r);
-                    let b = Button::new(id).small().label(label).on_click(cx.listener(move |this, _, _, cx| {
-                        let i = this.conflicts.index;
-                        if let Some(c) = this.conflicts.choices.get_mut(i) {
-                            *c = Some(r.clone());
-                        }
-                        cx.notify();
-                    }));
-                    if on { b.primary() } else { b.outline() }
+                    let t = cx.theme().clone();
+                    let hover = t.list_hover;
+                    div()
+                        .id(id)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(34.))
+                        .px_3()
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .when(on, |d| d.bg(t.primary).text_color(t.primary_foreground).font_weight(FontWeight::SEMIBOLD))
+                        .when(!on, |d| d.text_color(t.foreground).hover(move |s| s.bg(hover)))
+                        .child(icon(glyph).small())
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let i = this.conflicts.index;
+                            if let Some(c) = this.conflicts.choices.get_mut(i) {
+                                *c = Some(r.clone());
+                            }
+                            cx.notify();
+                        }))
                 };
                 let result_lines: Vec<String> = match &current {
                     Some(r) => region.resolve(r),
                     None => Vec::new(),
                 };
-                v_flex()
-                    .id("conflict-main")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .gap_3()
-                    .child(
+                let mut steps = h_flex().gap_1().w_full();
+                for (k, ch) in self.conflicts.choices.iter().enumerate() {
+                    let color = if k == i { theme.primary } else if ch.is_some() { theme.green } else { theme.border };
+                    steps = steps.child(
+                        div()
+                            .id(("cf-step", k))
+                            .flex_1()
+                            .h(px(4.))
+                            .rounded_full()
+                            .bg(color)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.conflicts.index = k;
+                                cx.notify();
+                            })),
+                    );
+                }
+                let all_done = resolved == total;
+                let mut result_body = v_flex().py_2().text_xs().font_family(mono.clone());
+                for l in &before {
+                    result_body = result_body.child(code_line(l, None, cx));
+                }
+                if current.is_some() {
+                    for l in &result_lines {
+                        result_body = result_body.child(code_line(l, Some(theme.green), cx));
+                    }
+                } else {
+                    result_body = result_body.child(
                         hstack()
-                            .gap_2()
-                            .child(div().text_lg().font_weight(FontWeight::BOLD).child(path.clone()))
-                            .child(badge(t!("conflicts.progress", done = resolved, total = total).to_string(), if resolved == total { theme.green } else { theme.yellow }))
-                            .child(spacer())
-                            .child(Button::new("cf-prev").small().ghost().icon(icon(IconName::ChevronLeft)).disabled(i == 0).on_click(cx.listener(|this, _, _, cx| {
-                                this.conflicts.index = this.conflicts.index.saturating_sub(1);
-                                cx.notify();
-                            })))
-                            .child(div().text_sm().child(t!("conflicts.n_of", n = i + 1, total = total).to_string()))
-                            .child(Button::new("cf-next").small().ghost().icon(icon(IconName::ChevronRight)).disabled(i + 1 >= total).on_click(cx.listener(|this, _, _, cx| {
-                                this.conflicts.index = (this.conflicts.index + 1).min(this.conflicts.choices.len().saturating_sub(1));
-                                cx.notify();
-                            }))),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .items_start()
-                            .gap_2()
-                            .child(pane(tr("conflicts.ours"), region.ours_label.clone(), theme.blue, &region.ours))
-                            .when(!region.base.is_empty(), |d| d.child(pane(tr("conflicts.base"), t!("conflicts.base_sub").to_string(), theme.muted_foreground, &region.base)))
-                            .child(pane(tr("conflicts.theirs"), region.theirs_label.clone(), theme.magenta, &region.theirs)),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(choice("cf-ours", tr("conflicts.take_ours"), Resolution::Ours, cx))
-                            .child(choice("cf-theirs", tr("conflicts.take_theirs"), Resolution::Theirs, cx))
-                            .child(choice("cf-both", tr("conflicts.take_both"), Resolution::OursThenTheirs, cx))
-                            .child(choice("cf-both-rev", tr("conflicts.take_both_reverse"), Resolution::TheirsThenOurs, cx))
-                            .when(self.settings.ai.enabled && self.settings.ai.conflict_suggestions, |d| {
-                                d.child(
-                                    Button::new("cf-ai")
-                                        .small()
-                                        .outline()
-                                        .icon(icon(IconName::Sparkles))
-                                        .label(tr("conflicts.suggest"))
-                                        .loading(self.conflicts.suggesting)
-                                        .on_click(cx.listener(|this, _, window, cx| this.suggest_conflict(window, cx))),
-                                )
-                            }),
-                    )
-                    .when_some(suggestion, |d, lines| {
-                        let on = current == Some(Resolution::Custom(lines.clone()));
-                        let l2 = lines.clone();
-                        d.child(
-                            v_flex()
-                                .gap_2()
-                                .p_3()
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(theme.magenta.opacity(0.5))
-                                .bg(theme.magenta.opacity(0.08))
-                                .child(hstack().gap_2().child(icon(IconName::Sparkles).small().text_color(theme.magenta)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("conflicts.suggestion"))))
-                                .child(v_flex().text_xs().font_family(theme.mono_font_family.clone()).children(lines.iter().map(|l| div().child(l.clone()))))
-                                .child(hstack().child(spacer()).child({
-                                    let b = Button::new("cf-use-ai").small().label(tr("conflicts.use_suggestion")).on_click(cx.listener(move |this, _, _, cx| {
-                                        let i = this.conflicts.index;
-                                        if let Some(c) = this.conflicts.choices.get_mut(i) {
-                                            *c = Some(Resolution::Custom(l2.clone()));
-                                        }
-                                        cx.notify();
-                                    }));
-                                    if on { b.primary() } else { b.outline() }
-                                })),
-                        )
-                    })
-                    .child(
-                        v_flex()
+                            .gap_3()
+                            .mx_3()
+                            .my_1()
+                            .px_3()
+                            .py(px(10.))
                             .rounded(px(8.))
                             .border_1()
+                            .border_dashed()
                             .border_color(theme.border)
-                            .overflow_hidden()
-                            .child(hstack().px_2().py_1().bg(theme.muted).child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child(tr("conflicts.result"))).child(spacer()).child(div().text_xs().text_color(if current.is_some() { theme.green } else { theme.red }).child(if current.is_some() { tr("conflicts.resolved") } else { tr("conflicts.unresolved") })))
+                            .font_family(theme.font_family.clone())
+                            .child(icon(IconName::MousePointerClick).text_color(theme.muted_foreground))
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(tr("conflicts.pick_side"))),
+                    );
+                }
+                for l in &after {
+                    result_body = result_body.child(code_line(l, None, cx));
+                }
+                v_flex()
+                    .size_full()
+                    .child(
+                        v_flex()
+                            .id("conflict-main")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_5()
+                            .py_4()
+                            .gap_4()
                             .child(
                                 v_flex()
-                                    .py_1()
-                                    .text_xs()
-                                    .font_family(theme.mono_font_family.clone())
-                                    .children(before.iter().map(|l| div().px_2().text_color(theme.muted_foreground).child(l.clone())))
-                                    .children(result_lines.iter().map(|l| div().px_2().bg(theme.green.opacity(0.12)).child(l.clone())))
-                                    .when(current.is_none(), |d| d.child(div().px_2().text_color(theme.red).child(tr("conflicts.pick_side"))))
-                                    .children(after.iter().map(|l| div().px_2().text_color(theme.muted_foreground).child(l.clone()))),
+                                    .gap_2p5()
+                                    .child(
+                                        hstack()
+                                            .gap(px(10.))
+                                            .child(div().text_xl().font_weight(FontWeight::BOLD).child(path.rsplit('/').next().unwrap_or(&path).to_string()))
+                                            .child(crate::widgets::count_chip(
+                                                t!("conflicts.progress", done = resolved, total = total).to_string(),
+                                                if all_done { theme.green.opacity(0.15) } else { theme.yellow.opacity(0.15) },
+                                                if all_done { theme.green } else { theme.yellow },
+                                            ))
+                                            .child(spacer())
+                                            .child(crate::widgets::framed(Button::new("cf-prev"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::ChevronLeft)).label(tr("conflicts.previous")).disabled(i == 0).on_click(cx.listener(|this, _, _, cx| {
+                                                this.conflicts.index = this.conflicts.index.saturating_sub(1);
+                                                cx.notify();
+                                            })))
+                                            .child(div().text_sm().text_color(theme.muted_foreground).child(t!("conflicts.n_of", n = i + 1, total = total).to_string()))
+                                            .child(crate::widgets::framed(Button::new("cf-next"), crate::widgets::Tone::Plain, cx).label(tr("conflicts.next")).icon(icon(IconName::ChevronRight)).disabled(i + 1 >= total).on_click(cx.listener(|this, _, _, cx| {
+                                                this.conflicts.index = (this.conflicts.index + 1).min(this.conflicts.choices.len().saturating_sub(1));
+                                                cx.notify();
+                                            }))),
+                                    )
+                                    .when(path.contains('/'), |d| d.child(div().text_xs().font_family(mono.clone()).text_color(theme.muted_foreground).child(path.clone())))
+                                    .when(total > 1, |d| d.child(steps)),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .items_start()
+                                    .gap_3()
+                                    .child(pane("cf-pane-ours", tr("conflicts.ours"), region.ours_label.clone(), theme.blue, &region.ours, Some(Resolution::Ours), cx))
+                                    .when(!region.base.is_empty(), |d| d.child(pane("cf-pane-base", tr("conflicts.base"), t!("conflicts.base_sub").to_string(), theme.muted_foreground, &region.base, Some(Resolution::Base), cx)))
+                                    .child(pane("cf-pane-theirs", tr("conflicts.theirs"), region.theirs_label.clone(), theme.magenta, &region.theirs, Some(Resolution::Theirs), cx)),
+                            )
+                            .child(
+                                hstack()
+                                    .flex_wrap()
+                                    .gap_3()
+                                    .child(
+                                        h_flex()
+                                            .p(px(4.))
+                                            .gap_1()
+                                            .rounded(px(12.))
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .bg(theme.sidebar)
+                                            .child(segment("cf-ours", IconName::ArrowLeft, tr("conflicts.take_ours"), Resolution::Ours, cx))
+                                            .child(segment("cf-theirs", IconName::ArrowRight, tr("conflicts.take_theirs"), Resolution::Theirs, cx))
+                                            .child(segment("cf-both", IconName::ArrowDown, tr("conflicts.take_both"), Resolution::OursThenTheirs, cx))
+                                            .child(segment("cf-both-rev", IconName::ArrowUp, tr("conflicts.take_both_reverse"), Resolution::TheirsThenOurs, cx)),
+                                    )
+                                    .when(self.settings.ai.enabled && self.settings.ai.conflict_suggestions, |d| {
+                                        d.child(
+                                            crate::widgets::framed(Button::new("cf-ai"), crate::widgets::Tone::Ai, cx)
+                                                .h(px(42.))
+                                                .rounded(px(12.))
+                                                .px_4()
+                                                .icon(icon(IconName::Sparkles))
+                                                .label(tr("conflicts.suggest"))
+                                                .loading(self.conflicts.suggesting)
+                                                .on_click(cx.listener(|this, _, window, cx| this.suggest_conflict(window, cx))),
+                                        )
+                                    }),
+                            )
+                            .when_some(suggestion, |d, lines| {
+                                let on = current == Some(Resolution::Custom(lines.clone()));
+                                let l2 = lines.clone();
+                                d.child(
+                                    v_flex()
+                                        .gap_2()
+                                        .p_4()
+                                        .rounded(px(12.))
+                                        .border_1()
+                                        .border_color(theme.magenta.opacity(0.4))
+                                        .bg(theme.magenta.opacity(0.08))
+                                        .child(hstack().gap_2().child(icon(IconName::Sparkles).small().text_color(theme.magenta)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.magenta).child(tr("conflicts.suggestion"))))
+                                        .child(v_flex().p_2().rounded(px(8.)).bg(theme.background).text_xs().font_family(theme.mono_font_family.clone()).children(lines.iter().map(|l| div().child(l.clone()))))
+                                        .child(hstack().child(spacer()).child(
+                                            crate::widgets::framed(Button::new("cf-use-ai"), if on { crate::widgets::Tone::Accent } else { crate::widgets::Tone::Ai }, cx)
+                                                .icon(icon(if on { IconName::Check } else { IconName::Sparkles }))
+                                                .label(tr("conflicts.use_suggestion"))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let i = this.conflicts.index;
+                                                    if let Some(c) = this.conflicts.choices.get_mut(i) {
+                                                        *c = Some(Resolution::Custom(l2.clone()));
+                                                    }
+                                                    cx.notify();
+                                                })),
+                                        )),
+                                )
+                            })
+                            .child(
+                                v_flex()
+                                    .rounded(px(12.))
+                                    .border_1()
+                                    .border_color(if current.is_some() { theme.green.opacity(0.5) } else { theme.border })
+                                    .bg(theme.sidebar)
+                                    .overflow_hidden()
+                                    .child(
+                                        hstack()
+                                            .gap_2()
+                                            .px_3()
+                                            .h(px(38.))
+                                            .border_b_1()
+                                            .border_color(theme.border)
+                                            .child(icon(IconName::FileCheck).small().text_color(if current.is_some() { theme.green } else { theme.muted_foreground }))
+                                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("conflicts.result")))
+                                            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("conflicts.result_sub")))
+                                            .child(spacer())
+                                            .child(if current.is_some() {
+                                                crate::widgets::count_chip(tr("conflicts.resolved"), theme.green.opacity(0.15), theme.green)
+                                            } else {
+                                                crate::widgets::count_chip(tr("conflicts.unresolved"), theme.yellow.opacity(0.15), theme.yellow)
+                                            }),
+                                    )
+                                    .child(result_body),
                             ),
                     )
                     .child(
                         hstack()
+                            .flex_wrap()
                             .gap_2()
-                            .child(Button::new("cf-all-ours").small().ghost().label(tr("conflicts.whole_file_ours")).on_click(cx.listener({
+                            .px_5()
+                            .py_3()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .bg(theme.sidebar)
+                            .child(crate::widgets::framed(Button::new("cf-all-ours"), crate::widgets::Tone::Plain, cx).label(tr("conflicts.whole_file_ours")).on_click(cx.listener({
                                 let p = path.clone();
                                 move |this, _, window, cx| {
                                     let p = p.clone();
                                     this.run_op(tr("op.resolve"), None, move |git| cairn_core::conflicts::take_side(git, &p, true).map(|_| String::new()), window, cx);
                                 }
                             })))
-                            .child(Button::new("cf-all-theirs").small().ghost().label(tr("conflicts.whole_file_theirs")).on_click(cx.listener({
+                            .child(crate::widgets::framed(Button::new("cf-all-theirs"), crate::widgets::Tone::Plain, cx).label(tr("conflicts.whole_file_theirs")).on_click(cx.listener({
                                 let p = path.clone();
                                 move |this, _, window, cx| {
                                     let p = p.clone();
@@ -309,7 +474,14 @@ impl RepoView {
                                 }
                             })))
                             .child(spacer())
-                            .child(Button::new("cf-save").small().primary().icon(icon(IconName::Check)).label(if resolved == total { tr("conflicts.save_resolved") } else { tr("conflicts.save_partial") }).on_click(cx.listener(|this, _, window, cx| this.save_conflict(window, cx)))),
+                            .child(
+                                crate::widgets::framed(Button::new("cf-save"), if all_done { crate::widgets::Tone::Accent } else { crate::widgets::Tone::Plain }, cx)
+                                    .h(px(36.))
+                                    .px_4()
+                                    .icon(icon(IconName::Check))
+                                    .label(if all_done { tr("conflicts.save_resolved") } else { tr("conflicts.save_partial") })
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_conflict(window, cx))),
+                            ),
                     )
                     .into_any_element()
             }
@@ -317,7 +489,7 @@ impl RepoView {
         };
         h_flex()
             .size_full()
-            .child(v_flex().flex_none().w(px(260.)).h_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(crate::widgets::section_label(t!("changes.conflicted", n = files.len()).to_string(), cx)).child(list))
+            .child(v_flex().flex_none().w(px(270.)).h_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(crate::widgets::caps_heading(tr("conflicts.files_title"), Some(files.len()), cx).pt_4().px_4()).child(list))
             .child(div().flex_1().min_w_0().h_full().child(main))
             .into_any_element()
     }

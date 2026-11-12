@@ -106,10 +106,16 @@ fn paint(theme: &mut Theme, settings: &Settings, dark: bool) {
         theme.cyan = rgb(0x0a7480).into();
         theme.blue = rgb(0x0a64c2).into();
     }
+    theme.font_family = "Inter".into();
     theme.font_size = px(settings.appearance.ui_font_size.clamp(11.0, 18.0));
     theme.mono_font_size = px(settings.appearance.code_font_size.clamp(10.0, 18.0));
-    theme.radius = px(6.);
-    theme.radius_lg = px(10.);
+    theme.radius = px(8.);
+    theme.radius_lg = px(12.);
+    theme.button = theme.secondary;
+    theme.button_hover = theme.secondary_hover;
+    theme.button_active = theme.border;
+    theme.button_foreground = theme.foreground;
+    theme.input = theme.border;
     if settings.appearance.reduce_motion {
         theme.motion.duration_fast = std::time::Duration::ZERO;
         theme.motion.duration_normal = std::time::Duration::ZERO;

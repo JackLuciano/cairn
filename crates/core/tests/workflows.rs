@@ -191,6 +191,34 @@ fn cherry_pick_and_revert() {
 }
 
 #[test]
+fn cherry_pick_and_revert_many_keep_history_order() {
+    let _data = data_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let git = repo(dir.path());
+    write(dir.path(), "a.txt", "1\n");
+    commit(&git, "base");
+    refs::create_branch(&git, "side", "HEAD", true).unwrap();
+    write(dir.path(), "one.txt", "1\n");
+    let one = commit(&git, "one");
+    write(dir.path(), "one.txt", "1\n2\n");
+    let two = commit(&git, "two");
+    write(dir.path(), "three.txt", "3\n");
+    let three = commit(&git, "three");
+    refs::checkout(&git, "main").unwrap();
+
+    let scrambled = vec![three.clone(), one.clone(), two.clone()];
+    assert_eq!(ops::oldest_first(&git, &scrambled), vec![one.clone(), two.clone(), three.clone()]);
+    ops::cherry_pick_many(&git, &scrambled).unwrap();
+    assert_eq!(subjects(&git, "HEAD"), ["three", "two", "one", "base"]);
+
+    let picked: Vec<String> = git.run(["rev-list", "-3", "HEAD"]).unwrap().lines().map(str::to_string).collect();
+    ops::revert_many(&git, &picked).unwrap();
+    assert!(!dir.path().join("one.txt").exists());
+    assert!(!dir.path().join("three.txt").exists());
+    assert_eq!(subjects(&git, "HEAD").len(), 7);
+}
+
+#[test]
 fn push_fetch_pull_round_trip() {
     let _data = data_dir();
     let (root, bare, git) = with_remote();

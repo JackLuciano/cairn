@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
-use crate::widgets::{badge, hstack, icon, section_label, spacer, tr};
+use crate::widgets::{Tone, count_chip, framed, hstack, icon, spacer, tr};
 
 pub(crate) struct WorkspacePanel {
     pub paths: Vec<PathBuf>,
@@ -27,6 +27,7 @@ pub(crate) struct WorkspacePanel {
     order: Vec<PathBuf>,
     message: Entity<InputState>,
     open_prs: bool,
+    files: Vec<(PathBuf, Vec<(char, String)>)>,
 }
 
 impl WorkspacePanel {
@@ -44,6 +45,7 @@ impl WorkspacePanel {
             order: Vec::new(),
             message,
             open_prs: true,
+            files: Vec::new(),
         };
         panel.refresh(cx);
         panel
@@ -61,14 +63,26 @@ impl WorkspacePanel {
                 .background_executor()
                 .spawn(async move {
                     std::thread::scope(|s| {
-                        let handles: Vec<_> = paths.iter().map(|p| s.spawn(move || workspace::summarize(p))).collect();
+                        let handles: Vec<_> = paths
+                            .iter()
+                            .map(|p| {
+                                s.spawn(move || {
+                                    let files: Vec<(char, String)> = cairn_core::status::load_status(&cairn_core::Git::new(p))
+                                        .map(|st| st.files.iter().map(|f| (f.staged.or(f.unstaged).map(|k| k.letter()).unwrap_or('M'), f.path.clone())).collect())
+                                        .unwrap_or_default();
+                                    (workspace::summarize(p), (p.clone(), files))
+                                })
+                            })
+                            .collect();
                         handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
                     })
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
+                let (summaries, files): (Vec<_>, Vec<_>) = summaries.into_iter().unzip();
                 this.summaries = summaries;
+                this.files = files;
                 let links = workspace::linked_branches(&this.summaries, &this.settings.git.default_branch);
                 if this.linked.as_ref().is_none_or(|l| !links.iter().any(|(b, _)| b == l)) {
                     this.linked = links.first().map(|(b, _)| b.clone());
@@ -170,95 +184,171 @@ impl Render for WorkspacePanel {
         let mut grid = div().w_full().grid().grid_cols(3).gap_2();
         for s in &self.summaries {
             let name = self.name_of(&s.path);
+            let linked = self.linked.is_some() && s.branch == self.linked;
             let (state, color) = if s.error.is_some() {
                 (tr("workspace.error"), theme.red)
-            } else if s.changed > 0 {
-                (t!("workspace.changed", n = s.changed).to_string().into(), theme.yellow)
+            } else if linked {
+                (tr("workspace.in_change"), theme.magenta)
             } else if s.behind > 0 {
-                (t!("workspace.behind", n = s.behind).to_string().into(), theme.cyan)
-            } else if s.ahead > 0 {
-                (t!("workspace.ahead", n = s.ahead).to_string().into(), theme.blue)
+                (tr("workspace.state_behind"), theme.cyan)
+            } else if s.changed > 0 {
+                (tr("workspace.state_changed"), theme.yellow)
             } else {
                 (tr("workspace.clean"), theme.green)
             };
-            let linked = self.linked.is_some() && s.branch == self.linked;
+            let mut meta: Vec<String> = Vec::new();
+            if s.ahead > 0 {
+                meta.push(t!("workspace.ahead", n = s.ahead).to_string());
+            }
+            if s.behind > 0 {
+                meta.push(t!("workspace.behind", n = s.behind).to_string());
+            }
+            if s.changed > 0 {
+                meta.push(crate::widgets::plural("workspace.changed_files", s.changed));
+            }
+            let meta = if meta.is_empty() { tr("workspace.up_to_date").to_string() } else { meta.join(" · ") };
             grid = grid.child(
                 v_flex()
-                    .gap_1()
-                    .p_3()
+                    .gap(px(6.))
+                    .px_3()
+                    .py(px(10.))
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(if linked { theme.magenta.opacity(0.6) } else { theme.border })
+                    .border_color(if linked { theme.magenta.opacity(0.4) } else { theme.border })
                     .bg(theme.sidebar)
-                    .child(hstack().gap_2().child(icon(IconName::FolderGit2).small().text_color(if linked { theme.magenta } else { theme.muted_foreground })).child(div().flex_1().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(name)).child(badge(state, color)))
-                    .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(if linked { theme.magenta } else { theme.muted_foreground }).child(s.branch.clone().unwrap_or_else(|| t!("toolbar.detached").to_string()))),
+                    .child(hstack().gap_2().child(icon(IconName::Folder).small().text_color(if linked { theme.magenta } else { theme.muted_foreground })).child(div().flex_1().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(name)).child(count_chip(state, color.opacity(0.15), color)))
+                    .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(if linked { theme.magenta } else { theme.muted_foreground }).child(s.branch.clone().unwrap_or_else(|| t!("toolbar.detached").to_string())))
+                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(meta)),
             );
         }
         let links = workspace::linked_branches(&self.summaries, &self.settings.git.default_branch);
-        let mut linked_section = v_flex().gap_2();
+        let mut linked_section = v_flex().gap(px(10.));
+        let mut ship_panel = None;
         if links.is_empty() {
             linked_section = linked_section.child(div().text_sm().text_color(theme.muted_foreground).child(tr("workspace.no_links")));
         } else {
-            let mut chooser = h_flex().flex_wrap().gap_1();
+            let count = self.order.iter().filter(|p| self.include.contains(*p)).count();
+            let mut head = hstack().flex_wrap().gap(px(10.)).child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("workspace.linked_title")));
             for (b, members) in &links {
                 let on = self.linked.as_deref() == Some(b.as_str());
                 let name = b.clone();
-                let btn = Button::new(SharedString::from(format!("link-{b}"))).small().label(format!("{b} · {}", members.len())).on_click(cx.listener(move |this, _, _, cx| {
-                    this.linked = Some(name.clone());
-                    this.reset_linked();
-                    cx.notify();
-                }));
-                chooser = chooser.child(if on { btn.primary() } else { btn.outline() });
+                head = head.child(
+                    div()
+                        .id(SharedString::from(format!("link-{b}")))
+                        .px_2()
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .bg(if on { theme.magenta.opacity(0.15) } else { theme.secondary })
+                        .text_color(if on { theme.magenta } else { theme.muted_foreground })
+                        .child(if links.len() > 1 { format!("{b} · {}", members.len()) } else { b.clone() })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.linked = Some(name.clone());
+                            this.reset_linked();
+                            cx.notify();
+                        })),
+                );
             }
-            linked_section = linked_section.child(chooser);
+            head = head.child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("workspace.linked_sub", count)));
+            linked_section = linked_section.child(head);
             let order = self.order.clone();
             for (i, p) in order.iter().enumerate() {
-                let s = self.summaries.iter().find(|s| &s.path == p).cloned().unwrap_or_default();
                 let included = self.include.contains(p);
                 let path = p.clone();
                 let n = order.len();
+                let files = self.files.iter().find(|(x, _)| x == p).map(|(_, f)| f.clone()).unwrap_or_default();
+                let s = self.summaries.iter().find(|s| &s.path == p).cloned().unwrap_or_default();
+                let note = if files.is_empty() { t!("workspace.nothing_to_commit", ahead = s.ahead).to_string() } else { crate::widgets::plural("workspace.changed_files", files.len()) };
                 linked_section = linked_section.child(
-                    hstack()
-                        .gap_2()
-                        .px_2()
-                        .py_1p5()
-                        .rounded(px(6.))
+                    v_flex()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(if included { theme.magenta.opacity(0.35) } else { theme.border })
                         .bg(theme.sidebar)
-                        .child(div().w(px(18.)).text_xs().text_color(theme.muted_foreground).child(format!("{}.", i + 1)))
-                        .child(Switch::new(SharedString::from(format!("inc-{}", p.display()))).checked(included).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                            if *v {
-                                this.include.insert(path.clone());
-                            } else {
-                                this.include.remove(&path);
-                            }
-                            cx.notify();
-                        })))
-                        .child(div().flex_1().text_sm().child(self.name_of(p)))
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(t!("workspace.repo_state", changed = s.changed, ahead = s.ahead).to_string()))
-                        .child(Button::new(("ord-up", i)).xsmall().ghost().icon(icon(IconName::ChevronUp)).disabled(i == 0).on_click(cx.listener(move |this, _, _, cx| {
-                            this.order.swap(i, i - 1);
-                            cx.notify();
-                        })))
-                        .child(Button::new(("ord-down", i)).xsmall().ghost().icon(icon(IconName::ChevronDown)).disabled(i + 1 >= n).on_click(cx.listener(move |this, _, _, cx| {
-                            this.order.swap(i, i + 1);
-                            cx.notify();
-                        }))),
+                        .when(!included, |d| d.opacity(0.6))
+                        .child(
+                            hstack()
+                                .gap(px(10.))
+                                .px_3()
+                                .py(px(10.))
+                                .child(gpui_kit::component::checkbox::Checkbox::new(SharedString::from(format!("inc-{}", p.display()))).checked(included).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                    if *v {
+                                        this.include.insert(path.clone());
+                                    } else {
+                                        this.include.remove(&path);
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(self.name_of(p)))
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(note))
+                                .child(spacer())
+                                .child(Button::new(("ord-up", i)).xsmall().ghost().icon(icon(IconName::ChevronUp)).tooltip(tr("rebase.move_up")).disabled(i == 0).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.order.swap(i, i - 1);
+                                    cx.notify();
+                                })))
+                                .child(Button::new(("ord-down", i)).xsmall().ghost().icon(icon(IconName::ChevronDown)).tooltip(tr("rebase.move_down")).disabled(i + 1 >= n).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.order.swap(i, i + 1);
+                                    cx.notify();
+                                }))),
+                        )
+                        .when(included && !files.is_empty(), |d| {
+                            d.child(
+                                v_flex().px(px(6.)).pt_1().pb(px(6.)).border_t_1().border_color(theme.border).children(files.iter().take(8).map(|(letter, path)| {
+                                    hstack()
+                                        .gap_2()
+                                        .px(px(6.))
+                                        .py(px(5.))
+                                        .child(crate::widgets::status_letter(*letter, cx))
+                                        .child(div().flex_1().min_w_0().truncate().text_xs().font_family(cx.theme().mono_font_family.clone()).child(path.clone()))
+                                })),
+                            )
+                        }),
                 );
             }
-            let count = self.order.iter().filter(|p| self.include.contains(*p)).count();
-            linked_section = linked_section
-                .child(div().text_xs().text_color(theme.muted_foreground).child(tr("workspace.order_hint")))
-                .child(Input::new(&self.message))
-                .child(
+            let mut push_order = v_flex()
+                .gap(px(6.))
+                .p_3()
+                .rounded(px(8.))
+                .bg(theme.secondary)
+                .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(tr("workspace.push_order").to_uppercase()));
+            for (n, p) in self.order.iter().filter(|p| self.include.contains(*p)).enumerate() {
+                push_order = push_order.child(
                     hstack()
-                        .gap_3()
-                        .child(Switch::new("ws-open-prs").checked(self.open_prs).label(tr("workspace.open_prs")).on_click(cx.listener(|this, v: &bool, _, cx| {
-                            this.open_prs = *v;
-                            cx.notify();
-                        })))
-                        .child(spacer())
-                        .child(Button::new("ws-ship").small().primary().icon(icon(IconName::ArrowUpToLine)).label(crate::widgets::plural("workspace.ship_n", count)).disabled(count == 0 || busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.ship(window, cx)))),
+                        .gap(px(10.))
+                        .child(div().flex_none().size(px(22.)).rounded_full().flex().items_center().justify_center().bg(theme.primary.opacity(0.14)).text_color(theme.primary).text_xs().font_weight(FontWeight::BOLD).child((n + 1).to_string()))
+                        .child(div().flex_1().text_sm().font_weight(FontWeight::MEDIUM).child(self.name_of(p))),
                 );
+            }
+            ship_panel = Some(
+                v_flex()
+                    .flex_none()
+                    .w(px(340.))
+                    .gap_3()
+                    .p_4()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.sidebar)
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("workspace.ship_title")))
+                    .child(v_flex().gap_1p5().child(div().text_xs().text_color(theme.muted_foreground).child(tr("workspace.summary_label"))).child(Input::new(&self.message)))
+                    .child(push_order)
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(tr("workspace.order_hint")))
+                    .child(Switch::new("ws-open-prs").small().checked(self.open_prs).label(tr("workspace.open_prs")).on_click(cx.listener(|this, v: &bool, _, cx| {
+                        this.open_prs = *v;
+                        cx.notify();
+                    })))
+                    .child(
+                        framed(Button::new("ws-ship"), Tone::Accent, cx)
+                            .w_full()
+                            .h(px(38.))
+                            .icon(icon(IconName::ArrowUpToLine))
+                            .label(crate::widgets::plural("workspace.ship_n", count))
+                            .disabled(count == 0 || busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| this.ship(window, cx))),
+                    ),
+            );
         }
         let paths = self.paths.clone();
         let (p1, p2, p3) = (paths.clone(), paths.clone(), paths.clone());
@@ -278,16 +368,16 @@ impl Render for WorkspacePanel {
                     .child(div().text_xs().text_color(theme.muted_foreground).child(t!("workspace.subtitle", n = paths.len()).to_string()))
                     .child(spacer())
                     .when_some(busy.clone(), |d, b| d.child(hstack().gap_1().text_xs().text_color(theme.muted_foreground).child(gpui_kit::component::spinner::Spinner::new().xsmall()).child(b)))
-                    .child(Button::new("ws-refresh").small().ghost().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
-                    .child(Button::new("ws-fetch").small().outline().label(tr("workspace.fetch_all")).disabled(busy.is_some()).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(framed(Button::new("ws-refresh"), Tone::Plain, cx).w(px(32.)).px_0().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
+                    .child(framed(Button::new("ws-fetch"), Tone::Plain, cx).icon(icon(IconName::CloudDownload)).label(tr("workspace.fetch_all")).disabled(busy.is_some()).on_click(cx.listener(move |this, _, window, cx| {
                         let p = p1.clone();
                         this.run_batch(tr("workspace.fetch_all"), move || workspace::fetch_all(&p, prune), window, cx);
                     })))
-                    .child(Button::new("ws-pull").small().outline().label(tr("workspace.pull_clean")).disabled(busy.is_some()).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(framed(Button::new("ws-pull"), Tone::Plain, cx).icon(icon(IconName::ArrowDown)).label(tr("workspace.pull_clean")).disabled(busy.is_some()).on_click(cx.listener(move |this, _, window, cx| {
                         let p = p2.clone();
                         this.run_batch(tr("workspace.pull_clean"), move || workspace::pull_clean(&p, mode), window, cx);
                     })))
-                    .child(Button::new("ws-switch").small().outline().label(tr("workspace.switch_all")).disabled(busy.is_some()).on_click(cx.listener(move |_, _, window, cx| {
+                    .child(framed(Button::new("ws-switch"), Tone::Plain, cx).icon(icon(IconName::GitBranch)).label(tr("workspace.switch_all")).disabled(busy.is_some()).on_click(cx.listener(move |_, _, window, cx| {
                         let p = p3.clone();
                         let view = cx.entity();
                         crate::dialogs::text_prompt(tr("workspace.switch_title"), tr("workspace.switch_body"), tr("branch.name_placeholder"), String::new(), tr("workspace.switch_ok"), window, cx, move |branch, window, cx| {
@@ -298,7 +388,13 @@ impl Render for WorkspacePanel {
             )
             .when(self.loading && self.summaries.is_empty(), |d| d.child(gpui_kit::component::spinner::Spinner::new()))
             .child(grid)
-            .child(section_label(tr("workspace.linked_title"), cx).px_0())
-            .child(linked_section)
+            .child(
+                h_flex()
+                    .items_start()
+                    .gap_4()
+                    .pt_2()
+                    .child(linked_section.flex_1().min_w_0())
+                    .children(ship_panel),
+            )
     }
 }

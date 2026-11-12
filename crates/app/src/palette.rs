@@ -33,6 +33,61 @@ gpui_kit::actions!(
     ]
 );
 
+/// Opens the keyboard map: every shortcut, plus the Vim keys when they are on.
+///
+/// # Arguments
+/// * `vim` - whether Vim keys are turned on
+pub(crate) fn open_keymap(vim: bool, window: &mut Window, cx: &mut App) {
+    let keys: Vec<(&'static str, &'static str)> = vec![
+        ("Ctrl K", "palette.key_palette"),
+        ("Ctrl ,", "palette.key_settings"),
+        ("Ctrl 1", "page.history"),
+        ("Ctrl 2", "page.changes"),
+        ("Ctrl 3", "page.branches"),
+        ("Ctrl Enter", "palette.key_commit"),
+        ("Ctrl Shift F", "toolbar.fetch"),
+        ("Ctrl Shift L", "toolbar.pull"),
+        ("Ctrl Shift K", "toolbar.push"),
+        ("Ctrl Shift S", "toolbar.stash"),
+        ("Ctrl Shift B", "toolbar.new_branch"),
+        ("Ctrl Shift A", "toolbar.ask_ai"),
+        ("Ctrl Z", "toolbar.undo"),
+        ("F5", "toolbar.refresh"),
+        ("Ctrl Tab", "palette.key_next_tab"),
+        ("Ctrl W", "tabs.close"),
+        ("?", "palette.key_map"),
+    ];
+    let vim_keys: Vec<(&'static str, &'static str)> = vec![
+        ("j / k", "palette.vim_move"),
+        ("g / G", "palette.vim_ends"),
+        ("/", "palette.vim_search"),
+        ("s", "palette.vim_stage"),
+        ("f", "toolbar.fetch"),
+        ("p", "toolbar.push"),
+    ];
+    window.defer(cx, move |window, cx| {
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme().clone();
+            let grid = |list: &[(&'static str, &'static str)], cx: &App| {
+                div().grid().grid_cols(2).gap_x_6().gap_y_2().children(list.iter().map(|(k, label)| hstack().gap_3().child(div().w(px(110.)).child(kbd(k, cx))).child(div().text_sm().child(tr(label)))))
+            };
+            dialog
+                .w(px(640.))
+                .title(tr("palette.key_map"))
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .child(grid(&keys, cx))
+                        .when(vim, |d| {
+                            d.child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(tr("palette.vim_title").to_uppercase()))
+                                .child(grid(&vim_keys, cx))
+                        })
+                        .when(!vim, |d| d.child(div().text_xs().text_color(theme.muted_foreground).child(tr("palette.vim_off_hint")))),
+                )
+        });
+    });
+}
+
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-k", OpenPalette, None),
@@ -224,6 +279,8 @@ fn open_now(app: Entity<CairnApp>, window: &mut Window, cx: &mut App) {
         let s = a.read(cx).settings.clone();
         crate::settings_dialog::open(a.clone(), s, w, cx)
     })));
+    let vim = app.read(cx).settings.keyboard.vim_keys;
+    items.push(cmd("palette.app", "palette.key_map", Some("?"), IconName::Keyboard, Rc::new(move |w, cx| open_keymap(vim, w, cx))));
     let reduce_motion = app.read(cx).settings.appearance.reduce_motion;
     items.push(cmd("palette.app", "whats_new.button", None, IconName::Sparkles, Rc::new(move |w, cx| crate::whats_new::open(reduce_motion, w, cx))));
     let a = app.clone();

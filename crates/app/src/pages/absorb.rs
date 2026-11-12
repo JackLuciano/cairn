@@ -12,7 +12,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::{Page, RepoView};
-use crate::widgets::{badge, empty_state, hstack, icon, lane_color, section_label, spacer, tr};
+use crate::widgets::{Tone, card, card_header, count_chip, empty_state, framed, hstack, icon, icon_tile, lane_color, page_heading, section_label, spacer, tr};
 
 #[derive(Default)]
 pub(crate) struct AbsorbState {
@@ -130,7 +130,7 @@ impl RepoView {
             empty_state(IconName::Combine, tr("absorb.title"), e, cx).into_any_element()
         } else {
             let plan = self.absorb.plan.clone().unwrap_or_default();
-            let mut col = v_flex().gap_2();
+            let mut col = v_flex().gap_3();
             if plan.hunks.is_empty() {
                 col = col.child(empty_state(IconName::Combine, tr("absorb.nothing_title"), tr("absorb.nothing_body"), cx));
             }
@@ -138,16 +138,15 @@ impl RepoView {
                 let on = h.target.is_some() && !self.absorb.skip.contains(&i);
                 let has_target = h.target.is_some();
                 col = col.child(
-                    v_flex()
-                        .gap_1p5()
-                        .p_3()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.sidebar)
+                    card(cx)
+                        .when(on, |d| d.border_color(theme.magenta.opacity(0.45)))
                         .child(
                             hstack()
                                 .gap_2()
+                                .h(px(44.))
+                                .px(px(14.))
+                                .border_b_1()
+                                .border_color(theme.border)
                                 .child(Switch::new(("absorb-on", i)).checked(on).disabled(!has_target).on_click(cx.listener(move |this, v: &bool, _, cx| {
                                     if *v {
                                         this.absorb.skip.remove(&i);
@@ -156,53 +155,80 @@ impl RepoView {
                                     }
                                     cx.notify();
                                 })))
-                                .child(div().text_sm().font_family(theme.mono_font_family.clone()).child(h.file.clone()))
-                                .child(div().text_xs().text_color(theme.primary).font_family(theme.mono_font_family.clone()).child(h.header.clone())),
+                                .child(icon(IconName::File).small().text_color(theme.muted_foreground))
+                                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).truncate().child(h.file.clone()))
+                                .child(spacer())
+                                .child(count_chip(h.header.clone(), theme.primary.opacity(0.14), theme.primary).font_family(theme.mono_font_family.clone())),
                         )
                         .child(
                             v_flex()
-                                .p_2()
-                                .rounded(px(4.))
+                                .py_1()
                                 .bg(theme.background)
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())
                                 .children(h.preview.iter().map(|l| {
-                                    let color = if l.starts_with('+') { theme.green } else { theme.red };
-                                    div().text_color(color).child(l.clone())
+                                    let add = l.starts_with('+');
+                                    let color = if add { theme.green } else { theme.red };
+                                    div().px(px(14.)).py_0p5().bg(color.opacity(0.08)).border_l_2().border_color(color).text_color(color).child(l.clone())
                                 })),
                         )
                         .child(match (&h.target, &h.target_summary) {
                             (Some(t), Some(s)) => hstack()
                                 .gap_2()
-                                .text_xs()
+                                .px(px(14.))
+                                .py(px(10.))
+                                .text_sm()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(tr("absorb.goes_into")))
                                 .child(icon(IconName::ArrowRight).xsmall().text_color(theme.magenta))
-                                .child(badge(t.chars().take(7).collect::<String>(), theme.magenta))
-                                .child(div().truncate().child(s.clone()))
+                                .child(count_chip(t.chars().take(7).collect::<String>(), theme.magenta.opacity(0.16), theme.magenta).font_family(theme.mono_font_family.clone()))
+                                .child(div().truncate().font_weight(FontWeight::MEDIUM).child(s.clone()))
                                 .into_any_element(),
-                            _ => div().text_xs().text_color(theme.yellow).child(tr("absorb.no_owner")).into_any_element(),
+                            _ => hstack()
+                                .gap_2()
+                                .px(px(14.))
+                                .py(px(10.))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .text_xs()
+                                .text_color(theme.yellow)
+                                .child(icon(IconName::TriangleAlert).xsmall())
+                                .child(tr("absorb.no_owner"))
+                                .into_any_element(),
                         }),
                 );
             }
             let count = plan.hunks.iter().enumerate().filter(|(i, h)| h.target.is_some() && !self.absorb.skip.contains(i)).count();
             v_flex()
-                .id("absorb-scroll")
                 .size_full()
-                .overflow_y_scroll()
-                .p_4()
-                .gap_3()
-                .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("absorb.title")))
-                .child(div().text_sm().text_color(theme.muted_foreground).child(tr("absorb.explain")))
-                .child(col)
                 .child(
-                    hstack().child(spacer()).child(
-                        Button::new("absorb-run")
-                            .small()
-                            .primary()
-                            .icon(icon(IconName::Combine))
-                            .label(t!("absorb.run", n = count).to_string())
-                            .disabled(count == 0 || self.busy.is_some())
-                            .on_click(cx.listener(|this, _, window, cx| this.run_absorb(window, cx))),
-                    ),
+                    v_flex()
+                        .id("absorb-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_5()
+                        .gap_4()
+                        .child(page_heading(tr("absorb.title"), tr("absorb.explain"), cx))
+                        .child(col),
+                )
+                .child(
+                    hstack()
+                        .flex_none()
+                        .h(px(56.))
+                        .px_5()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("absorb.ready", count)))
+                        .child(spacer())
+                        .child(
+                            framed(Button::new("absorb-run"), Tone::Accent, cx)
+                                .icon(icon(IconName::Combine))
+                                .label(t!("absorb.run", n = count).to_string())
+                                .disabled(count == 0 || self.busy.is_some())
+                                .on_click(cx.listener(|this, _, window, cx| this.run_absorb(window, cx))),
+                        ),
                 )
                 .into_any_element()
         };
@@ -210,27 +236,36 @@ impl RepoView {
         let right = match self.absorb.split.as_ref() {
             None => {
                 let commits = self.absorb.branch_commits.clone();
-                v_flex()
-                    .gap_2()
-                    .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("split.title")))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(tr("split.pick")))
-                    .when(commits.is_empty(), |d| d.child(div().text_sm().text_color(theme.muted_foreground).child(tr("split.no_commits"))))
-                    .children(commits.iter().rev().map(|(h, s)| {
-                        let id = h.clone();
-                        div()
+                let n = commits.len();
+                let mut list = card(cx).child(card_header(IconName::GitCommitHorizontal, tr("split.branch_commits"), Some(n), cx));
+                if commits.is_empty() {
+                    list = list.child(div().p(px(14.)).text_sm().text_color(theme.muted_foreground).child(tr("split.no_commits")));
+                }
+                for (i, (h, s)) in commits.iter().rev().enumerate() {
+                    let id = h.clone();
+                    list = list.child(
+                        hstack()
                             .id(SharedString::from(format!("split-pick-{h}")))
-                            .flex()
-                            .gap_2()
-                            .px_2()
-                            .py_1p5()
-                            .rounded(px(6.))
+                            .gap_3()
+                            .px(px(14.))
+                            .py(px(10.))
+                            .when(i > 0, |d| d.border_t_1().border_color(theme.border))
                             .cursor_pointer()
                             .hover(|st| st.bg(theme.list_hover))
-                            .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(h.chars().take(7).collect::<String>()))
-                            .child(div().flex_1().truncate().text_sm().child(s.clone()))
-                            .on_click(cx.listener(move |this, _, window, cx| this.start_split(id.clone(), window, cx)))
-                    }))
-                    .into_any_element()
+                            .child(icon_tile(IconName::GitCommitHorizontal, theme.magenta))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_0p5()
+                                    .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(s.clone()))
+                                    .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(h.chars().take(7).collect::<String>())),
+                            )
+                            .child(hstack().gap_1().text_xs().text_color(theme.muted_foreground).child(icon(IconName::Scissors).xsmall()).child(tr("split.this_one")))
+                            .on_click(cx.listener(move |this, _, window, cx| this.start_split(id.clone(), window, cx))),
+                    );
+                }
+                v_flex().gap_4().child(page_heading(tr("split.title"), tr("split.pick"), cx)).child(list).into_any_element()
             }
             Some(split) => {
                 let groups = split.messages.len();
@@ -277,8 +312,8 @@ impl RepoView {
                 }
                 v_flex()
                     .gap_3()
-                    .child(hstack().gap_2().child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("split.title"))).child(badge(split.commit.chars().take(7).collect::<String>(), theme.magenta)))
-                    .child(div().text_sm().truncate().child(split.summary.clone()))
+                    .child(hstack().gap_2().child(div().text_xl().font_weight(FontWeight::BOLD).child(tr("split.title"))).child(count_chip(split.commit.chars().take(7).collect::<String>(), theme.magenta.opacity(0.16), theme.magenta).font_family(theme.mono_font_family.clone())))
+                    .child(div().text_sm().truncate().text_color(theme.muted_foreground).child(split.summary.clone()))
                     .child(section_label(tr("split.hunks"), cx).px_0())
                     .child(hunks)
                     .child(section_label(tr("split.messages"), cx).px_0())
@@ -286,7 +321,7 @@ impl RepoView {
                     .child(
                         hstack()
                             .gap_2()
-                            .child(Button::new("split-add-group").small().ghost().icon(icon(IconName::Plus)).label(tr("split.add_commit")).on_click(cx.listener(|this, _, window, cx| {
+                            .child(framed(Button::new("split-add-group"), Tone::Plain, cx).icon(icon(IconName::Plus)).label(tr("split.add_commit")).on_click(cx.listener(|this, _, window, cx| {
                                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("split.second_placeholder")));
                                 if let Some(s) = this.absorb.split.as_mut() {
                                     s.messages.push(input);
@@ -294,11 +329,11 @@ impl RepoView {
                                 cx.notify();
                             })))
                             .child(spacer())
-                            .child(Button::new("split-cancel").small().ghost().label(tr("dialog.cancel")).on_click(cx.listener(|this, _, _, cx| {
+                            .child(framed(Button::new("split-cancel"), Tone::Plain, cx).label(tr("dialog.cancel")).on_click(cx.listener(|this, _, _, cx| {
                                 this.absorb.split = None;
                                 cx.notify();
                             })))
-                            .child(Button::new("split-run").small().primary().icon(icon(IconName::Scissors)).label(tr("split.run")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.run_split(window, cx)))),
+                            .child(framed(Button::new("split-run"), Tone::Accent, cx).icon(icon(IconName::Scissors)).label(tr("split.run")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.run_split(window, cx)))),
                     )
                     .into_any_element()
             }
@@ -307,6 +342,6 @@ impl RepoView {
         h_flex()
             .size_full()
             .child(div().flex_1().min_w_0().h_full().border_r_1().border_color(theme.border).child(left))
-            .child(div().id("split-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().p_4().bg(theme.sidebar).child(right))
+            .child(div().id("split-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().p_5().child(right))
     }
 }

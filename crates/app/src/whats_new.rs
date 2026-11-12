@@ -42,7 +42,7 @@ pub(crate) fn show_after_update(app: &mut CairnApp, window: &mut Window, cx: &mu
         return;
     }
     let list = changelog::between(&releases(), &last, &current, RECENT_LIMIT);
-    if list.is_empty() {
+    if list.iter().all(|r| r.blocks.is_empty()) {
         return;
     }
     let reduce = app.settings.appearance.reduce_motion;
@@ -66,7 +66,8 @@ pub(crate) fn debug_open(window: &mut Window, cx: &mut App) {
     window.defer(cx, move |window, cx| open_with(list, true, false, window, cx));
 }
 
-fn open_with(list: Vec<Release>, after_update: bool, reduce_motion: bool, window: &mut Window, cx: &mut App) {
+fn open_with(mut list: Vec<Release>, after_update: bool, reduce_motion: bool, window: &mut Window, cx: &mut App) {
+    list.retain(|r| !r.blocks.is_empty());
     window.open_dialog(cx, move |dialog, _, cx| {
         dialog
             .w(px(580.))
@@ -143,7 +144,7 @@ fn panel(list: &[Release], after_update: bool, reduce_motion: bool, cx: &App) ->
                 .border_color(theme.border)
                 .child(div().text_xs().text_color(theme.muted_foreground).child(tr("whats_new.hint")))
                 .child(spacer())
-                .child(Button::new("whats-new-ok").primary().label(tr("whats_new.ok")).on_click(|_, window, cx| window.close_dialog(cx))),
+                .child(crate::widgets::framed(Button::new("whats-new-ok"), crate::widgets::Tone::Accent, cx).px_4().label(tr("whats_new.ok")).on_click(|_, window, cx| window.close_dialog(cx))),
         )
 }
 

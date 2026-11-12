@@ -36,16 +36,27 @@ fn main() {
     rust_i18n::set_locale(settings.general.language.code());
 
     gpui_kit::application().with_assets(AllAssets).run(move |cx| {
+        let _ = cx.text_system().add_fonts(vec![
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.ttf").as_slice()),
+        ]);
         gpui_kit::init(cx);
         palette::bind_keys(cx);
         gpui_kit::component::set_locale(settings.general.language.code());
         theme::apply(&settings, None, cx);
 
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        let hidden = cfg!(debug_assertions) && std::env::var_os("CAIRN_DEBUG_HIDDEN").is_some();
+        let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        if hidden {
+            bounds.origin = point(px(-6000.), px(0.));
+        }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(960.), px(600.))),
             app_id: Some("dev.cairn.app".into()),
+            focus: !hidden,
             ..TitleBar::window_options()
         };
         gpui_kit::open_window(options, cx, |window, cx| {
@@ -53,6 +64,8 @@ fn main() {
             cx.new(|cx| app::CairnApp::new(window, cx))
         })
         .expect("failed to open the Cairn window");
-        cx.activate(true);
+        if !hidden {
+            cx.activate(true);
+        }
     });
 }

@@ -11,7 +11,7 @@ use cairn_core::settings::Settings;
 use cairn_core::status::RepoStatus;
 use cairn_core::{Git, Repository};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -20,7 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
-use crate::widgets::{badge, hstack, icon, spacer, tr};
+use crate::widgets::{Tone, badge, count_chip, framed, hstack, icon, spacer, tr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -103,8 +103,13 @@ pub(crate) struct RepoView {
     pub loaded_once: bool,
     pub busy: Option<SharedString>,
     pub history_scroll: UniformListScrollHandle,
+    pub show_graph: bool,
+    pub graph_w: f32,
+    pub multi_select: Vec<String>,
+    pub last_clicked: Option<usize>,
     pub selected_commit: Option<String>,
     pub details: Option<CommitDetails>,
+    pub detail_pushed: Option<(String, bool)>,
     pub detail_file: Option<FileDiff>,
     pub change: Option<SelectedChange>,
     pub change_diff: Option<FileDiff>,
@@ -175,8 +180,13 @@ impl RepoView {
             loaded_once: false,
             busy: None,
             history_scroll: UniformListScrollHandle::new(),
+            show_graph: true,
+            graph_w: 40.,
+            multi_select: Vec::new(),
+            last_clicked: None,
             selected_commit: None,
             details: None,
+            detail_pushed: None,
             detail_file: None,
             change: None,
             change_diff: None,
@@ -413,6 +423,17 @@ impl RepoView {
         }
         self.status = l.status;
         self.commits = l.commits;
+        let commits = &self.commits;
+        self.multi_select.retain(|id| commits.iter().any(|c| &c.id == id));
+        if self.multi_select.len() < 2 {
+            self.multi_select.clear();
+        }
+        #[cfg(debug_assertions)]
+        if !self.loaded_once
+            && let Some(n) = std::env::var("CAIRN_DEBUG_MULTI").ok().and_then(|v| v.parse::<usize>().ok())
+        {
+            self.multi_select = self.commits.iter().skip(1).take(n).map(|c| c.id.clone()).collect();
+        }
         self.rows = l.rows;
         self.branches = l.branches;
         self.tags = l.tags;
@@ -575,16 +596,21 @@ impl RepoView {
         self.selected_commit = Some(id.clone());
         self.detail_file = None;
         let git = self.git();
+        let upstream = self.status.branch.upstream.clone().or_else(|| self.remotes.first().map(|r| format!("{}/HEAD", r.name)));
         let task = cx.spawn(async move |this, cx| {
-            let details = cx
+            let (details, pushed) = cx
                 .background_executor()
-                .spawn(async move { cairn_core::log::commit_details(&git, &id) })
+                .spawn(async move {
+                    let pushed = upstream.as_ref().map(|u| (u.clone(), git.succeeds(["merge-base", "--is-ancestor", &id, u])));
+                    (cairn_core::log::commit_details(&git, &id), pushed)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Ok(d) = details
                     && this.selected_commit.as_deref() == Some(d.id.as_str())
                 {
                     this.details = Some(d);
+                    this.detail_pushed = pushed;
                 }
                 cx.notify();
             });
@@ -665,6 +691,10 @@ impl RepoView {
     }
 
     fn handle_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key_char.as_deref() == Some("?") && !window.has_focused_input(cx) {
+            crate::palette::open_keymap(self.settings.keyboard.vim_keys, window, cx);
+            return;
+        }
         if !self.settings.keyboard.vim_keys || window.has_focused_input(cx) || ev.keystroke.modifiers.control || ev.keystroke.modifiers.alt {
             return;
         }
@@ -847,10 +877,10 @@ impl RepoView {
             .collect();
         let view = cx.entity();
 
-        let branch_button = Button::new("branch-switcher")
-            .small()
-            .ghost()
-            .icon(icon(IconName::GitBranch))
+        let branch_button = framed(Button::new("branch-switcher"), Tone::Plain, cx)
+            .font_family(theme.mono_font_family.clone())
+            .text_xs()
+            .icon(icon(IconName::GitBranch).text_color(theme.magenta))
             .label(branch_label)
             .dropdown_caret(true)
             .tooltip(tr("toolbar.switch_branch_tip"))
@@ -897,21 +927,26 @@ impl RepoView {
             let theme = cx.theme().clone();
             let fg = if active { theme.foreground } else { theme.muted_foreground };
             let border = if active { theme.primary } else { theme.transparent };
+            let tint = if page == Page::Conflicts { theme.red } else { theme.yellow };
+            let hover = theme.foreground;
             div()
                 .id(id)
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(36.))
+                .h(px(40.))
                 .px_3()
                 .cursor_pointer()
                 .text_sm()
+                .whitespace_nowrap()
                 .font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                 .text_color(fg)
                 .border_b_2()
                 .border_color(border)
+                .when(!active, |d| d.hover(move |s| s.text_color(hover)))
                 .child(label)
-                .when(count > 0, |d| d.child(badge(count.to_string(), theme.yellow)))
+                .when(count > 0, |d| d.child(count_chip(count.to_string(), tint.opacity(0.15), tint)))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_page(page, window, cx)))
         };
         let change_count = self.status.files.len();
@@ -925,14 +960,43 @@ impl RepoView {
             .child(
                 hstack()
                     .flex_wrap()
-                    .gap_1()
-                    .px_2()
-                    .py_1p5()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        framed(Button::new("repo-switcher"), Tone::Plain, cx)
+                            .icon(icon(IconName::Folder))
+                            .label(self.name.clone())
+                            .dropdown_caret(true)
+                            .tooltip(tr("toolbar.switch_repo_tip"))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::palette::OpenPalette), cx)),
+                    )
                     .child(branch_button)
-                    .when_some(self.status.branch.upstream.clone(), |d, up| {
-                        d.child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("→ {up}")))
-                    })
-                    .child(spacer())
+                    .child(
+                        div()
+                            .id("command-search")
+                            .flex_1()
+                            .min_w(px(180.))
+                            .max_w(px(420.))
+                            .mx_auto()
+                            .h(px(32.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary)
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(cx.theme().primary.opacity(0.5)))
+                            .child(icon(IconName::Search).small())
+                            .child(div().flex_1().min_w_0().truncate().child(tr("toolbar.search_or_run")))
+                            .child(crate::widgets::kbd("Ctrl K", cx))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::palette::OpenPalette), cx)),
+                    )
                     .when_some(busy.clone(), |d, label| {
                         d.child(
                             hstack()
@@ -943,11 +1007,16 @@ impl RepoView {
                                 .child(label),
                         )
                     })
+                    .child(
+                        framed(Button::new("undo"), Tone::Plain, cx)
+                            .icon(icon(IconName::Undo2))
+                            .label(tr("toolbar.undo"))
+                            .tooltip(tr("toolbar.undo_tip"))
+                            .on_click(cx.listener(|this, _, window, cx| this.open_undo(window, cx))),
+                    )
                     .when(self.settings.ai.enabled, |d| {
                         d.child(
-                            Button::new("ask-ai")
-                                .small()
-                                .ghost()
+                            framed(Button::new("ask-ai"), Tone::Ai, cx)
                                 .icon(icon(IconName::Sparkles))
                                 .label(tr("toolbar.ask_ai"))
                                 .tooltip(tr("toolbar.ask_ai_tip"))
@@ -955,18 +1024,7 @@ impl RepoView {
                         )
                     })
                     .child(
-                        Button::new("undo")
-                            .small()
-                            .ghost()
-                            .icon(icon(IconName::Undo2))
-                            .label(tr("toolbar.undo"))
-                            .tooltip(tr("toolbar.undo_tip"))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_undo(window, cx))),
-                    )
-                    .child(
-                        Button::new("fetch")
-                            .small()
-                            .ghost()
+                        framed(Button::new("fetch"), Tone::Plain, cx)
                             .icon(icon(IconName::RefreshCw))
                             .label(tr("toolbar.fetch"))
                             .tooltip(tr("toolbar.fetch_tip"))
@@ -974,40 +1032,28 @@ impl RepoView {
                             .on_click(cx.listener(|this, _, window, cx| this.fetch(window, cx))),
                     )
                     .child(
-                        Button::new("pull")
-                            .small()
-                            .ghost()
+                        framed(Button::new("pull"), Tone::Plain, cx)
                             .icon(icon(IconName::ArrowDownToLine))
-                            .label(if behind > 0 { format!("{} {behind}", tr("toolbar.pull")) } else { tr("toolbar.pull").to_string() })
+                            .label(tr("toolbar.pull"))
+                            .when(behind > 0, |b| b.child(count_chip(behind.to_string(), theme.primary.opacity(0.18), theme.primary)))
                             .tooltip(tr("toolbar.pull_tip"))
                             .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.pull(window, cx))),
                     )
                     .child({
-                        let b = Button::new("push")
-                            .small()
+                        let unpublished = self.status.branch.upstream.is_none() && !self.remotes.is_empty() && self.current_branch().is_some();
+                        let tone = if ahead > 0 || unpublished { Tone::Accent } else { Tone::Plain };
+                        framed(Button::new("push"), tone, cx)
                             .icon(icon(IconName::ArrowUpToLine))
-                            .label(if ahead > 0 { format!("{} {ahead}", tr("toolbar.push")) } else { tr("toolbar.push").to_string() })
+                            .label(tr("toolbar.push"))
+                            .when(ahead > 0, |b| b.child(count_chip(ahead.to_string(), gpui_kit::black().opacity(0.18), theme.primary_foreground)))
                             .tooltip(tr("toolbar.push_tip"))
                             .disabled(busy.is_some())
-                            .on_click(cx.listener(|this, _, window, cx| this.push(false, window, cx)));
-                        let unpublished = self.status.branch.upstream.is_none() && !self.remotes.is_empty() && self.current_branch().is_some();
-                        if ahead > 0 || unpublished { b.primary() } else { b.ghost() }
+                            .on_click(cx.listener(|this, _, window, cx| this.push(false, window, cx)))
                     })
                     .child(
-                        Button::new("stash")
-                            .small()
-                            .ghost()
-                            .icon(icon(IconName::Archive))
-                            .label(tr("toolbar.stash"))
-                            .tooltip(tr("toolbar.stash_tip"))
-                            .disabled(busy.is_some())
-                            .on_click(cx.listener(|this, _, window, cx| this.stash(window, cx))),
-                    )
-                    .child(
-                        Button::new("more")
-                            .small()
-                            .ghost()
+                        framed(Button::new("more"), Tone::Plain, cx)
+                            .px(px(8.))
                             .icon(icon(IconName::Ellipsis))
                             .tooltip(tr("toolbar.more_tip"))
                             .dropdown_menu({
@@ -1018,7 +1064,13 @@ impl RepoView {
                                     let root_b = root.clone();
                                     let v1 = view.clone();
                                     let v2 = view.clone();
+                                    let v4 = view.clone();
                                     menu.item(
+                                        PopupMenuItem::new(t!("toolbar.stash").to_string())
+                                            .icon(icon(IconName::Archive))
+                                            .on_click(move |_, window, cx| v4.update(cx, |v, cx| v.stash(window, cx))),
+                                    )
+                                    .item(
                                         PopupMenuItem::new(t!("toolbar.open_folder").to_string())
                                             .icon(icon(IconName::FolderOpen))
                                             .on_click(move |_, _, cx| cx.reveal_path(&root_a)),
@@ -1054,7 +1106,10 @@ impl RepoView {
             .child(
                 hstack()
                     .id("page-tabs")
-                    .px_2()
+                    .px_3()
+                    .gap_0p5()
+                    .border_t_1()
+                    .border_color(theme.border)
                     .overflow_x_scroll()
                     .child(page_tab("page-history", Page::History, tr("page.history"), 0, cx))
                     .child(page_tab("page-changes", Page::Changes, tr("page.changes"), change_count, cx))
@@ -1080,23 +1135,43 @@ impl RepoView {
             InProgress::None => (SharedString::default(), None, ""),
         };
         let conflicts = self.status.conflicted().count();
+        let rebase_dir = self.repo.git_dir.join("rebase-merge");
+        let read = |name: &str| std::fs::read_to_string(rebase_dir.join(name)).ok().map(|s| s.trim().to_string());
+        let detail = if self.in_progress == InProgress::Rebase {
+            match (read("head-name"), read("msgnum"), read("end")) {
+                (Some(head), Some(step), Some(end)) => Some(t!("progress.rebase_detail", branch = head.trim_start_matches("refs/heads/").to_string(), step = step, total = end).to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let is_rebase = self.in_progress == InProgress::Rebase;
         hstack()
             .flex_wrap()
-            .gap_2()
-            .px_3()
+            .gap(px(10.))
+            .px_4()
             .py_2()
             .bg(theme.yellow.opacity(0.12))
             .border_t_1()
             .border_color(theme.border)
             .child(icon(IconName::TriangleAlert).text_color(theme.yellow))
-            .child(div().text_sm().child(text))
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(text))
+            .when_some(detail, |d, t| d.child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(t)))
             .when(conflicts > 0, |d| d.child(badge(crate::widgets::plural("progress.conflicts", conflicts), theme.red)))
             .child(spacer())
+            .when(is_rebase, |d| {
+                d.child(
+                    framed(Button::new("skip-op"), Tone::Plain, cx)
+                        .label(tr("progress.skip"))
+                        .tooltip(tr("progress.skip_tip"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.run_op(tr("progress.skip"), None, |git| git.clone().with_env("GIT_EDITOR", "true").run(["rebase", "--skip"]), window, cx);
+                        })),
+                )
+            })
             .when_some(cont, |d, cmd| {
                 d.child(
-                    Button::new("continue-op")
-                        .small()
-                        .primary()
+                    framed(Button::new("continue-op"), Tone::Accent, cx)
                         .label(tr("progress.continue"))
                         .disabled(conflicts > 0)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1108,9 +1183,8 @@ impl RepoView {
                 )
             })
             .child(
-                Button::new("abort-op")
-                    .small()
-                    .danger()
+                framed(Button::new("abort-op"), Tone::Plain, cx)
+                    .text_color(theme.red)
                     .label(if abort == "bisect" { tr("progress.stop_bisect") } else { tr("progress.abort") })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let cmd = abort.to_string();

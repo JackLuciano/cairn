@@ -4,9 +4,9 @@ use cairn_core::ops::{ForceMode, PullMode};
 use cairn_core::settings::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -29,8 +29,10 @@ enum Control {
     Choice(&'static [&'static str], GetI, SetI),
     Number(GetN, SetN, f64, f64, f64, &'static str),
     Text(GetS, SetS),
+    LongText(GetS, SetS),
     Secret(&'static str),
     TestAi,
+    CheckUpdates,
 }
 
 #[derive(Clone, Copy)]
@@ -164,6 +166,7 @@ fn schema() -> Vec<Category> {
                     row("sign", "settings.sign", Some("settings.sign_desc"), Control::Toggle(|s| s.commits.sign, |s, v| s.commits.sign = v)),
                     row("checks_commit", "settings.checks_on_commit", None, Control::Toggle(|s| s.commits.run_checks, |s, v| s.commits.run_checks = v)),
                     row("ai_messages", "settings.ai_messages", None, Control::Choice(&["opt.on_request", "opt.always", "opt.never"], |s| s.commits.ai_messages as usize, |s, i| s.commits.ai_messages = [AiSuggest::OnRequest, AiSuggest::Always, AiSuggest::Never][i])),
+                    row("ai_instructions", "settings.ai_instructions", Some("settings.ai_instructions_desc"), Control::LongText(|s| s.commits.ai_instructions.clone(), |s, v| s.commits.ai_instructions = v)),
                 ],
             }],
         },
@@ -342,6 +345,7 @@ fn schema() -> Vec<Category> {
             groups: vec![Group {
                 label: "settings.group.updates",
                 rows: vec![
+                    row("check_updates", "settings.check_updates", Some("settings.check_updates_desc"), Control::CheckUpdates),
                     row("auto_update", "settings.auto_update", Some("settings.auto_update_desc"), Control::Toggle(|s| s.updates.auto_update, |s, v| s.updates.auto_update = v)),
                     row("release_notes", "settings.release_notes", None, Control::Toggle(|s| s.updates.show_release_notes, |s, v| s.updates.show_release_notes = v)),
                 ],
@@ -366,10 +370,43 @@ pub(crate) struct SettingsPanel {
     category: &'static str,
     search: Entity<InputState>,
     texts: HashMap<&'static str, Entity<InputState>>,
+    areas: HashMap<&'static str, Entity<TextareaState>>,
     secrets: HashMap<&'static str, Entity<InputState>>,
     secret_status: HashMap<&'static str, SharedString>,
     saved: bool,
     _subs: Vec<Subscription>,
+}
+
+fn category_icon(id: &str) -> IconName {
+    match id {
+        "general" => IconName::Settings2,
+        "appearance" => IconName::Palette,
+        "graph" => IconName::GitCommitHorizontal,
+        "diffs" => IconName::FileDiff,
+        "commits" => IconName::GitCommitVertical,
+        "git" => IconName::GitBranch,
+        "remotes" => IconName::Cloud,
+        "workspace" => IconName::Layers,
+        "ai" => IconName::Sparkles,
+        "checks" => IconName::ShieldCheck,
+        "keyboard" => IconName::Keyboard,
+        "notifications" => IconName::Bell,
+        "performance" => IconName::Gauge,
+        "updates" => IconName::Download,
+        _ => IconName::Wrench,
+    }
+}
+
+thread_local! {
+    static REQUESTED: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Makes the next Settings window open at a given section instead of General.
+///
+/// # Arguments
+/// * `category` - the section id, such as `ai`
+pub(crate) fn request_category(category: &'static str) {
+    REQUESTED.with(|r| r.set(Some(category)));
 }
 
 impl SettingsPanel {
@@ -377,6 +414,7 @@ impl SettingsPanel {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("settings.search")));
         let mut subs = vec![cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify())];
         let mut texts = HashMap::new();
+        let mut areas = HashMap::new();
         let mut secrets = HashMap::new();
         for cat in schema() {
             for group in cat.groups {
@@ -393,6 +431,23 @@ impl SettingsPanel {
                                 }
                             }));
                             texts.insert(r.id, input);
+                        }
+                        Control::LongText(get, set) => {
+                            let current = get(&settings);
+                            let area = cx.new(|cx| {
+                                let mut s = TextareaState::new(window, cx).auto_grow(4, 10).placeholder(tr("settings.ai_instructions_placeholder"));
+                                s.set_value(current, window, cx);
+                                s
+                            });
+                            subs.push(cx.subscribe(&area, move |this: &mut Self, area, ev: &InputEvent, cx| {
+                                if matches!(ev, InputEvent::Change) {
+                                    let v = area.read(cx).value().to_string();
+                                    set(&mut this.draft, v);
+                                    this.saved = false;
+                                    cx.notify();
+                                }
+                            }));
+                            areas.insert(r.id, area);
                         }
                         Control::Secret(name) => {
                             let existing = crate::secrets::get(name).is_some();
@@ -412,9 +467,10 @@ impl SettingsPanel {
             app,
             original: settings.clone(),
             draft: settings,
-            category: "general",
+            category: REQUESTED.with(|r| r.take()).unwrap_or("general"),
             search,
             texts,
+            areas,
             secrets,
             secret_status: HashMap::new(),
             saved: false,
@@ -450,16 +506,101 @@ impl SettingsPanel {
                     }))
                     .into_any_element()
             }
-            Control::Choice(options, get, set) => {
+            Control::Choice(options, get, set) if r.id == "theme" => {
                 let current = get(&self.draft);
-                let mut group = h_flex().rounded(px(6.)).border_1().border_color(theme.border).overflow_hidden();
+                let accent = theme.primary;
+                let (border, fg, muted) = (theme.border, theme.foreground, theme.muted_foreground);
+                let mut cards = h_flex().gap_3();
                 for (i, key) in options.iter().enumerate() {
                     let on = i == current;
-                    let b = Button::new((r.id, i)).small().label(tr(key)).on_click(cx.listener(move |this, _, window, cx| {
-                        set(&mut this.draft, i);
-                        this.after_change(window, cx);
-                    }));
-                    group = group.child(if on { b.primary() } else { b.ghost() });
+                    let (bg, panel, line): (Hsla, Hsla, Hsla) = match i {
+                        0 => (rgb(0x0d0f12).into(), rgb(0x14171c).into(), rgb(0x262b33).into()),
+                        1 => (rgb(0xf3f5f7).into(), rgb(0xffffff).into(), rgb(0xd8dde3).into()),
+                        _ => (rgb(0x0d0f12).into(), rgb(0xffffff).into(), rgb(0x8b949e).into()),
+                    };
+                    let preview = h_flex()
+                        .w(px(112.))
+                        .h(px(64.))
+                        .rounded(px(6.))
+                        .overflow_hidden()
+                        .bg(bg)
+                        .child(v_flex().w(px(30.)).h_full().bg(panel).border_r_1().border_color(line).p_1().gap_1().children((0..3).map(move |_| div().h(px(4.)).rounded(px(2.)).bg(line))))
+                        .child(v_flex().flex_1().p_1p5().gap_1().child(div().h(px(5.)).w(px(42.)).rounded(px(2.)).bg(accent)).children((0..3).map(move |k| div().h(px(4.)).w(px(64. - k as f32 * 12.)).rounded(px(2.)).bg(line))));
+                    cards = cards.child(
+                        v_flex()
+                            .id((r.id, i))
+                            .gap_1p5()
+                            .p_1p5()
+                            .rounded(px(10.))
+                            .border_2()
+                            .border_color(if on { accent } else { border })
+                            .cursor_pointer()
+                            .hover(move |s| s.border_color(accent.opacity(0.6)))
+                            .child(preview)
+                            .child(div().text_xs().text_center().font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL }).text_color(if on { fg } else { muted }).child(tr(key)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                set(&mut this.draft, i);
+                                this.after_change(window, cx);
+                            })),
+                    );
+                }
+                cards.into_any_element()
+            }
+            Control::Choice(options, get, set) if r.id == "accent" => {
+                let current = get(&self.draft);
+                let dark = cx.theme().is_dark();
+                let swatches: [(u32, u32); 4] = [(0x4c9eff, 0x0a64c2), (0xb48efa, 0x7a46d6), (0x39c5cf, 0x0a7480), (0xe3a03f, 0x9a6200)];
+                let fg = theme.foreground;
+                let mut row = h_flex().gap_2();
+                for (i, key) in options.iter().enumerate() {
+                    let on = i == current;
+                    let color: Hsla = rgb(if dark { swatches[i].0 } else { swatches[i].1 }).into();
+                    row = row.child(
+                        div()
+                            .id((r.id, i))
+                            .size(px(30.))
+                            .rounded_full()
+                            .p(px(3.))
+                            .border_2()
+                            .border_color(if on { fg } else { theme.transparent })
+                            .cursor_pointer()
+                            .tooltip({
+                                let label = tr(key);
+                                move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                            })
+                            .child(div().size_full().rounded_full().bg(color))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                set(&mut this.draft, i);
+                                this.after_change(window, cx);
+                            })),
+                    );
+                }
+                row.into_any_element()
+            }
+            Control::Choice(options, get, set) => {
+                let current = get(&self.draft);
+                let mut group = h_flex().p(px(2.)).gap(px(2.)).rounded(px(8.)).border_1().border_color(theme.border).bg(theme.background);
+                for (i, key) in options.iter().enumerate() {
+                    let on = i == current;
+                    let (hover, active, fg, muted) = (theme.list_hover, theme.secondary, theme.foreground, theme.muted_foreground);
+                    group = group.child(
+                        div()
+                            .id((r.id, i))
+                            .h(px(28.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(on, |d| d.bg(active).text_color(fg).font_weight(FontWeight::SEMIBOLD).border_1().border_color(theme.border))
+                            .when(!on, |d| d.text_color(muted).hover(move |s| s.bg(hover)))
+                            .child(tr(key))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                set(&mut this.draft, i);
+                                this.after_change(window, cx);
+                            })),
+                    );
                 }
                 group.into_any_element()
             }
@@ -498,6 +639,10 @@ impl SettingsPanel {
                 Some(input) => div().w(px(300.)).child(Input::new(input).small()).into_any_element(),
                 None => div().into_any_element(),
             },
+            Control::LongText(_, _) => match self.areas.get(r.id) {
+                Some(area) => div().w_full().child(Textarea::new(area)).into_any_element(),
+                None => div().into_any_element(),
+            },
             Control::TestAi => {
                 let status = self.secret_status.get("ai_test").cloned();
                 v_flex()
@@ -520,6 +665,46 @@ impl SettingsPanel {
                         })
                         .detach();
                     })))
+                    .when_some(status, |d, s| d.child(div().max_w(px(320.)).text_xs().text_color(theme.muted_foreground).child(s)))
+                    .into_any_element()
+            }
+            Control::CheckUpdates => {
+                let status = self.secret_status.get("updates").cloned();
+                let checking = status.as_ref().is_some_and(|s| *s == tr("update.checking"));
+                v_flex()
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        crate::widgets::framed(Button::new("check-updates"), crate::widgets::Tone::Plain, cx)
+                            .icon(icon(IconName::RefreshCw))
+                            .label(tr("settings.check_updates_button"))
+                            .disabled(checking)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.secret_status.insert("updates", tr("update.checking"));
+                                cx.notify();
+                                let app = this.app.clone();
+                                cx.spawn(async move |this, cx| {
+                                    let result = cx.background_executor().spawn(async move { crate::updater::check_now() }).await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        let msg: SharedString = match result {
+                                            Ok(Some(info)) => {
+                                                let version = info.TargetFullRelease.Version.clone();
+                                                app.update(cx, |a, cx| {
+                                                    a.update_ready = Some((version.clone(), info));
+                                                    cx.notify();
+                                                });
+                                                t!("update.found", version = version).to_string().into()
+                                            }
+                                            Ok(None) => t!("update.up_to_date", version = crate::updater::current_version()).to_string().into(),
+                                            Err(e) => e.into(),
+                                        };
+                                        this.secret_status.insert("updates", msg);
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            })),
+                    )
                     .when_some(status, |d, s| d.child(div().max_w(px(320.)).text_xs().text_color(theme.muted_foreground).child(s)))
                     .into_any_element()
             }
@@ -564,7 +749,7 @@ impl SettingsPanel {
         cx.notify();
     }
 
-    fn render_row(&mut self, r: RowDef, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, r: RowDef, last: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let defaults = Settings::default();
         let modified = is_modified(&r, &self.draft, &defaults);
@@ -573,8 +758,8 @@ impl SettingsPanel {
             .flex_wrap()
             .items_center()
             .gap_4()
-            .py_2p5()
-            .border_b_1()
+            .py_3()
+            .when(!last, |d| d.border_b_1())
             .border_color(theme.border.opacity(0.6))
             .child(
                 v_flex()
@@ -602,6 +787,10 @@ impl SettingsPanel {
                                 let v = get(&this.draft);
                                 input.update(cx, |s, cx| s.set_value(v, window, cx));
                             }
+                            if let (Control::LongText(get, _), Some(area)) = (r.control, this.areas.get(r.id)) {
+                                let v = get(&this.draft);
+                                area.update(cx, |s, cx| s.set_value(v, window, cx));
+                            }
                             this.after_change(window, cx);
                         })),
                 )
@@ -615,8 +804,8 @@ fn is_modified(r: &RowDef, a: &Settings, defaults: &Settings) -> bool {
         Control::Toggle(get, _) => get(a) != get(defaults),
         Control::Choice(_, get, _) => get(a) != get(defaults),
         Control::Number(get, _, _, _, _, _) => (get(a) - get(defaults)).abs() > f64::EPSILON,
-        Control::Text(get, _) => get(a) != get(defaults),
-        Control::Secret(_) | Control::TestAi => false,
+        Control::Text(get, _) | Control::LongText(get, _) => get(a) != get(defaults),
+        Control::Secret(_) | Control::TestAi | Control::CheckUpdates => false,
     }
 }
 
@@ -626,8 +815,8 @@ fn reset_row(r: &RowDef, s: &mut Settings) {
         Control::Toggle(get, set) => set(s, get(&d)),
         Control::Choice(_, get, set) => set(s, get(&d)),
         Control::Number(get, set, ..) => set(s, get(&d)),
-        Control::Text(get, set) => set(s, get(&d)),
-        Control::Secret(_) | Control::TestAi => {}
+        Control::Text(get, set) | Control::LongText(get, set) => set(s, get(&d)),
+        Control::Secret(_) | Control::TestAi | Control::CheckUpdates => {}
     }
 }
 
@@ -650,15 +839,17 @@ impl Render for SettingsPanel {
                     .id(SharedString::from(format!("set-cat-{id}")))
                     .flex()
                     .items_center()
-                    .h(px(32.))
+                    .gap_2p5()
+                    .h(px(34.))
                     .px_2p5()
                     .rounded(px(6.))
                     .cursor_pointer()
                     .text_sm()
-                    .when(on, |d| d.bg(theme.list_active).font_weight(FontWeight::SEMIBOLD))
+                    .when(on, |d| d.bg(theme.list_active).text_color(theme.foreground).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover)))
+                    .child(icon(category_icon(id)).small().text_color(if on { theme.primary } else { theme.muted_foreground }))
                     .child(div().flex_1().child(tr(c.label)))
-                    .when(changes > 0, |d| d.child(crate::widgets::badge(changes.to_string(), theme.primary)))
+                    .when(changes > 0, |d| d.child(crate::widgets::count_chip(changes.to_string(), theme.primary.opacity(0.15), theme.primary)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.category = id;
                         this.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -670,18 +861,39 @@ impl Render for SettingsPanel {
         let mut content = v_flex().gap_1();
         if query.is_empty() {
             let cat = cats.iter().find(|c| c.id == self.category).unwrap_or(&cats[0]);
-            content = content
-                .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr(cat.label)))
-                .child(div().text_sm().text_color(theme.muted_foreground).child(tr(cat.desc)));
+            content = content.child(
+                hstack()
+                    .gap_3()
+                    .pb_1()
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(40.))
+                            .rounded(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme.primary.opacity(0.14))
+                            .child(icon(category_icon(cat.id)).text_color(theme.primary)),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(2.))
+                            .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr(cat.label)))
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(tr(cat.desc))),
+                    ),
+            );
             for g in &cat.groups {
                 let rows: Vec<RowDef> = g.rows.iter().copied().filter(|r| visible(r)).collect();
                 if rows.is_empty() {
                     continue;
                 }
-                content = content.child(crate::widgets::section_label(tr(g.label), cx).px_0());
-                for r in rows {
-                    content = content.child(self.render_row(r, cx));
+                let mut card = v_flex().px_4().rounded(px(10.)).border_1().border_color(theme.border).bg(theme.sidebar);
+                let n = rows.len();
+                for (i, r) in rows.into_iter().enumerate() {
+                    card = card.child(self.render_row(r, i + 1 == n, cx));
                 }
+                content = content.child(crate::widgets::section_label(tr(g.label), cx).px_0().pt_5()).child(card);
             }
         } else {
             let mut found = 0;
@@ -702,7 +914,7 @@ impl Render for SettingsPanel {
                 found += rows.len();
                 content = content.child(crate::widgets::section_label(tr(c.label), cx).px_0());
                 for r in rows {
-                    content = content.child(self.render_row(r, cx));
+                    content = content.child(self.render_row(r, false, cx));
                 }
             }
             if found == 0 {
@@ -719,41 +931,71 @@ impl Render for SettingsPanel {
             tr("settings.all_default")
         };
 
+        let has_repo = self.app.read(cx).active_tab().is_some();
+        let app = self.app.clone();
+        let nav = nav.when(has_repo, |n| {
+            n.child(div().h(px(1.)).mx_1p5().my_2().bg(theme.border)).child(
+                div()
+                    .id("set-repo-settings")
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .h(px(34.))
+                    .px_2p5()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(icon(IconName::FolderGit2).small())
+                    .child(tr("palette.repo_settings"))
+                    .on_click(move |_, window, cx| {
+                        if let Some(tab) = app.read(cx).active_tab() {
+                            window.close_dialog(cx);
+                            crate::repo_settings::open(tab, window, cx);
+                        }
+                    }),
+            )
+        });
+        let total: usize = cats.iter().map(|c| c.groups.iter().map(|g| g.rows.len()).sum::<usize>()).sum();
         v_flex()
             .w_full()
-            .h(px(620.))
+            .h(px(660.))
             .child(
                 hstack()
                     .gap_3()
                     .pb_3()
                     .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("settings.title")))
-                    .child(div().w(px(320.)).child(Input::new(&self.search).small().prefix(icon(IconName::Search).small()))),
+                    .child(div().w(px(360.)).child(Input::new(&self.search).prefix(icon(IconName::Search).small())))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(t!("settings.count", n = total).to_string())),
             )
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .rounded(px(8.))
+                    .rounded(px(10.))
                     .border_1()
                     .border_color(theme.border)
                     .overflow_hidden()
-                    .child(div().id("settings-nav").flex_none().w(px(210.)).h_full().overflow_y_scroll().bg(theme.sidebar).border_r_1().border_color(theme.border).child(nav))
-                    .child(div().id("settings-content").flex_1().min_w_0().h_full().overflow_y_scroll().px_5().py_4().child(content)),
+                    .child(div().id("settings-nav").flex_none().w(px(230.)).h_full().overflow_y_scroll().bg(theme.sidebar).border_r_1().border_color(theme.border).child(nav))
+                    .child(div().id("settings-content").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_5().bg(theme.background).child(content)),
             )
             .child(
                 hstack()
                     .pt_3()
                     .gap_2()
+                    .child(crate::updater::about_line(self.draft.appearance.reduce_motion, cx))
                     .child(div().text_xs().text_color(if self.saved { theme.green } else { theme.muted_foreground }).child(status))
                     .child(spacer())
-                    .child(crate::updater::about_line(self.draft.appearance.reduce_motion, cx))
                     .child(
-                        Button::new("settings-reset-all")
-                            .small()
-                            .ghost()
+                        crate::widgets::framed(Button::new("settings-reset-all"), crate::widgets::Tone::Plain, cx)
+                            .text_color(theme.muted_foreground)
                             .label(tr("settings.reset_all"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.draft = Settings::default();
+                                for area in this.areas.values().cloned().collect::<Vec<_>>() {
+                                    area.update(cx, |s, cx| s.set_value("", window, cx));
+                                }
                                 for (id, input) in this.texts.clone() {
                                     for cat in schema() {
                                         for g in cat.groups {
@@ -772,9 +1014,7 @@ impl Render for SettingsPanel {
                             })),
                     )
                     .child(
-                        Button::new("settings-cancel")
-                            .small()
-                            .ghost()
+                        crate::widgets::framed(Button::new("settings-cancel"), crate::widgets::Tone::Plain, cx)
                             .label(tr("dialog.cancel"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let original = this.original.clone();
@@ -783,9 +1023,8 @@ impl Render for SettingsPanel {
                             })),
                     )
                     .child(
-                        Button::new("settings-save")
-                            .small()
-                            .primary()
+                        crate::widgets::framed(Button::new("settings-save"), crate::widgets::Tone::Accent, cx)
+                            .px(px(18.))
                             .label(tr("dialog.save"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let draft = this.draft.clone();

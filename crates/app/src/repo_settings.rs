@@ -11,7 +11,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::RepoView;
-use crate::widgets::{hstack, icon, section_label, spacer, tr};
+use crate::widgets::{Tone, card, card_header, framed, hstack, icon, icon_tile, spacer, tr};
 
 pub(crate) struct RepoSettingsPanel {
     repo: Entity<RepoView>,
@@ -127,12 +127,29 @@ impl Render for RepoSettingsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let profiles = self.repo.read(cx).settings.profiles.clone();
-        let field = |label: &str, input: &Entity<InputState>| hstack().gap_3().child(div().w(px(140.)).text_sm().child(tr(label))).child(div().flex_1().child(Input::new(input).small()));
-        let mut profile_row = h_flex().flex_wrap().gap_1();
+        let border = theme.border;
+        let row = move |label: SharedString, first: bool| {
+            hstack()
+                .gap_4()
+                .px(px(14.))
+                .py(px(10.))
+                .when(!first, |d| d.border_t_1().border_color(border))
+                .child(div().w(px(150.)).flex_none().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+        };
+        let toggle_row = move |label: SharedString, first: bool| {
+            hstack()
+                .gap_4()
+                .px(px(14.))
+                .py(px(10.))
+                .when(!first, |d| d.border_t_1().border_color(border))
+                .child(div().flex_1().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+        };
+        let field = |label: &str, input: &Entity<InputState>, first: bool| row(tr(label), first).child(div().flex_1().child(Input::new(input)));
+        let mut profile_row = h_flex().flex_wrap().gap_1p5();
         for p in &profiles {
             let pc = p.clone();
             let repo = self.repo.clone();
-            profile_row = profile_row.child(Button::new(SharedString::from(format!("prof-{}", p.name))).small().outline().label(p.name.clone()).tooltip(format!("{} <{}>", p.user_name, p.email)).on_click(cx.listener(move |this, _, window, cx| {
+            profile_row = profile_row.child(framed(Button::new(SharedString::from(format!("prof-{}", p.name))), Tone::Plain, cx).h(px(28.)).icon(icon(IconName::User)).label(p.name.clone()).tooltip(format!("{} <{}>", p.user_name, p.email)).on_click(cx.listener(move |this, _, window, cx| {
                 let git = repo.read(cx).git();
                 match apply_profile(&git, &pc) {
                     Ok(()) => {
@@ -145,20 +162,20 @@ impl Render for RepoSettingsPanel {
                 }
             })));
         }
-        let mut remotes = v_flex().gap_1();
+        let remote_count = self.remotes.len();
+        let mut remotes = card(cx).child(card_header(IconName::Cloud, tr("repo_settings.remotes"), Some(remote_count), cx));
         for (name, url) in self.remotes.clone() {
             let n = name.clone();
             remotes = remotes.child(
                 hstack()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(6.))
-                    .bg(theme.sidebar)
-                    .child(icon(IconName::Cloud).small().text_color(theme.muted_foreground))
-                    .child(div().w(px(90.)).text_sm().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                    .child(div().flex_1().truncate().text_xs().font_family(theme.mono_font_family.clone()).child(url))
-                    .child(Button::new(SharedString::from(format!("rm-remote-{name}"))).xsmall().ghost().icon(icon(IconName::Trash)).tooltip(tr("repo_settings.remove_remote")).on_click(cx.listener(move |this, _, window, cx| {
+                    .gap_3()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(icon_tile(IconName::Cloud, theme.cyan))
+                    .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(name.clone())).child(div().truncate().text_xs().text_color(theme.muted_foreground).font_family(theme.mono_font_family.clone()).child(url)))
+                    .child(Button::new(SharedString::from(format!("rm-remote-{name}"))).small().ghost().icon(icon(IconName::Trash)).tooltip(tr("repo_settings.remove_remote")).on_click(cx.listener(move |this, _, window, cx| {
                         let git = this.repo.read(cx).git();
                         match git.run(["remote", "remove", &n]) {
                             Ok(_) => this.remotes.retain(|(x, _)| x != &n),
@@ -168,34 +185,39 @@ impl Render for RepoSettingsPanel {
                     }))),
             );
         }
+        let identity = card(cx)
+            .child(card_header(IconName::User, tr("repo_settings.identity"), None, cx))
+            .child(div().px(px(14.)).pt(px(10.)).text_xs().text_color(theme.muted_foreground).child(tr("repo_settings.identity_hint")))
+            .child(field("repo_settings.name", &self.name, true))
+            .child(field("repo_settings.email", &self.email, false))
+            .when(!profiles.is_empty(), |d| d.child(row(tr("repo_settings.profiles"), false).child(profile_row)))
+            .child(
+                row(tr("repo_settings.save_profile"), false)
+                    .child(div().flex_1().child(Input::new(&self.profile_name)))
+                    .child(framed(Button::new("save-profile"), Tone::Plain, cx).icon(icon(IconName::Save)).label(tr("repo_settings.save_profile_button")).on_click(cx.listener(|this, _, _, cx| this.save_profile(cx)))),
+            )
+            .child(div().px(px(14.)).pb(px(12.)).text_xs().text_color(theme.muted_foreground).child(tr("repo_settings.profile_hint")));
+        let signing = card(cx)
+            .child(card_header(IconName::ShieldCheck, tr("repo_settings.signing"), None, cx))
+            .child(toggle_row(tr("repo_settings.sign"), true).child(Switch::new("rs-sign").checked(self.sign).on_click(cx.listener(|this, v: &bool, _, cx| {
+                this.sign = *v;
+                cx.notify();
+            }))))
+            .child(toggle_row(tr("repo_settings.ssh_format"), false).child(Switch::new("rs-ssh").checked(self.ssh_format).on_click(cx.listener(|this, v: &bool, _, cx| {
+                this.ssh_format = *v;
+                cx.notify();
+            }))))
+            .child(field("repo_settings.key", &self.signing_key, false));
         v_flex()
             .w_full()
             .gap_3()
-            .child(section_label(tr("repo_settings.identity"), cx).px_0())
-            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("repo_settings.identity_hint")))
-            .child(field("repo_settings.name", &self.name))
-            .child(field("repo_settings.email", &self.email))
-            .when(!profiles.is_empty(), |d| d.child(hstack().gap_2().child(div().w(px(140.)).text_sm().child(tr("repo_settings.profiles"))).child(profile_row)))
-            .child(hstack().gap_2().child(div().w(px(140.)).text_sm().child(tr("repo_settings.save_profile"))).child(div().flex_1().child(Input::new(&self.profile_name).small())).child(Button::new("save-profile").small().outline().label(tr("repo_settings.save_profile_button")).on_click(cx.listener(|this, _, _, cx| this.save_profile(cx)))))
-            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("repo_settings.profile_hint")))
-            .child(section_label(tr("repo_settings.signing"), cx).px_0())
-            .child(Switch::new("rs-sign").checked(self.sign).label(tr("repo_settings.sign")).on_click(cx.listener(|this, v: &bool, _, cx| {
-                this.sign = *v;
-                cx.notify();
-            })))
-            .child(Switch::new("rs-ssh").checked(self.ssh_format).label(tr("repo_settings.ssh_format")).on_click(cx.listener(|this, v: &bool, _, cx| {
-                this.ssh_format = *v;
-                cx.notify();
-            })))
-            .child(field("repo_settings.key", &self.signing_key))
-            .child(section_label(tr("repo_settings.remotes"), cx).px_0())
-            .child(remotes)
-            .child(
+            .child(div().id("rs-scroll").max_h(px(640.)).overflow_y_scroll().child(v_flex().gap_3().child(identity).child(signing).child(remotes.child(
                 hstack()
                     .gap_2()
-                    .child(div().w(px(110.)).child(Input::new(&self.new_remote_name).small()))
-                    .child(div().flex_1().child(Input::new(&self.new_remote_url).small()))
-                    .child(Button::new("add-remote").small().outline().icon(icon(IconName::Plus)).label(tr("repo_settings.add_remote")).on_click(cx.listener(|this, _, window, cx| {
+                    .p(px(12.))
+                    .child(div().w(px(120.)).child(Input::new(&self.new_remote_name)))
+                    .child(div().flex_1().child(Input::new(&self.new_remote_url)))
+                    .child(framed(Button::new("add-remote"), Tone::Plain, cx).icon(icon(IconName::Plus)).label(tr("repo_settings.add_remote")).on_click(cx.listener(|this, _, window, cx| {
                         let name = this.new_remote_name.read(cx).value().trim().to_string();
                         let url = this.new_remote_url.read(cx).value().trim().to_string();
                         if name.is_empty() || url.is_empty() {
@@ -212,13 +234,14 @@ impl Render for RepoSettingsPanel {
                         }
                         cx.notify();
                     }))),
-            )
+            ))))
             .child(
                 hstack()
-                    .pt_2()
+                    .gap_2()
+                    .pt_1()
                     .child(spacer())
-                    .child(Button::new("rs-close").ghost().label(tr("dialog.close")).on_click(|_, window, cx| window.close_dialog(cx)))
-                    .child(Button::new("rs-save").primary().label(tr("dialog.save")).on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))),
+                    .child(framed(Button::new("rs-close"), Tone::Plain, cx).label(tr("dialog.close")).on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(framed(Button::new("rs-save"), Tone::Accent, cx).icon(icon(IconName::Check)).label(tr("dialog.save")).on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))),
             )
     }
 }

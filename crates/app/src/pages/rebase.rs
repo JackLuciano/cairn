@@ -12,7 +12,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::{Page, RepoView};
-use crate::widgets::{empty_state, hstack, icon, relative_time, spacer, tr};
+use crate::widgets::{Tone, empty_state, framed, hstack, icon, relative_time, spacer, tr};
 
 #[derive(Default)]
 pub(crate) struct RebaseState {
@@ -139,7 +139,37 @@ impl RepoView {
             result_count += 1;
         }
         let changed = self.rebase.items != self.rebase.original;
-        let mut rows = v_flex().gap_1();
+        let mut rows = v_flex().gap(px(6.)).child(
+            hstack()
+                .gap(px(10.))
+                .px(px(10.))
+                .pb_1()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(div().w(px(84.)).child(tr("rebase.col_order").to_uppercase()))
+                .child(div().w(px(104.)).child(tr("rebase.col_action").to_uppercase()))
+                .child(div().w(px(64.)).child(tr("rebase.col_commit").to_uppercase()))
+                .child(div().flex_1().child(tr("rebase.col_message").to_uppercase())),
+        );
+        let mut result: Vec<(String, String, Vec<String>)> = Vec::new();
+        for it in &items {
+            if it.action == RebaseAction::Drop {
+                continue;
+            }
+            if it.action.folds() && !result.is_empty() {
+                if let Some(last) = result.last_mut() {
+                    last.2.push(it.id.chars().take(7).collect());
+                }
+            } else {
+                let note = match it.action {
+                    RebaseAction::Reword => tr("rebase.note_reword").to_string(),
+                    RebaseAction::Edit => tr("rebase.note_edit").to_string(),
+                    _ => t!("rebase.note_from", hash = it.id.chars().take(7).collect::<String>()).to_string(),
+                };
+                result.push((it.summary.clone(), note, Vec::new()));
+            }
+        }
         for (ix, item) in items.iter().enumerate() {
             let color = match item.action {
                 RebaseAction::Pick => theme.primary,
@@ -152,11 +182,14 @@ impl RepoView {
             let folded = item.action.folds() && ix > 0;
             let dropped = item.action == RebaseAction::Drop;
             let reword = self.rebase.rewords.get(&item.id).cloned().filter(|_| item.action == RebaseAction::Reword);
+            let step = |id: (&'static str, usize), glyph: IconName, cx: &App| {
+                framed(Button::new(id), Tone::Plain, cx).size(px(28.)).px_0().rounded(px(6.)).icon(icon(glyph).text_color(cx.theme().muted_foreground))
+            };
             rows = rows.child(
                 v_flex()
                     .gap_1()
-                    .px_2()
-                    .py_1p5()
+                    .px(px(10.))
+                    .py_2()
                     .rounded(px(8.))
                     .border_1()
                     .border_color(theme.border)
@@ -164,13 +197,26 @@ impl RepoView {
                     .when(dropped, |d| d.opacity(0.55))
                     .child(
                         hstack()
-                            .gap_2()
-                            .child(Button::new(("up", ix)).xsmall().ghost().icon(icon(IconName::ChevronUp)).tooltip(tr("rebase.move_up")).disabled(ix == 0).on_click(cx.listener(move |this, _, _, cx| this.move_item(ix, -1, cx))))
-                            .child(Button::new(("down", ix)).xsmall().ghost().icon(icon(IconName::ChevronDown)).tooltip(tr("rebase.move_down")).disabled(ix + 1 == items.len()).on_click(cx.listener(move |this, _, _, cx| this.move_item(ix, 1, cx))))
+                            .gap(px(10.))
+                            .child(
+                                hstack()
+                                    .w(px(84.))
+                                    .gap_1()
+                                    .child(icon(IconName::GripVertical).small().text_color(theme.muted_foreground))
+                                    .child(step(("up", ix), IconName::ChevronUp, cx).tooltip(tr("rebase.move_up")).disabled(ix == 0).on_click(cx.listener(move |this, _, _, cx| this.move_item(ix, -1, cx))))
+                                    .child(step(("down", ix), IconName::ChevronDown, cx).tooltip(tr("rebase.move_down")).disabled(ix + 1 == items.len()).on_click(cx.listener(move |this, _, _, cx| this.move_item(ix, 1, cx)))),
+                            )
                             .child(
                                 Button::new(("action", ix))
                                     .xsmall()
                                     .outline()
+                                    .w(px(104.))
+                                    .h(px(30.))
+                                    .rounded(px(6.))
+                                    .border_color(color)
+                                    .bg(color.opacity(0.12))
+                                    .font_family(theme.mono_font_family.clone())
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .label(action_label(item.action))
                                     .dropdown_caret(true)
                                     .text_color(color)
@@ -188,65 +234,189 @@ impl RepoView {
                             .when(folded, |d| d.child(div().text_xs().text_color(theme.magenta).child(tr("rebase.into_above"))))
                             .child(div().flex_1().min_w_0().truncate().text_sm().when(dropped, |d| d.line_through()).child(item.summary.clone())),
                     )
-                    .when_some(reword, |d, input| d.child(div().pl(px(150.)).child(Input::new(&input).small()))),
+                    .when_some(reword, |d, input| d.child(div().pl(px(268.)).child(Input::new(&input).small()))),
             );
         }
+        let mut result_list = v_flex();
+        for (msg, note, folded) in result.iter().rev() {
+            let note = if folded.is_empty() { note.clone() } else { format!("{note} · {}", t!("rebase.note_includes", list = folded.join(", "))) };
+            result_list = result_list.child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .w(px(14.))
+                            .items_center()
+                            .child(div().w(px(2.)).h(px(8.)).bg(theme.magenta))
+                            .child(div().size(px(10.)).rounded_full().bg(theme.magenta))
+                            .child(div().w(px(2.)).flex_1().bg(theme.magenta)),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .pt_1()
+                            .pb(px(10.))
+                            .gap(px(2.))
+                            .child(div().text_sm().truncate().child(msg.clone()))
+                            .child(div().text_size(px(11.)).font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(note)),
+                    ),
+            );
+        }
+        result_list = result_list.child(
+            hstack()
+                .gap_3()
+                .child(div().w(px(14.)).flex().justify_center().child(div().size(px(10.)).rounded_full().border_2().border_color(theme.primary)))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(div().text_color(theme.primary).font_weight(FontWeight::SEMIBOLD).child(self.rebase.base_label.clone()))),
+        );
         let snapshots: Vec<_> = OpLog::load(&self.repo.git).entries.into_iter().rev().take(8).collect();
         let view_undo = cx.entity();
+        let branch = self.current_branch().unwrap_or("HEAD").to_string();
+        let mut undo_list = v_flex();
+        for (i, s) in snapshots.iter().enumerate() {
+            let id = s.id.clone();
+            let label = s.label.clone();
+            let view = view_undo.clone();
+            undo_list = undo_list.child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .w(px(14.))
+                            .items_center()
+                            .child(div().mt(px(10.)).size(px(10.)).rounded_full().border_2().border_color(if i == 0 { theme.primary } else { theme.muted_foreground }).when(i == 0, |d| d.bg(theme.primary)))
+                            .child(div().w(px(2.)).flex_1().bg(theme.border)),
+                    )
+                    .child(
+                        hstack()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .pt(px(6.))
+                            .pb(px(10.))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(div().text_sm().truncate().when(i == 0, |d| d.font_weight(FontWeight::SEMIBOLD)).child(s.label.clone()))
+                                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(relative_time(s.time))),
+                            )
+                            .child(
+                                Button::new(("rebase-restore", i))
+                                    .xsmall()
+                                    .outline()
+                                    .label(tr("undo.restore"))
+                                    .on_click(move |_, window, cx| {
+                                        let id = id.clone();
+                                        let label = label.clone();
+                                        view.update(cx, |v, cx| {
+                                            v.run_op(t!("undo.restoring", what = label).to_string().into(), None, move |git| {
+                                                OpLog::load(git).restore(git, &id).map(|_| String::new())
+                                            }, window, cx);
+                                        });
+                                    }),
+                            ),
+                    ),
+            );
+        }
         h_flex()
             .size_full()
             .child(
                 v_flex()
-                    .id("rebase-scroll")
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .gap_3()
                     .child(
                         hstack()
-                            .gap_2()
-                            .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("rebase.title")))
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(t!("rebase.onto", base = self.rebase.base_label.clone()).to_string())),
+                            .flex_wrap()
+                            .gap(px(10.))
+                            .px_4()
+                            .py(px(14.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("rebase.title")))
+                            .child(
+                                hstack()
+                                    .gap_1()
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().text_color(theme.magenta).child(branch))
+                                    .child(tr("rebase.onto_word"))
+                                    .child(div().text_color(theme.primary).child(self.rebase.base_label.clone())),
+                            ),
                     )
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(tr("rebase.explain")))
-                    .child(rows)
+                    .child(
+                        v_flex()
+                            .id("rebase-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_4()
+                            .py(px(14.))
+                            .gap_4()
+                            .child(rows)
+                            .child(
+                                v_flex()
+                                    .gap(px(10.))
+                                    .px_4()
+                                    .py(px(14.))
+                                    .rounded(px(8.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.sidebar)
+                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("rebase.result_title", n = result_count, base = self.rebase.base_label.clone()).to_string()))
+                                    .child(result_list),
+                            ),
+                    )
                     .child(
                         hstack()
+                            .flex_wrap()
                             .gap_2()
-                            .pt_2()
-                            .child(div().text_sm().child(t!("rebase.result", from = items.len(), to = result_count).to_string()))
+                            .px_4()
+                            .py_3()
+                            .bg(theme.sidebar)
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("rebase.snapshot_note")))
                             .child(spacer())
-                            .child(Button::new("rebase-reset").small().ghost().label(tr("rebase.reset_plan")).disabled(!changed).on_click(cx.listener(|this, _, _, cx| {
+                            .child(framed(Button::new("rebase-reset"), Tone::Plain, cx).h(px(34.)).label(tr("rebase.reset_plan")).disabled(!changed).on_click(cx.listener(|this, _, _, cx| {
                                 this.rebase.items = this.rebase.original.clone();
                                 cx.notify();
                             })))
-                            .child(Button::new("rebase-start").small().primary().icon(icon(IconName::Play)).label(tr("rebase.start")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.start_rebase(window, cx)))),
+                            .child(
+                                framed(Button::new("rebase-start"), Tone::Accent, cx)
+                                    .h(px(34.))
+                                    .label(t!("rebase.start_n", from = items.len(), to = result_count).to_string())
+                                    .disabled(self.busy.is_some())
+                                    .on_click(cx.listener(|this, _, window, cx| this.start_rebase(window, cx))),
+                            ),
                     ),
             )
             .child(
                 v_flex()
+                    .id("rebase-undo")
                     .flex_none()
                     .w(px(320.))
                     .h_full()
+                    .overflow_y_scroll()
                     .p_4()
-                    .gap_2()
+                    .gap_3()
                     .bg(theme.sidebar)
                     .border_l_1()
                     .border_color(theme.border)
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("undo.title")))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(tr("rebase.undo_hint")))
-                    .children(snapshots.iter().map(|s| {
+                    .child(
                         v_flex()
-                            .py_1()
-                            .child(div().text_sm().truncate().child(s.label.clone()))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(s.time)))
-                    }))
+                            .gap_1()
+                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("undo.title")))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("rebase.undo_hint"))),
+                    )
+                    .when(snapshots.is_empty(), |d| d.child(div().text_xs().text_color(theme.muted_foreground).child(tr("rebase.no_snapshots"))))
+                    .child(undo_list)
                     .child(
                         Button::new("open-undo")
                             .small()
-                            .outline()
+                            .ghost()
                             .icon(icon(IconName::Undo2))
                             .label(tr("rebase.open_undo"))
                             .on_click(move |_, window, cx| crate::dialogs::undo_history(view_undo.clone(), window, cx)),

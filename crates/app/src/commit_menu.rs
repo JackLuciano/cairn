@@ -7,6 +7,31 @@ use rust_i18n::t;
 use crate::repo_view::RepoView;
 use crate::widgets::{icon, tr};
 
+/// The right-click menu when several commits are selected.
+///
+/// # Arguments
+/// * `view` - the repository view holding the selection
+/// * `n` - how many commits are selected
+///
+/// # Returns
+/// The menu with copy, cherry-pick and revert for the whole selection.
+pub(crate) fn build_multi(menu: PopupMenu, view: Entity<RepoView>, n: usize) -> PopupMenu {
+    let item = |label: String, ic: IconName| PopupMenuItem::new(label).icon(icon(ic));
+    let (v1, v2, v3, v4) = (view.clone(), view.clone(), view.clone(), view);
+    menu.label(t!("history.selected_n", n = n).to_string())
+        .item(item(t!("history.copy_hashes").to_string(), IconName::Copy).on_click(move |_, window, cx| v1.update(cx, |v, cx| v.copy_selected_hashes(window, cx))))
+        .separator()
+        .item(item(crate::widgets::plural("undo.cherry_pick_n", n), IconName::GitCommitHorizontal).on_click(move |_, window, cx| v2.update(cx, |v, cx| v.cherry_pick_selected(window, cx))))
+        .item(item(crate::widgets::plural("undo.revert_n", n), IconName::Undo2).on_click(move |_, window, cx| v3.update(cx, |v, cx| v.revert_selected(window, cx))))
+        .separator()
+        .item(item(t!("history.clear_selection").to_string(), IconName::X).on_click(move |_, _, cx| {
+            v4.update(cx, |v, cx| {
+                v.multi_select.clear();
+                cx.notify();
+            })
+        }))
+}
+
 pub(crate) fn build(menu: PopupMenu, view: Entity<RepoView>, id: String) -> PopupMenu {
     let short: String = id.chars().take(7).collect();
     let item = |label: String, ic: IconName| PopupMenuItem::new(label).icon(icon(ic));

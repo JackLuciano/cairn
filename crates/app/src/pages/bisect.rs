@@ -1,13 +1,14 @@
 use cairn_core::bisect::{self, BisectState};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::RepoView;
-use crate::widgets::{badge, hstack, icon, spacer, tr};
+use crate::widgets::{Tone, badge, card, framed, hstack, icon, icon_tile, page_heading, spacer, tr};
 
 pub(crate) struct BisectPageState {
     pub state: BisectState,
@@ -55,31 +56,59 @@ impl RepoView {
         let theme = cx.theme().clone();
         let s = self.bisect.state.clone();
         let first_bad = s.first_bad.clone().or_else(|| self.bisect.last_output.as_deref().and_then(bisect::first_bad_from_output));
-        let mut col = v_flex().id("bisect-scroll").size_full().overflow_y_scroll().p_4().gap_3();
-        col = col
-            .child(div().text_lg().font_weight(FontWeight::BOLD).child(tr("bisect.title")))
-            .child(div().text_sm().text_color(theme.muted_foreground).child(tr("bisect.explain")));
+        let mut col = v_flex().id("bisect-scroll").size_full().overflow_y_scroll().p_5().gap_4();
+        col = col.child(page_heading(tr("bisect.title"), tr("bisect.explain"), cx));
         if !s.active {
-            col = col.child(
+            let endpoint = |ic: IconName, color: Hsla, label: SharedString, hint: SharedString, input: &Entity<InputState>| {
                 v_flex()
+                    .flex_1()
+                    .min_w(px(260.))
                     .gap_2()
                     .p_4()
-                    .rounded(px(10.))
+                    .rounded(px(12.))
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.sidebar)
-                    .child(hstack().gap_2().child(div().w(px(160.)).text_sm().child(tr("bisect.bad_label"))).child(div().flex_1().child(Input::new(&self.bisect.bad).small())))
-                    .child(hstack().gap_2().child(div().w(px(160.)).text_sm().child(tr("bisect.good_label"))).child(div().flex_1().child(Input::new(&self.bisect.good).small())))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(tr("bisect.start_hint")))
-                    .child(hstack().child(spacer()).child(Button::new("bisect-start").small().primary().icon(icon(IconName::Bug)).label(tr("bisect.start")).on_click(cx.listener(|this, _, window, cx| {
-                        let bad = this.bisect.bad.read(cx).value().trim().to_string();
-                        let good = this.bisect.good.read(cx).value().trim().to_string();
-                        if good.is_empty() || bad.is_empty() {
-                            window.push_notification(gpui_kit::component::notification::Notification::warning(tr("bisect.need_both")), cx);
-                            return;
-                        }
-                        this.bisect_op(tr("bisect.start"), move |git| bisect::start(git, &bad, &good), window, cx);
-                    })))),
+                    .border_color(color.opacity(0.35))
+                    .bg(color.opacity(0.05))
+                    .child(hstack().gap_2().child(icon_tile(ic, color)).child(v_flex().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(label)).child(div().text_xs().text_color(theme.muted_foreground).child(hint))))
+                    .child(Input::new(input))
+            };
+            let step = |n: usize, text: SharedString| {
+                hstack()
+                    .flex_1()
+                    .gap_2()
+                    .items_start()
+                    .child(div().flex_none().size(px(22.)).rounded_full().flex().items_center().justify_center().bg(theme.primary.opacity(0.16)).text_color(theme.primary).text_xs().font_weight(FontWeight::BOLD).child(n.to_string()))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(text))
+            };
+            col = col.child(
+                card(cx)
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_3()
+                            .p_4()
+                            .child(endpoint(IconName::Bug, theme.red, tr("bisect.bad_label"), tr("bisect.bad_hint"), &self.bisect.bad))
+                            .child(endpoint(IconName::CircleCheck, theme.green, tr("bisect.good_label"), tr("bisect.good_hint"), &self.bisect.good)),
+                    )
+                    .child(h_flex().gap_4().px_4().pb_4().child(step(1, tr("bisect.step1"))).child(step(2, tr("bisect.step2"))).child(step(3, tr("bisect.step3"))))
+                    .child(
+                        hstack()
+                            .h(px(56.))
+                            .px_4()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(hstack().gap_1p5().text_xs().text_color(theme.muted_foreground).child(icon(IconName::Info).xsmall()).child(tr("bisect.start_hint")))
+                            .child(spacer())
+                            .child(framed(Button::new("bisect-start"), Tone::Accent, cx).icon(icon(IconName::Play)).label(tr("bisect.start")).on_click(cx.listener(|this, _, window, cx| {
+                                let bad = this.bisect.bad.read(cx).value().trim().to_string();
+                                let good = this.bisect.good.read(cx).value().trim().to_string();
+                                if good.is_empty() || bad.is_empty() {
+                                    window.push_notification(gpui_kit::component::notification::Notification::warning(tr("bisect.need_both")), cx);
+                                    return;
+                                }
+                                this.bisect_op(tr("bisect.start"), move |git| bisect::start(git, &bad, &good), window, cx);
+                            }))),
+                    ),
             );
             return col.into_any_element();
         }
@@ -108,21 +137,43 @@ impl RepoView {
             Some(fb) => {
                 let msg = cairn_core::Git::new(&self.repo.root).run(["log", "-1", "--format=%s", &fb]).unwrap_or_default();
                 let id = fb.clone();
+                let id_ai = fb.clone();
+                let id_revert = fb.clone();
+                let ai = self.settings.ai.enabled;
                 col = col.child(
                     v_flex()
                         .gap_2()
                         .p_4()
                         .rounded(px(10.))
                         .border_1()
-                        .border_color(theme.red)
-                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.red).child(tr("bisect.found")))
-                        .child(hstack().gap_2().child(badge(fb.chars().take(7).collect::<String>(), theme.red)).child(div().text_sm().child(msg.trim().to_string())))
-                        .child(hstack().gap_2().child(Button::new("bisect-show").small().outline().label(tr("bisect.show")).on_click(cx.listener(move |this, _, window, cx| {
-                            let id = id.clone();
-                            this.bisect_op(tr("bisect.stop"), bisect::reset, window, cx);
-                            this.page = crate::repo_view::Page::History;
-                            this.select_commit(id, cx);
-                        })))),
+                        .border_color(theme.red.opacity(0.5))
+                        .bg(theme.red.opacity(0.06))
+                        .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.red).child(tr("bisect.found").to_uppercase()))
+                        .child(hstack().gap_2().child(badge(fb.chars().take(7).collect::<String>(), theme.red)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(msg.trim().to_string())))
+                        .child(
+                            hstack()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(crate::widgets::framed(Button::new("bisect-show"), crate::widgets::Tone::Plain, cx).label(tr("bisect.show")).on_click(cx.listener(move |this, _, window, cx| {
+                                    let id = id.clone();
+                                    this.bisect_op(tr("bisect.stop"), bisect::reset, window, cx);
+                                    this.page = crate::repo_view::Page::History;
+                                    this.select_commit(id, cx);
+                                })))
+                                .when(ai, |d| {
+                                    d.child(crate::widgets::framed(Button::new("bisect-ai"), crate::widgets::Tone::Ai, cx).icon(icon(IconName::Sparkles)).label(tr("bisect.ask_ai")).on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select_commit(id_ai.clone(), cx);
+                                        crate::assist::open(cx.entity(), window, cx);
+                                    })))
+                                })
+                                .child(crate::widgets::framed(Button::new("bisect-revert"), crate::widgets::Tone::Plain, cx).text_color(theme.red).label(tr("bisect.revert")).on_click(cx.listener(move |this, _, window, cx| {
+                                    let id = id_revert.clone();
+                                    this.run_op(tr("bisect.revert"), Some(t!("undo.revert").to_string()), move |git| {
+                                        bisect::reset(git)?;
+                                        cairn_core::ops::revert(git, &id)
+                                    }, window, cx);
+                                }))),
+                        ),
                 );
             }
             None => {
@@ -139,9 +190,9 @@ impl RepoView {
                         .child(
                             hstack()
                                 .gap_2()
-                                .child(Button::new("bisect-good").small().success().label(tr("bisect.mark_good")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.bisect_op(tr("bisect.mark_good"), |git| bisect::mark(git, "good"), window, cx))))
-                                .child(Button::new("bisect-bad").small().danger().label(tr("bisect.mark_bad")).on_click(cx.listener(|this, _, window, cx| this.bisect_op(tr("bisect.mark_bad"), |git| bisect::mark(git, "bad"), window, cx))))
-                                .child(Button::new("bisect-skip").small().outline().label(tr("bisect.skip")).on_click(cx.listener(|this, _, window, cx| this.bisect_op(tr("bisect.skip"), |git| bisect::mark(git, "skip"), window, cx)))),
+                                .child(framed(Button::new("bisect-good"), Tone::Plain, cx).text_color(theme.green).border_color(theme.green.opacity(0.4)).bg(theme.green.opacity(0.1)).icon(icon(IconName::CircleCheck)).label(tr("bisect.mark_good")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.bisect_op(tr("bisect.mark_good"), |git| bisect::mark(git, "good"), window, cx))))
+                                .child(framed(Button::new("bisect-bad"), Tone::Plain, cx).text_color(theme.red).border_color(theme.red.opacity(0.4)).bg(theme.red.opacity(0.1)).icon(icon(IconName::Bug)).label(tr("bisect.mark_bad")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.bisect_op(tr("bisect.mark_bad"), |git| bisect::mark(git, "bad"), window, cx))))
+                                .child(framed(Button::new("bisect-skip"), Tone::Plain, cx).icon(icon(IconName::SkipForward)).label(tr("bisect.skip")).on_click(cx.listener(|this, _, window, cx| this.bisect_op(tr("bisect.skip"), |git| bisect::mark(git, "skip"), window, cx)))),
                         ),
                 );
                 col = col.child(
@@ -153,7 +204,7 @@ impl RepoView {
                         .border_color(theme.border)
                         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("bisect.auto_title")))
                         .child(div().text_xs().text_color(theme.muted_foreground).child(tr("bisect.auto_hint")))
-                        .child(hstack().gap_2().child(div().flex_1().child(Input::new(&self.bisect.command).small())).child(Button::new("bisect-run").small().primary().icon(icon(IconName::Play)).label(tr("bisect.run")).on_click(cx.listener(|this, _, window, cx| {
+                        .child(hstack().gap_2().child(div().flex_1().child(Input::new(&self.bisect.command))).child(framed(Button::new("bisect-run"), Tone::Accent, cx).icon(icon(IconName::Play)).label(tr("bisect.run")).on_click(cx.listener(|this, _, window, cx| {
                             let command = this.bisect.command.read(cx).value().trim().to_string();
                             if command.is_empty() {
                                 return;
@@ -163,7 +214,7 @@ impl RepoView {
                 );
             }
         }
-        col = col.child(hstack().child(spacer()).child(Button::new("bisect-reset").small().ghost().icon(icon(IconName::X)).label(tr("bisect.stop")).on_click(cx.listener(|this, _, window, cx| {
+        col = col.child(hstack().child(spacer()).child(framed(Button::new("bisect-reset"), Tone::Plain, cx).icon(icon(IconName::X)).label(tr("bisect.stop")).on_click(cx.listener(|this, _, window, cx| {
             this.bisect.last_output = None;
             this.bisect_op(tr("bisect.stop"), bisect::reset, window, cx);
         }))));

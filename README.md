@@ -56,6 +56,16 @@ push, cherry-pick, revert, merge and reset are a right-click away.</td>
 </tr>
 </table>
 
+<img src="docs/screenshots/dark/history-multi.png" alt="Several commits selected in History" width="100%">
+
+**Work on many commits at once.** Ctrl+click or Shift+click commits in History, then copy all
+their hashes, cherry-pick them or revert them in one step. Cairn applies them in the order they
+were made, whatever order you clicked them in.
+
+**AI commit messages.** "Write message from diff" drafts a summary and description from your
+staged changes. Tell it how you like your messages in Settings → Commits, or share rules with
+your team in `.cairn/commit-message.md`.
+
 ### Rewrite history without fear
 
 <table>
@@ -137,12 +147,13 @@ commit message or a pull request description, or get a suggestion for a tricky c
 </tr>
 <tr>
 <td><b>Command palette</b> for every page, git command, branch and repository.</td>
-<td><b>About 80 settings</b> with search and live preview: themes, accent colors, graph style,
-diff options, identity profiles, signing and more.</td>
+<td><b>About 90 settings</b> with search and live preview: themes, accent colors, graph style,
+diff options, identity profiles, signing, AI commit message rules and more.</td>
 </tr>
 </table>
 
-Cairn updates itself in the background and shows what changed after each update:
+Cairn updates itself in the background (or when you press "Check now" in Settings → Updates) and
+shows what changed after each update:
 
 <img src="docs/screenshots/dark/whats-new.png" alt="What's new popup" width="100%">
 
