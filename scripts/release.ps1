@@ -56,6 +56,7 @@ Write-Host "Releasing Cairn $tag (Windows, local build)" -ForegroundColor Cyan
 
 Invoke-Checked { cargo build -p cairn --release } 'cargo build'
 
+if (Test-Path 'releases') { Remove-Item 'releases' -Recurse -Force }
 $out = New-Item -ItemType Directory -Force 'releases'
 $stage = Join-Path $out 'stage'
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
