@@ -286,7 +286,7 @@ impl Render for AssistPanel {
                             .items_start()
                             .gap_3()
                             .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_lg().font_weight(FontWeight::BOLD).child(tr(title))).child(div().text_sm().text_color(theme.muted_foreground).child(tr(desc))))
-                            .child(framed(Button::new("assist-run"), Tone::Ai, cx).icon(icon(IconName::Sparkles)).label(tr("assist.run")).loading(self.running).disabled(self.running).on_click(cx.listener(|this, _, _, cx| this.run(cx)))),
+                            .child(framed(Button::new("assist-run"), Tone::Ai, cx).icon(icon(IconName::Sparkles)).label(tr("assist.run")).loading(self.running).when(self.running, |b| b.opacity(0.6)).disabled(self.running).on_click(cx.listener(|this, _, _, cx| this.run(cx)))),
                     )
                     .child(div().id("assist-body").max_h(px(460.)).overflow_y_scroll().child(body)),
             )

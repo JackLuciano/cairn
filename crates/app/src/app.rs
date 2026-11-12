@@ -25,6 +25,7 @@ pub(crate) struct CairnApp {
     pub sidebar_open: bool,
     pub update_ready: Option<(String, std::sync::Arc<velopack::UpdateInfo>)>,
     workspace: Option<(Uuid, Entity<crate::workspace_view::WorkspacePanel>)>,
+    side_toggled: std::collections::HashSet<String>,
     focus: FocusHandle,
 }
 
@@ -52,6 +53,7 @@ impl CairnApp {
             sidebar_open: true,
             update_ready: None,
             workspace: None,
+            side_toggled: if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SIDE").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default() } else { Default::default() },
             focus: cx.focus_handle(),
         };
         cairn_core::git::set_command_logging(app.settings.advanced.log_git_commands);
@@ -208,6 +210,13 @@ impl CairnApp {
                     });
                     task.detach();
                     let _ = this;
+                })
+                .detach();
+                cx.subscribe(&view, |this, _, ev: &crate::repo_view::HistoryScopeEvent, _| {
+                    this.settings.graph.all_branches = ev.0;
+                    if let Err(e) = this.settings.save() {
+                        crate::repo_view::log_error(&format!("saving settings: {e}"));
+                    }
                 })
                 .detach();
                 self.tabs.push(view);
@@ -598,73 +607,166 @@ impl CairnApp {
             let worktrees: Vec<cairn_core::refs::Worktree> = v.worktrees.iter().filter(|w| !w.is_main).cloned().collect();
             (local, worktrees, v.stashes.clone())
         };
-        let row = |id: SharedString, cx: &App| {
+        let toggled = self.side_toggled.clone();
+        let is_open = |key: &str, default_open: bool| default_open != toggled.contains(key);
+        let row = |id: SharedString, indent: bool, cx: &App| {
             let hover = cx.theme().list_hover;
-            div().id(id).flex().items_center().gap(px(10.)).px_2().py(px(5.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(hover))
+            div().id(id).flex().items_center().gap(px(8.)).when(indent, |d| d.pl(px(22.))).when(!indent, |d| d.pl_2()).pr_2().h(px(26.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(hover))
         };
-        let mut col = v_flex().gap(px(18.)).pt_4().pb_2();
-        let mut branch_list = v_flex().gap(px(2.)).child(crate::widgets::caps_heading(tr("sidebar.branches"), Some(branches.len()), cx));
-        for b in branches.iter().take(12) {
+        let header = |key: &'static str, label: SharedString, count: usize, open: bool, cx: &mut Context<Self>| {
+            let theme = cx.theme().clone();
+            div()
+                .id(key)
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .h(px(26.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.list_hover))
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                .child(div().flex_1().child(label.to_uppercase()))
+                .child(count_chip(count.to_string(), theme.secondary, theme.muted_foreground))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.side_toggled.remove(key) {
+                        this.side_toggled.insert(key.to_string());
+                    }
+                    cx.notify();
+                }))
+        };
+        let branch_meta = |b: &cairn_core::refs::Branch| match (b.ahead, b.behind) {
+            (0, 0) => crate::widgets::relative_time(b.last_commit_time).to_string(),
+            (a, 0) => format!("↑{a}"),
+            (0, r) => format!("↓{r}"),
+            (a, r) => format!("↑{a} ↓{r}"),
+        };
+        let branch_row = |b: &cairn_core::refs::Branch, label: String, indent: bool, cx: &mut Context<Self>| {
+            let theme = cx.theme().clone();
             let name = b.name.clone();
             let t = tab.clone();
-            let meta = match (b.ahead, b.behind) {
-                (0, 0) => crate::widgets::relative_time(b.last_commit_time).to_string(),
-                (a, 0) => format!("↑{a}"),
-                (0, r) => format!("↓{r}"),
-                (a, r) => format!("↑{a} ↓{r}"),
-            };
-            branch_list = branch_list.child(
-                row(SharedString::from(format!("side-branch-{}", b.name)), cx)
-                    .when(b.is_head, |d| d.bg(theme.list_active))
-                    .child(icon(IconName::GitBranch).xsmall().text_color(if b.is_head { theme.magenta } else { theme.muted_foreground }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .font_family(theme.mono_font_family.clone())
-                            .font_weight(if b.is_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                            .text_color(if b.is_head { theme.foreground } else { theme.muted_foreground })
-                            .child(b.name.clone()),
-                    )
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child(meta))
-                    .on_click(move |_, window, cx| {
-                        let name = name.clone();
-                        t.update(cx, |v, cx| v.checkout(name, false, window, cx));
-                    }),
-            );
+            row(SharedString::from(format!("side-branch-{}", b.name)), indent, cx)
+                .when(b.is_head, |d| d.bg(theme.list_active))
+                .child(icon(IconName::GitBranch).xsmall().text_color(if b.is_head { theme.magenta } else { theme.muted_foreground }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .font_weight(if b.is_head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                        .text_color(if b.is_head { theme.foreground } else { theme.muted_foreground })
+                        .child(label),
+                )
+                .child(div().flex_none().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(branch_meta(b)))
+                .on_click(move |_, window, cx| {
+                    let name = name.clone();
+                    t.update(cx, |v, cx| v.checkout(name, false, window, cx));
+                })
+        };
+
+        let mut col = v_flex().gap(px(10.)).pt_3().pb_2();
+        let branches_open = is_open("sec:branches", true);
+        let mut branch_list = v_flex().gap(px(1.)).child(header("sec:branches", tr("sidebar.branches"), branches.len(), branches_open, cx));
+        if branches_open {
+            if let Some(cur) = branches.iter().find(|b| b.is_head) {
+                branch_list = branch_list.child(branch_row(cur, cur.name.clone(), false, cx));
+            }
+            let mut groups: Vec<(String, Vec<&cairn_core::refs::Branch>)> = Vec::new();
+            let mut loose: Vec<&cairn_core::refs::Branch> = Vec::new();
+            for b in branches.iter().filter(|b| !b.is_head) {
+                match b.name.split_once('/') {
+                    Some((prefix, _)) => match groups.iter_mut().find(|(p, _)| p == prefix) {
+                        Some((_, list)) => list.push(b),
+                        None => groups.push((prefix.to_string(), vec![b])),
+                    },
+                    None => loose.push(b),
+                }
+            }
+            for (_, members) in groups.iter().filter(|(_, m)| m.len() == 1) {
+                loose.push(members[0]);
+            }
+            groups.retain(|(_, m)| m.len() > 1);
+            loose.sort_by_key(|b| b.name.to_lowercase());
+            for b in loose {
+                branch_list = branch_list.child(branch_row(b, b.name.clone(), false, cx));
+            }
+            for (prefix, members) in &groups {
+                let key = format!("grp:{prefix}");
+                let open = is_open(&key, false);
+                let k2 = key.clone();
+                branch_list = branch_list.child(
+                    row(SharedString::from(format!("side-group-{prefix}")), false, cx)
+                        .child(icon(if open { IconName::FolderOpen } else { IconName::Folder }).xsmall().text_color(theme.yellow))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.foreground).child(format!("{prefix}/")))
+                        .child(div().flex_none().text_size(px(11.)).text_color(theme.muted_foreground).child(members.len().to_string()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.side_toggled.remove(&k2) {
+                                this.side_toggled.insert(k2.clone());
+                            }
+                            cx.notify();
+                        })),
+                );
+                if open {
+                    let more_key = format!("more:{prefix}");
+                    let all = toggled.contains(&more_key);
+                    let shown = if all { members.len() } else { members.len().min(8) };
+                    for b in members.iter().take(shown) {
+                        let short = b.name.split_once('/').map(|(_, r)| r.to_string()).unwrap_or_else(|| b.name.clone());
+                        branch_list = branch_list.child(branch_row(b, short, true, cx));
+                    }
+                    if members.len() > shown {
+                        branch_list = branch_list.child(
+                            row(SharedString::from(more_key.clone()), true, cx)
+                                .text_xs()
+                                .text_color(theme.link)
+                                .child(t!("sidebar.show_all", n = members.len()).to_string())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.side_toggled.insert(more_key.clone());
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                }
+            }
         }
         col = col.child(branch_list);
         if !worktrees.is_empty() {
-            let mut list = v_flex().gap(px(2.)).child(crate::widgets::caps_heading(tr("sidebar.worktrees"), Some(worktrees.len()), cx));
-            for w in &worktrees {
-                let path = w.path.clone();
-                list = list.child(
-                    row(SharedString::from(format!("side-wt-{}", w.path.display())), cx)
-                        .child(icon(IconName::Layers).xsmall().text_color(theme.cyan))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_xs().font_weight(FontWeight::MEDIUM).truncate().child(crate::widgets::display_path(&w.path)))
-                                .child(div().text_size(px(11.)).font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).truncate().child(w.branch.clone().unwrap_or_default())),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| this.open_repo(&path, window, cx))),
-                );
+            let open = is_open("sec:worktrees", worktrees.len() <= 3);
+            let mut list = v_flex().gap(px(1.)).child(header("sec:worktrees", tr("sidebar.worktrees"), worktrees.len(), open, cx));
+            if open {
+                for w in &worktrees {
+                    let path = w.path.clone();
+                    let label = w.branch.clone().unwrap_or_else(|| w.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                    let full: SharedString = crate::widgets::display_path(&w.path).into();
+                    list = list.child(
+                        row(SharedString::from(format!("side-wt-{}", w.path.display())), false, cx)
+                            .child(icon(IconName::Layers).xsmall().text_color(theme.cyan))
+                            .child(div().flex_1().min_w_0().truncate().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(label))
+                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx))
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_repo(&path, window, cx))),
+                    );
+                }
             }
             col = col.child(list);
         }
         if !stashes.is_empty() {
-            let mut list = v_flex().gap(px(2.)).child(crate::widgets::caps_heading(tr("sidebar.stashes"), Some(stashes.len()), cx));
-            for s in stashes.iter().take(6) {
-                let t = tab.clone();
-                list = list.child(
-                    row(SharedString::from(format!("side-stash-{}", s.index)), cx)
-                        .child(icon(IconName::Archive).xsmall().text_color(theme.muted_foreground))
-                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(format!("stash@{{{}}}: {}", s.index, s.message)))
-                        .on_click(move |_, window, cx| t.update(cx, |v, cx| v.open_page(crate::repo_view::Page::Branches, window, cx))),
-                );
+            let open = is_open("sec:stashes", stashes.len() <= 3);
+            let mut list = v_flex().gap(px(1.)).child(header("sec:stashes", tr("sidebar.stashes"), stashes.len(), open, cx));
+            if open {
+                for s in stashes.iter().take(6) {
+                    let t = tab.clone();
+                    list = list.child(
+                        row(SharedString::from(format!("side-stash-{}", s.index)), false, cx)
+                            .child(icon(IconName::Archive).xsmall().text_color(theme.magenta))
+                            .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(cairn_core::refs::stash_title(&s.message).0))
+                            .on_click(move |_, window, cx| t.update(cx, |v, cx| v.open_page(crate::repo_view::Page::Stashes, window, cx))),
+                    );
+                }
             }
             col = col.child(list);
         }

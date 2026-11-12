@@ -11,6 +11,7 @@ mod repo_settings;
 mod commit_menu;
 mod dialogs;
 mod diff_view;
+mod drag;
 mod history;
 mod platform;
 mod repo_view;

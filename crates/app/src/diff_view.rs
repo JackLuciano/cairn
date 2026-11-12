@@ -88,6 +88,7 @@ impl DiffPane {
 pub(crate) enum DiffSource {
     Change,
     CommitFile,
+    Page,
 }
 
 fn expand_tabs(text: &str, width: usize) -> Cow<'_, str> {
@@ -249,6 +250,7 @@ impl RepoView {
         let pane = match source {
             DiffSource::Change => &mut self.change_pane,
             DiffSource::CommitFile => &mut self.commit_pane,
+            DiffSource::Page => &mut self.page_pane,
         };
         let Some(path) = pane.sync(diff, &settings, cx) else {
             return empty_state(IconName::TriangleAlert, tr("diff.unreadable_title"), tr("diff.unreadable_body"), cx).into_any_element();
@@ -261,7 +263,7 @@ impl RepoView {
             .header_visible(false)
             .line_number(settings.diffs.line_numbers)
             .syntax_highlight(settings.diffs.syntax_highlighting)
-            .soft_wrap(settings.diffs.wrap_lines || split || source == DiffSource::CommitFile)
+            .soft_wrap(settings.diffs.wrap_lines || split || source != DiffSource::Change)
             .on_line_hover({
                 let anchor = anchor.clone();
                 move |pos, _, _| {
@@ -270,6 +272,21 @@ impl RepoView {
                     }
                 }
             });
+        if source == DiffSource::Page && self.page == crate::repo_view::Page::PullRequests {
+            let view = cx.entity().downgrade();
+            let file = diff.path.clone();
+            return el
+                .hover_highlight(DiffHoverHighlight::Line)
+                .on_line_click(move |pos, _, window, cx| {
+                    let new_side = pos.side() == DiffSide::Modified;
+                    let line = pos.line() as u32;
+                    let file = file.clone();
+                    if let Some(view) = view.upgrade() {
+                        crate::pages::pulls::comment_on_line(view, file, line, new_side, window, cx);
+                    }
+                })
+                .into_any_element();
+        }
         if source != DiffSource::Change {
             return el.into_any_element();
         }
@@ -361,6 +378,10 @@ fn image_pair(source: DiffSource, diff: &FileDiff, cx: &mut Context<RepoView>) -
         DiffSource::CommitFile => {
             let id = view.selected_commit.clone()?;
             (blob_to_file(&git, &format!("{id}^:{old_path}"), &ext), blob_to_file(&git, &format!("{id}:{}", diff.path), &ext))
+        }
+        DiffSource::Page => {
+            let (old, new) = view.page_revs.clone()?;
+            (old.and_then(|o| blob_to_file(&git, &format!("{o}:{old_path}"), &ext)), blob_to_file(&git, &format!("{new}:{}", diff.path), &ext))
         }
     };
     Some(pair)

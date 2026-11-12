@@ -385,6 +385,110 @@ pub fn reset(git: &Git, target: &str, mode: ResetMode) -> Result<()> {
     Ok(())
 }
 
+/// Writes commits as a patch file that `git am` can apply elsewhere.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `ids` - the commits, in any order
+/// * `dest` - the file to write
+///
+/// # Returns
+/// `Ok(())` when the file is written.
+pub fn save_patch(git: &Git, ids: &[String], dest: &std::path::Path) -> Result<()> {
+    let mut patches = Vec::new();
+    for id in oldest_first(git, ids) {
+        patches.extend(git.run_bytes(["format-patch", "-1", "--stdout", "--no-signature", &id])?);
+    }
+    std::fs::write(dest, patches)?;
+    Ok(())
+}
+
+/// Whether a patch file carries commit information (`git format-patch` output) or is a plain diff.
+///
+/// # Arguments
+/// * `text` - the patch file's contents
+///
+/// # Returns
+/// `true` for mailbox patches that become commits when applied.
+pub fn is_mailbox_patch(text: &str) -> bool {
+    text.starts_with("From ") && text.lines().take(40).any(|l| l.starts_with("Subject:"))
+}
+
+/// Applies a patch file: mailbox patches become commits, plain diffs change the working tree.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `file` - the patch file
+///
+/// # Returns
+/// Git's output. A mailbox patch that conflicts stops with `git am` in progress.
+pub fn apply_patch(git: &Git, file: &std::path::Path) -> Result<String> {
+    let text = std::fs::read_to_string(file)?;
+    let path = file.to_string_lossy().into_owned();
+    if is_mailbox_patch(&text) {
+        git.run(["am", "--3way", &path])
+    } else {
+        git.run(["apply", "--3way", "--whitespace=nowarn", &path])
+    }
+}
+
+/// Which two states an external diff tool compares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolDiff {
+    Unstaged,
+    Staged,
+    Revisions(String, String),
+}
+
+/// Opens a file's diff in the external diff tool configured in git or named in Settings.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `tool` - git's name for the tool, or empty to use `diff.tool` from git's configuration
+/// * `what` - which states to compare
+/// * `path` - the file
+///
+/// # Returns
+/// `Ok(())` once the tool closes.
+pub fn open_difftool(git: &Git, tool: &str, what: &ToolDiff, path: &str) -> Result<()> {
+    let mut args: Vec<String> = vec!["difftool".into(), "--no-prompt".into()];
+    if !tool.trim().is_empty() {
+        args.push(format!("--tool={}", tool.trim()));
+    }
+    match what {
+        ToolDiff::Unstaged => {}
+        ToolDiff::Staged => args.push("--cached".into()),
+        ToolDiff::Revisions(a, b) => {
+            args.push(a.clone());
+            args.push(b.clone());
+        }
+    }
+    args.push("--".into());
+    args.push(path.to_string());
+    git.run(args)?;
+    Ok(())
+}
+
+/// Opens a conflicted file in the external merge tool configured in git or named in Settings.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `tool` - git's name for the tool, or empty to use `merge.tool` from git's configuration
+/// * `path` - the conflicted file
+///
+/// # Returns
+/// `Ok(())` once the tool closes; git marks the file resolved when the tool reports success.
+pub fn open_mergetool(git: &Git, tool: &str, path: &str) -> Result<()> {
+    let mut args: Vec<String> = vec!["mergetool".into(), "--no-prompt".into()];
+    if !tool.trim().is_empty() {
+        args.push(format!("--tool={}", tool.trim()));
+    }
+    args.push("--".into());
+    args.push(path.to_string());
+    git.run(args)?;
+    Ok(())
+}
+
 /// Reads a git config value, falling back through system, global and local scopes.
 ///
 /// # Arguments

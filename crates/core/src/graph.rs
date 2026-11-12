@@ -97,6 +97,12 @@ pub fn layout(commits: &[CommitInfo]) -> Vec<GraphRow> {
             if !known.contains_key(parent.as_str()) && n > 0 {
                 continue;
             }
+            if n == 0
+                && let Some(existing) = lanes.iter().position(|l| l.as_deref() == Some(parent.as_str())).filter(|e| *e < lane)
+            {
+                lines.push(GraphLine { from: lane, to: existing, part: LinePart::Bottom, color: colors[existing] });
+                continue;
+            }
             if n == 0 && lanes[lane].is_none() {
                 lanes[lane] = Some(parent.clone());
                 lines.push(GraphLine { from: lane, to: lane, part: LinePart::Bottom, color });
@@ -162,5 +168,17 @@ mod tests {
         assert_eq!(rows[2].lane, 0);
         assert_eq!(rows[3].lane, 0);
         assert!(rows[3].lines.iter().any(|l| l.part == LinePart::Top && l.from == 1));
+    }
+
+    #[test]
+    fn many_branches_off_one_commit_join_the_existing_lane() {
+        let mut commits: Vec<CommitInfo> = (0..18).map(|i| c(&format!("tip{i}"), &["root"])).collect();
+        commits.push(c("root", &[]));
+        let rows = layout(&commits);
+        assert!(rows.iter().all(|r| r.width <= 2), "graph stays two lanes wide");
+        assert_eq!(rows[0].lane, 0);
+        assert!(rows[1..18].iter().all(|r| r.lane == 1));
+        assert!(rows[5].lines.iter().any(|l| l.part == LinePart::Bottom && l.from == 1 && l.to == 0));
+        assert_eq!(rows[18].lane, 0);
     }
 }

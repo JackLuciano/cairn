@@ -42,6 +42,20 @@ pub(crate) fn plural(key: &str, n: usize) -> String {
     t!(key.as_str(), n = n).to_string()
 }
 
+/// Like `plural`, with a `%{who}` value filled in as well.
+///
+/// # Arguments
+/// * `key` - the translation key whose text interpolates `%{n}` and `%{who}`
+/// * `n` - the count
+/// * `who` - the name to insert
+///
+/// # Returns
+/// The translated text.
+pub(crate) fn plural_with(key: &str, n: usize, who: &str) -> String {
+    let key = if n == 1 { format!("{key}_one") } else { key.to_string() };
+    t!(key.as_str(), n = n, who = who).to_string()
+}
+
 pub(crate) fn icon(name: IconName) -> Icon {
     Icon::new(name)
 }
@@ -132,6 +146,94 @@ pub(crate) fn page_heading(title: impl Into<SharedString>, subtitle: impl Into<S
         .child(div().text_sm().text_color(cx.theme().muted_foreground).child(subtitle.into()))
 }
 
+/// A clickable row for one changed file: status letter, name, folder and line counts.
+///
+/// # Arguments
+/// * `id` - element id
+/// * `status` - the git status letter
+/// * `path` - the file path
+/// * `stats` - lines added and removed, when known
+/// * `selected` - whether the row is the open file
+///
+/// # Returns
+/// The row; the caller adds `on_click`.
+pub(crate) fn file_row(id: impl Into<ElementId>, status: char, path: &str, stats: Option<(u32, u32)>, selected: bool, cx: &App) -> Stateful<Div> {
+    let t = cx.theme();
+    let (dir, name) = match path.rsplit_once('/') {
+        Some((d, n)) => (d.to_string(), n.to_string()),
+        None => (String::new(), path.to_string()),
+    };
+    let hover = t.list_hover;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py(px(6.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(selected, |d| d.bg(t.list_active))
+        .when(!selected, |d| d.hover(move |s| s.bg(hover)))
+        .child(status_letter(status, cx))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(1.))
+                .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
+                .when(!dir.is_empty(), |d| d.child(div().truncate().text_size(px(11.)).text_color(t.muted_foreground).child(dir))),
+        )
+        .when_some(stats, |d, (a, r)| {
+            d.child(div().flex_none().text_xs().text_color(t.green).child(format!("+{a}"))).child(div().flex_none().text_xs().text_color(t.red).child(format!("−{r}")))
+        })
+}
+
+/// A clickable row for one commit: summary, author, time and short hash.
+///
+/// # Arguments
+/// * `id` - element id
+/// * `hash` - the commit hash
+/// * `summary` - first line of the message
+/// * `author` - author name
+/// * `time` - commit time as a Unix timestamp
+/// * `selected` - whether the row is selected
+///
+/// # Returns
+/// The row; the caller adds `on_click` and any trailing buttons.
+pub(crate) fn commit_row(id: impl Into<ElementId>, hash: &str, summary: &str, author: &str, time: i64, selected: bool, cx: &App) -> Stateful<Div> {
+    let t = cx.theme();
+    let hover = t.list_hover;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py(px(7.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(selected, |d| d.bg(t.list_active))
+        .when(!selected, |d| d.hover(move |s| s.bg(hover)))
+        .child(avatar(author, px(22.), cx))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(1.))
+                .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(summary.to_string()))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_size(px(11.))
+                        .text_color(t.muted_foreground)
+                        .child(div().font_family(t.mono_font_family.clone()).child(hash.chars().take(7).collect::<String>()))
+                        .child(div().truncate().child(author.to_string()))
+                        .child(div().flex_none().child(relative_time(time))),
+                ),
+        )
+}
+
 /// How a framed toolbar button is colored.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tone {
@@ -162,6 +264,25 @@ pub(crate) fn framed(button: gpui_kit::component::button::Button, tone: Tone, cx
     };
     let styled = base.h(px(32.)).px(px(10.)).rounded(px(8.)).border_1().border_color(border).bg(bg).text_color(fg).text_sm();
     if tone == Tone::Plain { styled.font_weight(FontWeight::MEDIUM) } else { styled.font_weight(FontWeight::SEMIBOLD) }
+}
+
+/// Styles a framed button that may be unavailable: when `enabled` is false it is dimmed, drawn
+/// without its accent color and does not respond to clicks.
+///
+/// # Arguments
+/// * `button` - the button to style
+/// * `tone` - plain, accent or AI, used while enabled
+/// * `enabled` - whether the button can be clicked
+///
+/// # Returns
+/// The styled button.
+pub(crate) fn framed_if(button: gpui_kit::component::button::Button, tone: Tone, enabled: bool, cx: &App) -> gpui_kit::component::button::Button {
+    use gpui_kit::component::Disableable as _;
+    if enabled {
+        return framed(button, tone, cx);
+    }
+    let t = cx.theme();
+    framed(button, Tone::Plain, cx).bg(t.secondary.opacity(0.5)).border_color(t.border.opacity(0.6)).text_color(t.muted_foreground).opacity(0.6).cursor_not_allowed().disabled(true)
 }
 
 /// A small rounded count chip, as on the Push button and page tabs.

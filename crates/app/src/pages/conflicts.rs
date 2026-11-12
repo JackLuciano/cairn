@@ -4,7 +4,7 @@ use cairn_core::conflicts::{self, Resolution, Segment};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -344,12 +344,12 @@ impl RepoView {
                                                 if all_done { theme.green } else { theme.yellow },
                                             ))
                                             .child(spacer())
-                                            .child(crate::widgets::framed(Button::new("cf-prev"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::ChevronLeft)).label(tr("conflicts.previous")).disabled(i == 0).on_click(cx.listener(|this, _, _, cx| {
+                                            .child(crate::widgets::framed_if(Button::new("cf-prev"), crate::widgets::Tone::Plain, i != 0, cx).icon(icon(IconName::ChevronLeft)).label(tr("conflicts.previous")).on_click(cx.listener(|this, _, _, cx| {
                                                 this.conflicts.index = this.conflicts.index.saturating_sub(1);
                                                 cx.notify();
                                             })))
                                             .child(div().text_sm().text_color(theme.muted_foreground).child(t!("conflicts.n_of", n = i + 1, total = total).to_string()))
-                                            .child(crate::widgets::framed(Button::new("cf-next"), crate::widgets::Tone::Plain, cx).label(tr("conflicts.next")).icon(icon(IconName::ChevronRight)).disabled(i + 1 >= total).on_click(cx.listener(|this, _, _, cx| {
+                                            .child(crate::widgets::framed_if(Button::new("cf-next"), crate::widgets::Tone::Plain, i + 1 < total, cx).label(tr("conflicts.next")).icon(icon(IconName::ChevronRight)).on_click(cx.listener(|this, _, _, cx| {
                                                 this.conflicts.index = (this.conflicts.index + 1).min(this.conflicts.choices.len().saturating_sub(1));
                                                 cx.notify();
                                             }))),
@@ -472,6 +472,10 @@ impl RepoView {
                                     let p = p.clone();
                                     this.run_op(tr("op.resolve"), None, move |git| cairn_core::conflicts::take_side(git, &p, false).map(|_| String::new()), window, cx);
                                 }
+                            })))
+                            .child(crate::widgets::framed(Button::new("cf-mergetool"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::ArrowLeftRight)).label(tr("actions.open_mergetool")).tooltip(tr("actions.open_mergetool_tip")).on_click(cx.listener({
+                                let p = path.clone();
+                                move |this, _, window, cx| this.open_mergetool(p.clone(), window, cx)
                             })))
                             .child(spacer())
                             .child(

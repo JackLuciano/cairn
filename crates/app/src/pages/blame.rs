@@ -2,13 +2,13 @@ use cairn_core::blame::{self, BlameLine, LineVersion};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::{Page, RepoView};
-use crate::widgets::{Tone, avatar, empty_state, framed, hstack, icon, icon_tile, relative_time, spacer, tr};
+use crate::widgets::{Tone, avatar, empty_state, hstack, icon, icon_tile, relative_time, spacer, tr};
 
 pub(crate) struct BlameState {
     pub files: Vec<String>,
@@ -184,11 +184,11 @@ impl RepoView {
                             .child(
                                 hstack()
                                     .gap_2()
-                                    .child(framed(Button::new("ver-older"), Tone::Plain, cx).flex_1().icon(icon(IconName::ChevronLeft)).label(tr("blame.older")).disabled(version + 1 >= total).on_click(cx.listener(|this, _, _, cx| {
+                                    .child(crate::widgets::framed_if(Button::new("ver-older"), Tone::Plain, version + 1 < total, cx).flex_1().icon(icon(IconName::ChevronLeft)).label(tr("blame.older")).on_click(cx.listener(|this, _, _, cx| {
                                         this.blame.version += 1;
                                         cx.notify();
                                     })))
-                                    .child(framed(Button::new("ver-newer"), Tone::Plain, cx).flex_1().label(tr("blame.newer")).icon(icon(IconName::ChevronRight)).disabled(version == 0).on_click(cx.listener(|this, _, _, cx| {
+                                    .child(crate::widgets::framed_if(Button::new("ver-newer"), Tone::Plain, version != 0, cx).flex_1().label(tr("blame.newer")).icon(icon(IconName::ChevronRight)).on_click(cx.listener(|this, _, _, cx| {
                                         this.blame.version = this.blame.version.saturating_sub(1);
                                         cx.notify();
                                     }))),
@@ -248,7 +248,18 @@ impl RepoView {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .when_some(self.blame.file.clone(), |d, f| d.child(hstack().h(px(32.)).px_3().border_b_1().border_color(theme.border).text_sm().font_family(theme.mono_font_family.clone()).child(f)))
+                    .when_some(self.blame.file.clone(), |d, f| {
+                        let path = f.clone();
+                        d.child(
+                            hstack()
+                                .h(px(36.))
+                                .px_3()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(div().flex_1().min_w_0().truncate().text_sm().font_family(theme.mono_font_family.clone()).child(f))
+                                .child(Button::new("blame-file-history").xsmall().ghost().icon(icon(IconName::ScrollText)).label(tr("actions.file_history")).on_click(cx.listener(move |this, _, _, cx| this.open_file_history(path.clone(), cx)))),
+                        )
+                    })
                     .child(div().flex_1().min_h_0().child(center)),
             )
             .child(div().id("blame-history").flex_none().w(px(360.)).h_full().overflow_y_scroll().bg(theme.sidebar).border_l_1().border_color(theme.border).child(right))

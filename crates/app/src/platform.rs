@@ -1,6 +1,37 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Opens a file or folder in the editor named in Settings → Tools.
+///
+/// # Arguments
+/// * `editor` - the editor command, such as `code` or `"C:\Program Files\Sublime Text\subl.exe"`
+/// * `path` - what to open
+///
+/// # Returns
+/// `false` when no editor is set or it could not be started, so the caller can fall back to the
+/// system's default program.
+pub(crate) fn open_in_editor(editor: &str, path: &Path) -> bool {
+    let editor = editor.trim();
+    if editor.is_empty() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("cmd")
+            .arg("/C")
+            .raw_arg(format!("{editor} \"{}\"", path.display()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(path).spawn().is_ok()
+    }
+}
+
 pub(crate) fn open_terminal(dir: &Path) {
     #[cfg(windows)]
     {

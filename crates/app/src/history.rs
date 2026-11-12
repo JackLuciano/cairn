@@ -15,14 +15,34 @@ use crate::widgets::{avatar, empty_state, full_time, hstack, icon, lane_color, r
 
 pub(crate) const ROW_H: f32 = 34.;
 const LANE_W: f32 = 14.;
+const MIN_LANE_W: f32 = 6.;
+const MAX_GRAPH_W: f32 = 200.;
 const GRAPH_PAD: f32 = 10.;
 
+/// Works out lane spacing and column width so the whole graph fits a bounded column.
+///
+/// # Arguments
+/// * `lanes` - the widest row's lane count
+///
+/// # Returns
+/// `(lane spacing, column width)` in pixels.
+fn graph_metrics(lanes: usize) -> (f32, f32) {
+    let gaps = lanes.saturating_sub(1) as f32;
+    let lane_w = if gaps == 0. { LANE_W } else { ((MAX_GRAPH_W - GRAPH_PAD * 2. - 4.) / gaps).clamp(MIN_LANE_W, LANE_W) };
+    (lane_w, (GRAPH_PAD * 2. + gaps * lane_w + 4.).clamp(52., MAX_GRAPH_W))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn paint_graph(row: &GraphRow, is_head: bool, is_merge: bool, style: GraphStyle, bounds: Bounds<Pixels>, colors: &[Hsla], bg: Hsla, window: &mut Window) {
+fn paint_graph(row: &GraphRow, is_head: bool, is_merge: bool, style: GraphStyle, lane_w: f32, bounds: Bounds<Pixels>, colors: &[Hsla], bg: Hsla, window: &mut Window) {
+    window.with_content_mask(Some(ContentMask { bounds }), |window| paint_graph_clipped(row, is_head, is_merge, style, lane_w, bounds, colors, bg, window));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_graph_clipped(row: &GraphRow, is_head: bool, is_merge: bool, style: GraphStyle, lane_w: f32, bounds: Bounds<Pixels>, colors: &[Hsla], bg: Hsla, window: &mut Window) {
     let top = bounds.top();
     let bottom = bounds.bottom();
     let mid = top + (bottom - top) / 2.;
-    let x = |lane: usize| bounds.left() + px(GRAPH_PAD + lane as f32 * LANE_W);
+    let x = |lane: usize| bounds.left() + px(GRAPH_PAD + lane as f32 * lane_w);
     let color = |i: usize| colors[i % colors.len()];
     for line in &row.lines {
         let (p0, p1) = match line.part {
@@ -192,6 +212,7 @@ impl RepoView {
                     RefKind::Head => (theme.red, IconName::CircleDot),
                 };
                 let chip = hstack()
+                    .id(SharedString::from(format!("chip-{}-{}", c.id, r.name)))
                     .flex_none()
                     .gap_1()
                     .px(px(6.))
@@ -205,7 +226,14 @@ impl RepoView {
                     .border_color(color.opacity(0.45))
                     .child(icon(ic).xsmall())
                     .child(r.name.clone());
-                chip.into_any_element()
+                if r.kind == RefKind::LocalBranch {
+                    let name = r.name.clone();
+                    chip.cursor_grab()
+                        .on_drag(crate::drag::DragBranch { name: name.clone() }, move |_, _, _, cx| crate::drag::DragPreview::new(name.clone(), IconName::GitBranch, cx))
+                        .into_any_element()
+                } else {
+                    chip.into_any_element()
+                }
             })
             .collect();
         chips.extend(pr_chips);
@@ -219,6 +247,7 @@ impl RepoView {
         let selected = if self.multi_select.is_empty() { self.selected_commit.as_deref() == Some(commit.id.as_str()) } else { self.multi_select.contains(&commit.id) };
         let is_head = commit.refs.iter().any(|r| r.is_head);
         let graph_w = self.graph_w;
+        let lane_w = self.graph_lane_w;
         let show_graph = self.show_graph;
         let colors: Vec<Hsla> = (0..8).map(|i| lane_color(i, cx)).collect();
         let bg = if selected { theme.list_active } else { theme.background };
@@ -242,6 +271,20 @@ impl RepoView {
             .when(!selected, |d| d.hover(|s| s.bg(cx.theme().list_hover)))
             .cursor_pointer()
             .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| this.click_commit(ix, id.clone(), ev.modifiers(), cx)))
+            .on_drag(
+                crate::drag::DragCommits { ids: if self.multi_select.contains(&commit.id) { self.multi_select.clone() } else { vec![commit.id.clone()] } },
+                |d, _, _, cx| crate::drag::DragPreview::new(crate::widgets::plural("drag.commits", d.ids.len()), IconName::GitCommitHorizontal, cx),
+            )
+            .drag_over::<crate::drag::DragBranch>(move |s, _, _, cx| s.bg(cx.theme().primary.opacity(0.16)))
+            .drag_over::<crate::drag::DragCommits>(move |s, _, _, cx| s.bg(cx.theme().primary.opacity(0.16)))
+            .on_drop(cx.listener({
+                let target = commit.id.clone();
+                move |this, d: &crate::drag::DragBranch, window, cx| this.drop_branch(d.name.clone(), target.clone(), window, cx)
+            }))
+            .on_drop(cx.listener({
+                let target = commit.id.clone();
+                move |this, d: &crate::drag::DragCommits, window, cx| this.drop_commits(d.ids.clone(), target.clone(), window, cx)
+            }))
             .pl_3()
             .pr_4()
             .gap(px(10.))
@@ -252,7 +295,7 @@ impl RepoView {
                         .w(px(graph_w))
                         .h_full()
                         .child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
-                            paint_graph(&row, is_head, is_merge, style, bounds, &colors, bg, window)
+                            paint_graph(&row, is_head, is_merge, style, lane_w, bounds, &colors, bg, window)
                         }).size_full()),
                 )
             })
@@ -298,9 +341,10 @@ impl RepoView {
                 .into_any_element();
         }
         let count = self.commits.len();
-        let lanes = self.rows.iter().take(80).map(|r| r.width).max().unwrap_or(1).min(12);
-        let graph_header_w = (GRAPH_PAD * 2. + (lanes.max(1) - 1) as f32 * LANE_W + 4.).max(52.);
+        let lanes = self.rows.iter().map(|r| r.width).max().unwrap_or(1).max(1);
+        let (lane_w, graph_header_w) = graph_metrics(lanes);
         self.graph_w = graph_header_w;
+        self.graph_lane_w = lane_w;
         let list = uniform_list(
             "history-list",
             count,
@@ -325,7 +369,42 @@ impl RepoView {
                             .gap_2()
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(div().flex_none().whitespace_nowrap().text_sm().font_weight(FontWeight::SEMIBOLD).child(if self.settings.graph.first_parent { tr("history.first_parent_title") } else { tr("history.all_branches") }))
+                            .child({
+                                let all = self.settings.graph.all_branches;
+                                let segment = |id: &'static str, label: SharedString, on: bool, value: bool, cx: &mut Context<Self>| {
+                                    let theme = cx.theme().clone();
+                                    div()
+                                        .id(id)
+                                        .flex()
+                                        .items_center()
+                                        .h(px(26.))
+                                        .px(px(12.))
+                                        .rounded(px(6.))
+                                        .text_sm()
+                                        .whitespace_nowrap()
+                                        .cursor_pointer()
+                                        .when(on, |d| d.bg(theme.background).text_color(theme.foreground).font_weight(FontWeight::SEMIBOLD).shadow_xs())
+                                        .when(!on, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
+                                        .child(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.settings.graph.all_branches != value {
+                                                this.settings.graph.all_branches = value;
+                                                cx.emit(crate::repo_view::HistoryScopeEvent(value));
+                                                this.reload(cx);
+                                            }
+                                        }))
+                                };
+                                hstack()
+                                    .flex_none()
+                                    .p(px(2.))
+                                    .gap(px(2.))
+                                    .rounded(px(8.))
+                                    .bg(theme.secondary)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .child(segment("scope-branch", tr("history.this_branch"), !all, false, cx))
+                                    .child(segment("scope-all", tr("history.all_branches"), all, true, cx))
+                            })
                             .child(div().flex_none().whitespace_nowrap().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("history.commits_shown", count)))
                             .child(div().flex_1().min_w(px(120.)).max_w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
                             .child(spacer())
@@ -337,10 +416,12 @@ impl RepoView {
                                 this.settings.graph.first_parent = !this.settings.graph.first_parent;
                                 this.reload(cx);
                             })))
-                            .child(toggle_pill("hide-remotes", tr("history.hide_remotes"), !self.settings.graph.show_remotes, cx).on_click(cx.listener(|this, _, _, cx| {
-                                this.settings.graph.show_remotes = !this.settings.graph.show_remotes;
-                                this.reload(cx);
-                            }))),
+                            .when(self.settings.graph.all_branches, |d| {
+                                d.child(toggle_pill("hide-remotes", tr("history.hide_remotes"), !self.settings.graph.show_remotes, cx).on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings.graph.show_remotes = !this.settings.graph.show_remotes;
+                                    this.reload(cx);
+                                })))
+                            }),
                     )
                     .when(self.multi_select.len() > 1, |d| {
                         let n = self.multi_select.len();
@@ -548,6 +629,30 @@ impl RepoView {
                         .when_some(f.added, |el, a| el.child(div().text_xs().text_color(theme.green).child(format!("+{a}"))))
                         .when_some(f.removed, |el, r| el.child(div().text_xs().text_color(theme.red).child(format!("−{r}"))))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_commit_file(path.clone(), cx)))
+                        .context_menu({
+                            let view = cx.entity();
+                            let path = f.path.clone();
+                            let id = d.id.clone();
+                            let parent = d.parents.first().cloned().unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".into());
+                            move |menu, _, _| {
+                                let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
+                                let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
+                                let (id, parent) = (id.clone(), parent.clone());
+                                menu.item(gpui_kit::component::menu::PopupMenuItem::new(t!("actions.file_history").to_string()).icon(icon(IconName::ScrollText)).on_click(move |_, _, cx| {
+                                    let p = p1.clone();
+                                    v1.update(cx, |v, cx| v.open_file_history(p, cx));
+                                }))
+                                .item(gpui_kit::component::menu::PopupMenuItem::new(t!("changes.line_history").to_string()).icon(icon(IconName::FileClock)).on_click(move |_, _, cx| {
+                                    let p = p2.clone();
+                                    v2.update(cx, |v, cx| v.open_blame(p, cx));
+                                }))
+                                .item(gpui_kit::component::menu::PopupMenuItem::new(t!("actions.open_difftool").to_string()).icon(icon(IconName::ArrowLeftRight)).on_click(move |_, window, cx| {
+                                    let what = cairn_core::ops::ToolDiff::Revisions(parent.clone(), id.clone());
+                                    let p = p3.clone();
+                                    v3.update(cx, |v, cx| v.open_difftool(what, p, window, cx));
+                                }))
+                            }
+                        })
                 })),
             )
             .into_any_element()

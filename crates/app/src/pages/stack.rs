@@ -1,7 +1,7 @@
 use cairn_core::stack::{self, PullRequest, ReviewComment, StackBranch};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -253,7 +253,7 @@ impl RepoView {
                             .child({
                                 let open = self.stack.branches.iter().filter(|b| b.pr.is_some()).count();
                                 let label = if open > 0 { crate::widgets::plural("stack.submit_update", open) } else { tr("stack.submit").to_string() };
-                                framed(Button::new("stack-submit"), Tone::Accent, cx).icon(icon(IconName::GitPullRequestCreate)).label(label).disabled(self.busy.is_some() || self.stack.gh_error.is_some()).on_click(cx.listener(|this, _, window, cx| this.submit_stack(window, cx)))
+                                crate::widgets::framed_if(Button::new("stack-submit"), Tone::Accent, self.busy.is_none() && self.stack.gh_error.is_none(), cx).icon(icon(IconName::GitPullRequestCreate)).label(label).on_click(cx.listener(|this, _, window, cx| this.submit_stack(window, cx)))
                             }),
                     )
                     .when(needs_restack, |d| {
@@ -269,7 +269,7 @@ impl RepoView {
                                 .border_color(theme.yellow.opacity(0.35))
                                 .child(icon(IconName::TriangleAlert).text_color(theme.yellow))
                                 .child(div().flex_1().text_sm().child(tr("stack.restack_hint")))
-                                .child(framed(Button::new("stack-restack"), Tone::Plain, cx).label(tr("stack.restack")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.restack(window, cx)))),
+                                .child(crate::widgets::framed_if(Button::new("stack-restack"), Tone::Plain, self.busy.is_none(), cx).label(tr("stack.restack")).on_click(cx.listener(|this, _, window, cx| this.restack(window, cx)))),
                         )
                     })
                     .when_some(self.stack.gh_error.clone(), |d, e| d.child(div().p_3().rounded(px(8.)).bg(theme.muted).text_xs().text_color(theme.muted_foreground).child(e)))

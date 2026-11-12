@@ -1,0 +1,74 @@
+name: Build (macOS and Linux)
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: unix-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+            artifact: cairn-linux-x64
+          - name: macOS Apple Silicon
+            os: macos-15
+            artifact: cairn-macos-arm64
+          - name: macOS Intel
+            os: macos-15-intel
+            artifact: cairn-macos-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.artifact }}
+
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang cmake libssl-dev libzstd-dev \
+            libfontconfig-dev libfreetype-dev libasound2-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libvulkan-dev libdbus-1-dev
+
+      - name: Git identity for tests
+        run: |
+          git config --global user.name "Cairn CI"
+          git config --global user.email "ci@cairn.invalid"
+
+      - name: Core tests
+        run: cargo test -p cairn-core
+
+      - name: Build
+        run: cargo build --release -p cairn
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/cairn dist/
+          cp README.md CHANGELOG.md dist/ 2>/dev/null || true
+          tar -czf ${{ matrix.artifact }}.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error

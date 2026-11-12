@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -120,6 +120,7 @@ fn schema() -> Vec<Category> {
                 Group {
                     label: "settings.group.graph",
                     rows: vec![
+                        row("all_branches", "settings.all_branches", Some("settings.all_branches_desc"), Control::Toggle(|s| s.graph.all_branches, |s, v| s.graph.all_branches = v)),
                         row("graph_style", "settings.graph_style", None, Control::Choice(&["opt.curved", "opt.angular"], |s| (s.graph.style == GraphStyle::Angular) as usize, |s, i| s.graph.style = if i == 1 { GraphStyle::Angular } else { GraphStyle::Curved })),
                         row("show_remotes", "settings.show_remotes", None, Control::Toggle(|s| s.graph.show_remotes, |s, v| s.graph.show_remotes = v)),
                         row("show_tags", "settings.show_tags", None, Control::Toggle(|s| s.graph.show_tags, |s, v| s.graph.show_tags = v)),
@@ -355,6 +356,19 @@ fn schema() -> Vec<Category> {
             }],
         },
         Category {
+            id: "tools",
+            label: "settings.cat.tools",
+            desc: "settings.cat.tools_desc",
+            groups: vec![Group {
+                label: "settings.group.programs",
+                rows: vec![
+                    row("editor", "settings.editor", Some("settings.editor_desc"), Control::Text(|s| s.tools.editor.clone(), |s, v| s.tools.editor = v)),
+                    row("diff_tool", "settings.diff_tool", Some("settings.diff_tool_desc"), Control::Text(|s| s.tools.diff_tool.clone(), |s, v| s.tools.diff_tool = v)),
+                    row("merge_tool", "settings.merge_tool", Some("settings.merge_tool_desc"), Control::Text(|s| s.tools.merge_tool.clone(), |s, v| s.tools.merge_tool = v)),
+                ],
+            }],
+        },
+        Category {
             id: "advanced",
             label: "settings.cat.advanced",
             desc: "settings.cat.advanced_desc",
@@ -396,6 +410,7 @@ fn category_icon(id: &str) -> IconName {
         "notifications" => IconName::Bell,
         "performance" => IconName::Gauge,
         "updates" => IconName::Download,
+        "tools" => IconName::SquareTerminal,
         _ => IconName::Wrench,
     }
 }
@@ -678,10 +693,9 @@ impl SettingsPanel {
                     .items_end()
                     .gap_1()
                     .child(
-                        crate::widgets::framed(Button::new("check-updates"), crate::widgets::Tone::Plain, cx)
+                        crate::widgets::framed_if(Button::new("check-updates"), crate::widgets::Tone::Plain, !checking, cx)
                             .icon(icon(IconName::RefreshCw))
                             .label(tr("settings.check_updates_button"))
-                            .disabled(checking)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.secret_status.insert("updates", tr("update.checking"));
                                 cx.notify();

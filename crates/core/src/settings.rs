@@ -200,6 +200,7 @@ impl Default for Appearance {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Graph {
+    pub all_branches: bool,
     pub style: GraphStyle,
     pub show_remotes: bool,
     pub show_tags: bool,
@@ -213,6 +214,7 @@ pub struct Graph {
 impl Default for Graph {
     fn default() -> Self {
         Self {
+            all_branches: false,
             style: GraphStyle::Curved,
             show_remotes: true,
             show_tags: true,
@@ -485,6 +487,15 @@ impl Default for Updates {
     }
 }
 
+/// External programs Cairn hands files to.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tools {
+    pub editor: String,
+    pub diff_tool: String,
+    pub merge_tool: String,
+}
+
 /// Troubleshooting options.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -541,6 +552,7 @@ pub struct Settings {
     pub notifications: Notifications,
     pub performance: Performance,
     pub updates: Updates,
+    pub tools: Tools,
     pub advanced: Advanced,
 }
 

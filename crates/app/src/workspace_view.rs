@@ -340,12 +340,11 @@ impl Render for WorkspacePanel {
                         cx.notify();
                     })))
                     .child(
-                        framed(Button::new("ws-ship"), Tone::Accent, cx)
+                        crate::widgets::framed_if(Button::new("ws-ship"), Tone::Accent, count > 0 && busy.is_none(), cx)
                             .w_full()
                             .h(px(38.))
                             .icon(icon(IconName::ArrowUpToLine))
                             .label(crate::widgets::plural("workspace.ship_n", count))
-                            .disabled(count == 0 || busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.ship(window, cx))),
                     ),
             );
@@ -369,15 +368,15 @@ impl Render for WorkspacePanel {
                     .child(spacer())
                     .when_some(busy.clone(), |d, b| d.child(hstack().gap_1().text_xs().text_color(theme.muted_foreground).child(gpui_kit::component::spinner::Spinner::new().xsmall()).child(b)))
                     .child(framed(Button::new("ws-refresh"), Tone::Plain, cx).w(px(32.)).px_0().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
-                    .child(framed(Button::new("ws-fetch"), Tone::Plain, cx).icon(icon(IconName::CloudDownload)).label(tr("workspace.fetch_all")).disabled(busy.is_some()).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(crate::widgets::framed_if(Button::new("ws-fetch"), Tone::Plain, busy.is_none(), cx).icon(icon(IconName::CloudDownload)).label(tr("workspace.fetch_all")).on_click(cx.listener(move |this, _, window, cx| {
                         let p = p1.clone();
                         this.run_batch(tr("workspace.fetch_all"), move || workspace::fetch_all(&p, prune), window, cx);
                     })))
-                    .child(framed(Button::new("ws-pull"), Tone::Plain, cx).icon(icon(IconName::ArrowDown)).label(tr("workspace.pull_clean")).disabled(busy.is_some()).on_click(cx.listener(move |this, _, window, cx| {
+                    .child(crate::widgets::framed_if(Button::new("ws-pull"), Tone::Plain, busy.is_none(), cx).icon(icon(IconName::ArrowDown)).label(tr("workspace.pull_clean")).on_click(cx.listener(move |this, _, window, cx| {
                         let p = p2.clone();
                         this.run_batch(tr("workspace.pull_clean"), move || workspace::pull_clean(&p, mode), window, cx);
                     })))
-                    .child(framed(Button::new("ws-switch"), Tone::Plain, cx).icon(icon(IconName::GitBranch)).label(tr("workspace.switch_all")).disabled(busy.is_some()).on_click(cx.listener(move |_, _, window, cx| {
+                    .child(crate::widgets::framed_if(Button::new("ws-switch"), Tone::Plain, busy.is_none(), cx).icon(icon(IconName::GitBranch)).label(tr("workspace.switch_all")).on_click(cx.listener(move |_, _, window, cx| {
                         let p = p3.clone();
                         let view = cx.entity();
                         crate::dialogs::text_prompt(tr("workspace.switch_title"), tr("workspace.switch_body"), tr("branch.name_placeholder"), String::new(), tr("workspace.switch_ok"), window, cx, move |branch, window, cx| {

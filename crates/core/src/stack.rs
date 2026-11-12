@@ -29,6 +29,13 @@ pub struct PullRequest {
     pub head: String,
     pub checks: Vec<CheckRun>,
     pub comments: Vec<ReviewComment>,
+    pub author: String,
+    pub created: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+    pub labels: Vec<String>,
+    pub review_requests: Vec<String>,
 }
 
 /// One CI check on a pull request.
@@ -108,6 +115,20 @@ struct GhPr {
     head_ref_name: String,
     #[serde(default)]
     status_check_rollup: Vec<serde_json::Value>,
+    #[serde(default)]
+    author: Option<serde_json::Value>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    additions: Option<u32>,
+    #[serde(default)]
+    deletions: Option<u32>,
+    #[serde(default)]
+    changed_files: Option<u32>,
+    #[serde(default)]
+    labels: Vec<serde_json::Value>,
+    #[serde(default)]
+    review_requests: Vec<serde_json::Value>,
 }
 
 fn to_pr(p: GhPr) -> PullRequest {
@@ -131,6 +152,13 @@ fn to_pr(p: GhPr) -> PullRequest {
         head: p.head_ref_name,
         checks,
         comments: Vec::new(),
+        author: p.author.as_ref().and_then(|a| a.get("login")).and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        created: p.created_at.unwrap_or_default(),
+        additions: p.additions.unwrap_or(0),
+        deletions: p.deletions.unwrap_or(0),
+        changed_files: p.changed_files.unwrap_or(0),
+        labels: p.labels.iter().filter_map(|l| l.get("name").and_then(|v| v.as_str()).map(str::to_string)).collect(),
+        review_requests: p.review_requests.iter().filter_map(|r| r.get("login").or_else(|| r.get("name")).and_then(|v| v.as_str()).map(str::to_string)).collect(),
     }
 }
 
@@ -144,7 +172,7 @@ fn to_pr(p: GhPr) -> PullRequest {
 pub fn list_prs(git: &Git) -> Result<Vec<PullRequest>> {
     let out = gh(git.dir(), &[
         "pr", "list", "--state", "open", "--limit", "100", "--json",
-        "number,title,url,state,isDraft,reviewDecision,baseRefName,headRefName,statusCheckRollup",
+        "number,title,url,state,isDraft,reviewDecision,baseRefName,headRefName,statusCheckRollup,author,createdAt,additions,deletions,changedFiles,labels,reviewRequests",
     ])?;
     let prs: Vec<GhPr> = serde_json::from_str(&out)?;
     Ok(prs.into_iter().map(to_pr).collect())
@@ -170,6 +198,267 @@ pub fn review_comments(git: &Git, number: u64) -> Result<Vec<ReviewComment>> {
             line: c.get("line").and_then(|v| v.as_u64()),
         })
         .collect())
+}
+
+/// A comment in a pull request's conversation or a submitted review.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrComment {
+    pub author: String,
+    pub body: String,
+    pub created: String,
+    pub review_state: Option<String>,
+}
+
+/// A file changed by a pull request.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrFile {
+    pub path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+/// A commit in a pull request.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCommit {
+    pub oid: String,
+    pub headline: String,
+    pub author: String,
+    pub date: String,
+}
+
+/// A reviewer and where their review stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrReviewer {
+    pub login: String,
+    pub state: String,
+}
+
+/// Everything shown when reviewing one pull request.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrDetails {
+    pub pr: PullRequest,
+    pub author: String,
+    pub body: String,
+    pub head_oid: String,
+    pub conversation: Vec<PrComment>,
+    pub files: Vec<PrFile>,
+    pub commits: Vec<PrCommit>,
+    pub reviewers: Vec<PrReviewer>,
+    pub assignees: Vec<String>,
+    pub merge_state: String,
+}
+
+/// How a pull request is merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeMethod {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+/// Merges a pull request on GitHub.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `method` - squash, merge commit or rebase
+/// * `delete_branch` - delete the head branch afterwards
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_merge(git: &Git, number: u64, method: MergeMethod, delete_branch: bool) -> Result<String> {
+    let n = number.to_string();
+    let flag = match method {
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Rebase => "--rebase",
+    };
+    let mut args = vec!["pr", "merge", n.as_str(), flag];
+    if delete_branch {
+        args.push("--delete-branch");
+    }
+    gh(git.dir(), &args)
+}
+
+/// Marks a draft pull request as ready for review.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_ready(git: &Git, number: u64) -> Result<String> {
+    gh(git.dir(), &["pr", "ready", &number.to_string()])
+}
+
+/// Loads a pull request's description, conversation, reviews and changed files.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// The details, with comments and reviews merged in time order.
+pub fn pr_details(git: &Git, number: u64) -> Result<PrDetails> {
+    let out = gh(git.dir(), &[
+        "pr", "view", &number.to_string(), "--json",
+        "number,title,url,state,isDraft,reviewDecision,baseRefName,headRefName,statusCheckRollup,author,body,headRefOid,comments,reviews,files,createdAt,additions,deletions,changedFiles,labels,reviewRequests,commits,latestReviews,assignees,mergeStateStatus",
+    ])?;
+    let v: serde_json::Value = serde_json::from_str(&out)?;
+    let gh_pr: GhPr = serde_json::from_value(v.clone())?;
+    let s = |v: &serde_json::Value, ptr: &str| v.pointer(ptr).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let mut conversation: Vec<PrComment> = v
+        .get("comments")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().map(|c| PrComment { author: s(c, "/author/login"), body: s(c, "/body"), created: s(c, "/createdAt"), review_state: None }).collect())
+        .unwrap_or_default();
+    if let Some(reviews) = v.get("reviews").and_then(|r| r.as_array()) {
+        conversation.extend(reviews.iter().map(|r| PrComment { author: s(r, "/author/login"), body: s(r, "/body"), created: s(r, "/submittedAt"), review_state: Some(s(r, "/state")) }));
+    }
+    conversation.sort_by(|a, b| a.created.cmp(&b.created));
+    let files = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|f| PrFile {
+                    path: s(f, "/path"),
+                    additions: f.get("additions").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    deletions: f.get("deletions").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let commits = v
+        .get("commits")
+        .and_then(|c| c.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|c| PrCommit { oid: s(c, "/oid"), headline: s(c, "/messageHeadline"), author: s(c, "/authors/0/login"), date: s(c, "/committedDate") })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut reviewers: Vec<PrReviewer> = v
+        .get("latestReviews")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().map(|r| PrReviewer { login: s(r, "/author/login"), state: s(r, "/state") }).collect())
+        .unwrap_or_default();
+    let pr = to_pr(gh_pr);
+    for login in &pr.review_requests {
+        if !reviewers.iter().any(|r| &r.login == login) {
+            reviewers.push(PrReviewer { login: login.clone(), state: "PENDING".into() });
+        }
+    }
+    let assignees = v.get("assignees").and_then(|a| a.as_array()).map(|a| a.iter().map(|x| s(x, "/login")).collect()).unwrap_or_default();
+    Ok(PrDetails {
+        pr,
+        author: s(&v, "/author/login"),
+        body: s(&v, "/body"),
+        head_oid: s(&v, "/headRefOid"),
+        conversation,
+        files,
+        commits,
+        reviewers,
+        assignees,
+        merge_state: s(&v, "/mergeStateStatus"),
+    })
+}
+
+/// Loads the full diff of a pull request.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// One diff per changed file.
+pub fn pr_diff(git: &Git, number: u64) -> Result<Vec<crate::diff::FileDiff>> {
+    let out = gh(git.dir(), &["pr", "diff", &number.to_string(), "--color=never"])?;
+    Ok(crate::diff::parse_diff(&out))
+}
+
+/// Checks out a pull request's branch locally.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_checkout(git: &Git, number: u64) -> Result<String> {
+    gh(git.dir(), &["pr", "checkout", &number.to_string()])
+}
+
+/// Adds a comment to a pull request's conversation.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `body` - the comment in Markdown
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_comment(git: &Git, number: u64, body: &str) -> Result<String> {
+    gh(git.dir(), &["pr", "comment", &number.to_string(), "--body", body])
+}
+
+/// What a submitted review says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+/// Submits a review.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `verdict` - approve, request changes or just comment
+/// * `body` - the review text; required unless approving
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_review(git: &Git, number: u64, verdict: ReviewVerdict, body: &str) -> Result<String> {
+    let flag = match verdict {
+        ReviewVerdict::Approve => "--approve",
+        ReviewVerdict::RequestChanges => "--request-changes",
+        ReviewVerdict::Comment => "--comment",
+    };
+    let n = number.to_string();
+    let mut args = vec!["pr", "review", n.as_str(), flag];
+    if !body.trim().is_empty() {
+        args.push("--body");
+        args.push(body);
+    }
+    gh(git.dir(), &args)
+}
+
+/// Leaves a review comment on one line of a pull request's diff.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `commit` - the pull request's head commit
+/// * `path` - the file
+/// * `line` - the line number on the given side
+/// * `new_side` - `true` for the changed file, `false` for the original
+/// * `body` - the comment in Markdown
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_line_comment(git: &Git, number: u64, commit: &str, path: &str, line: u32, new_side: bool, body: &str) -> Result<String> {
+    gh(git.dir(), &[
+        "api",
+        &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
+        "-f", &format!("body={body}"),
+        "-f", &format!("commit_id={commit}"),
+        "-f", &format!("path={path}"),
+        "-F", &format!("line={line}"),
+        "-f", if new_side { "side=RIGHT" } else { "side=LEFT" },
+    ])
 }
 
 fn is_ancestor(git: &Git, a: &str, b: &str) -> bool {
