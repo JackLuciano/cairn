@@ -147,6 +147,24 @@ pub fn list_remotes(git: &Git) -> Result<Vec<Remote>> {
     Ok(remotes)
 }
 
+/// Splits git's stash message into what the user wrote and the branch it was made on.
+///
+/// # Arguments
+/// * `message` - such as `On main: half done` or `WIP on main: 1a2b3c4 Fix login`
+///
+/// # Returns
+/// `(title, branch)`; the title is the whole message when it has no recognisable prefix.
+pub fn stash_title(message: &str) -> (String, Option<String>) {
+    let rest = message.strip_prefix("WIP on ").or_else(|| message.strip_prefix("On "));
+    match rest.and_then(|r| r.split_once(": ")) {
+        Some((branch, text)) => {
+            let text = if message.starts_with("WIP on ") { text.split_once(' ').map(|(_, s)| s).unwrap_or(text) } else { text };
+            (text.to_string(), Some(branch.to_string()))
+        }
+        None => (message.to_string(), None),
+    }
+}
+
 /// Lists stash entries.
 ///
 /// # Arguments
@@ -332,6 +350,94 @@ pub fn stash_push(git: &Git, message: Option<&str>, include_untracked: bool) -> 
     Ok(())
 }
 
+/// Stashes only some files, leaving the rest of the changes in place.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `message` - optional description
+/// * `paths` - files to stash, relative to the repository root
+/// * `include_untracked` - whether untracked files among `paths` are stashed too
+///
+/// # Returns
+/// `Ok(())` when stashed.
+pub fn stash_push_paths(git: &Git, message: Option<&str>, paths: &[String], include_untracked: bool) -> Result<()> {
+    let mut args: Vec<String> = vec!["stash".into(), "push".into()];
+    if include_untracked {
+        args.push("-u".into());
+    }
+    if let Some(m) = message.filter(|m| !m.is_empty()) {
+        args.push("-m".into());
+        args.push(m.to_string());
+    }
+    args.push("--".into());
+    args.extend(paths.iter().cloned());
+    git.run(args)?;
+    Ok(())
+}
+
+/// Stashes only what is staged, so blocks and lines picked in the diff can be put aside.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `message` - optional description
+///
+/// # Returns
+/// `Ok(())` when stashed.
+pub fn stash_push_staged(git: &Git, message: Option<&str>) -> Result<()> {
+    let mut args = vec!["stash", "push", "--staged"];
+    if let Some(m) = message.filter(|m| !m.is_empty()) {
+        args.push("-m");
+        args.push(m);
+    }
+    git.run(args)?;
+    Ok(())
+}
+
+/// A file saved in a stash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StashFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: char,
+    pub untracked: bool,
+}
+
+/// Lists the files a stash holds, including untracked files saved with it.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `id` - the stash commit
+///
+/// # Returns
+/// Tracked changes first, then untracked files.
+pub fn stash_files(git: &Git, id: &str) -> Result<Vec<StashFile>> {
+    let mut files: Vec<StashFile> = crate::log::commit_files(git, id, Some(&format!("{id}^1")))?
+        .into_iter()
+        .map(|f| StashFile { path: f.path, old_path: f.old_path, status: f.status, untracked: false })
+        .collect();
+    if git.succeeds(["rev-parse", "--verify", "-q", &format!("{id}^3")]) {
+        let out = git.run(["ls-tree", "-r", "-z", "--name-only", &format!("{id}^3")])?;
+        files.extend(out.split('\0').filter(|p| !p.is_empty()).map(|p| StashFile { path: p.to_string(), old_path: None, status: 'A', untracked: true }));
+    }
+    Ok(files)
+}
+
+/// Brings one file back from a stash into the working tree, leaving the stash as it is.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `id` - the stash commit
+/// * `path` - the file to restore
+/// * `untracked` - whether the file was saved as untracked
+///
+/// # Returns
+/// `Ok(())` when the file is restored.
+pub fn stash_restore_file(git: &Git, id: &str, path: &str, untracked: bool) -> Result<()> {
+    let source = if untracked { format!("{id}^3") } else { id.to_string() };
+    git.run(["restore", &format!("--source={source}"), "--worktree", "--", path])?;
+    Ok(())
+}
+
 /// Applies a stash, optionally removing it.
 ///
 /// # Arguments
@@ -467,4 +573,16 @@ pub fn prune_merged_worktrees(git: &Git, base: &str, older_than_days: u32) -> Re
 /// `true` when git accepts the name.
 pub fn is_valid_branch_name(git: &Git, name: &str) -> bool {
     !name.trim().is_empty() && git.succeeds(["check-ref-format", "--branch", name])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stash_title;
+
+    #[test]
+    fn stash_titles_drop_the_branch_prefix() {
+        assert_eq!(stash_title("On feat/x: half done"), ("half done".to_string(), Some("feat/x".to_string())));
+        assert_eq!(stash_title("WIP on main: 1a2b3c4 Fix login"), ("Fix login".to_string(), Some("main".to_string())));
+        assert_eq!(stash_title("plain"), ("plain".to_string(), None));
+    }
 }

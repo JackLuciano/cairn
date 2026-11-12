@@ -156,6 +156,43 @@ pub fn file_diff(git: &Git, target: &DiffTarget, path: &str, untracked: bool, op
     })
 }
 
+/// Loads one file's diff between two revisions, following a rename when the old path is known.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `old` - the earlier revision, or `None` when the file is new in `new` (such as in a root commit)
+/// * `new` - the later revision
+/// * `path` - the file's path in `new`
+/// * `old_path` - the file's path in `old` when it was renamed
+/// * `opts` - context size and whitespace handling
+///
+/// # Returns
+/// The parsed diff, possibly with no hunks.
+pub fn revision_file_diff(git: &Git, old: Option<&str>, new: &str, path: &str, old_path: Option<&str>, opts: DiffOptions) -> Result<FileDiff> {
+    let mut args: Vec<String> = match old {
+        Some(old) => vec!["diff".into(), "-M".into(), old.to_string(), new.to_string()],
+        None => vec!["show".into(), "--format=".into(), "-M".into(), new.to_string()],
+    };
+    args.push("--no-ext-diff".into());
+    args.push(format!("-U{}", opts.context));
+    if opts.ignore_whitespace {
+        args.push("-w".into());
+    }
+    args.push("--".into());
+    if let Some(o) = old_path.filter(|o| *o != path) {
+        args.push(o.to_string());
+    }
+    args.push(path.to_string());
+    let out = git.run(&args)?;
+    let diffs = parse_diff(&out);
+    Ok(diffs
+        .iter()
+        .find(|d| d.path == path)
+        .or(diffs.first())
+        .cloned()
+        .unwrap_or_else(|| FileDiff { path: path.to_string(), ..Default::default() }))
+}
+
 fn untracked_diff(git: &Git, path: &str) -> Result<FileDiff> {
     let bytes = std::fs::read(git.dir().join(path))?;
     let mut diff = FileDiff { path: path.to_string(), is_new: true, ..Default::default() };

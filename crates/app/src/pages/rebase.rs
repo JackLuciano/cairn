@@ -380,15 +380,14 @@ impl RepoView {
                             .border_color(theme.border)
                             .child(div().text_xs().text_color(theme.muted_foreground).child(tr("rebase.snapshot_note")))
                             .child(spacer())
-                            .child(framed(Button::new("rebase-reset"), Tone::Plain, cx).h(px(34.)).label(tr("rebase.reset_plan")).disabled(!changed).on_click(cx.listener(|this, _, _, cx| {
+                            .child(crate::widgets::framed_if(Button::new("rebase-reset"), Tone::Plain, changed, cx).h(px(34.)).label(tr("rebase.reset_plan")).on_click(cx.listener(|this, _, _, cx| {
                                 this.rebase.items = this.rebase.original.clone();
                                 cx.notify();
                             })))
                             .child(
-                                framed(Button::new("rebase-start"), Tone::Accent, cx)
+                                crate::widgets::framed_if(Button::new("rebase-start"), Tone::Accent, self.busy.is_none(), cx)
                                     .h(px(34.))
                                     .label(t!("rebase.start_n", from = items.len(), to = result_count).to_string())
-                                    .disabled(self.busy.is_some())
                                     .on_click(cx.listener(|this, _, window, cx| this.start_rebase(window, cx))),
                             ),
                     ),

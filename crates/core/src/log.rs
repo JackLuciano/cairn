@@ -133,7 +133,12 @@ pub fn load_log(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
                 args.push("HEAD".into());
             }
         }
-        LogScope::CurrentBranch => args.push("HEAD".into()),
+        LogScope::CurrentBranch => {
+            args.push("HEAD".into());
+            if git.succeeds(["rev-parse", "--verify", "-q", "@{upstream}"]) {
+                args.push("@{upstream}".into());
+            }
+        }
     }
     if let Some(path) = &opts.path {
         args.push("--".into());
@@ -321,6 +326,70 @@ pub fn commit_files(git: &Git, id: &str, parent: Option<&str>) -> Result<Vec<Cha
     Ok(files)
 }
 
+/// One commit that changed a file, as listed in the file's history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileVersion {
+    pub id: String,
+    pub parent: Option<String>,
+    pub author: String,
+    pub time: i64,
+    pub summary: String,
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: char,
+}
+
+/// Lists every commit that changed a file, following it through renames.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `path` - the file's current path relative to the repository root
+/// * `limit` - the most commits to return
+///
+/// # Returns
+/// Commits newest first, each with the file's path in that commit.
+pub fn file_history(git: &Git, path: &str, limit: usize) -> Result<Vec<FileVersion>> {
+    let out = git.run([
+        "log".to_string(),
+        "--follow".into(),
+        "-M".into(),
+        "--name-status".into(),
+        format!("--max-count={limit}"),
+        format!("--format={RECORD}%H{FIELD}%P{FIELD}%an{FIELD}%at{FIELD}%s"),
+        "--".into(),
+        path.to_string(),
+    ])?;
+    Ok(parse_file_history(&out))
+}
+
+fn parse_file_history(out: &str) -> Vec<FileVersion> {
+    out.split(RECORD)
+        .filter(|r| !r.trim().is_empty())
+        .filter_map(|record| {
+            let mut lines = record.lines();
+            let header = lines.next()?;
+            let mut f = header.split(FIELD);
+            let id = f.next()?.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let parent = f.next().unwrap_or_default().split_whitespace().next().map(str::to_string);
+            let author = f.next().unwrap_or_default().to_string();
+            let time = f.next().unwrap_or_default().trim().parse().unwrap_or(0);
+            let summary = f.next().unwrap_or_default().to_string();
+            let change = lines.map(str::trim_end).find(|l| l.contains('\t'))?;
+            let cols: Vec<&str> = change.split('\t').collect();
+            let status = cols[0].chars().next().unwrap_or('M');
+            let (path, old_path) = match cols.as_slice() {
+                [_, old, new, ..] => (new.to_string(), Some(old.to_string())),
+                [_, p] => (p.to_string(), None),
+                _ => return None,
+            };
+            Some(FileVersion { id, parent, author, time, summary, path, old_path, status })
+        })
+        .collect()
+}
+
 fn parse_name_status_z(out: &str) -> Vec<ChangedFile> {
     let mut parts = out.split('\0').filter(|s| !s.is_empty()).peekable();
     let mut files = Vec::new();
@@ -379,5 +448,20 @@ mod tests {
         assert_eq!(log[0].refs[1].kind, RefKind::RemoteBranch);
         assert_eq!(log[0].refs[2].kind, RefKind::Tag);
         assert!(log[1].parents.is_empty());
+    }
+
+    #[test]
+    fn parses_file_history_with_renames() {
+        let out = format!(
+            "{RECORD}ccc{FIELD}bbb{FIELD}Ann{FIELD}1700000200{FIELD}Move it\n\nR092\tsrc/old.rs\tsrc/new.rs\n{RECORD}bbb{FIELD}{FIELD}Bob{FIELD}1700000100{FIELD}Add it\n\nA\tsrc/old.rs\n"
+        );
+        let h = parse_file_history(&out);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].status, 'R');
+        assert_eq!(h[0].path, "src/new.rs");
+        assert_eq!(h[0].old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(h[0].parent.as_deref(), Some("bbb"));
+        assert_eq!(h[1].status, 'A');
+        assert!(h[1].parent.is_none());
     }
 }

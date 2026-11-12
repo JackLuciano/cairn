@@ -228,16 +228,23 @@ fn open_now(app: Entity<CairnApp>, window: &mut Window, cx: &mut App) {
     let tab = app.read(cx).active_tab();
     let cmd = |group: &'static str, label: &str, keys: Option<&'static str>, icon: IconName, run: Run| Item { group, label: tr(label), keys, icon, run };
     if let Some(tab) = tab.clone() {
-        let pages: [(&str, Page, IconName, Option<&'static str>); 9] = [
+        let pages: [(&str, Page, IconName, Option<&'static str>); 16] = [
             ("page.history", Page::History, IconName::GitCommitHorizontal, Some("Ctrl 1")),
             ("page.changes", Page::Changes, IconName::FileDiff, Some("Ctrl 2")),
             ("page.branches", Page::Branches, IconName::GitBranch, Some("Ctrl 3")),
+            ("page.stashes", Page::Stashes, IconName::Archive, None),
+            ("page.pulls", Page::PullRequests, IconName::GitPullRequest, None),
             ("page.stack", Page::Stack, IconName::Layers, None),
             ("page.rebase", Page::Rebase, IconName::GitPullRequestArrow, None),
             ("page.absorb", Page::Absorb, IconName::Combine, None),
             ("page.conflicts", Page::Conflicts, IconName::GitMerge, None),
             ("page.blame", Page::Blame, IconName::FileClock, None),
             ("page.bisect", Page::Bisect, IconName::Bug, None),
+            ("page.file_history", Page::FileHistory, IconName::ScrollText, None),
+            ("page.compare", Page::Compare, IconName::GitCompareArrows, None),
+            ("page.recover", Page::Recover, IconName::LifeBuoy, None),
+            ("page.submodules", Page::Submodules, IconName::Boxes, None),
+            ("page.lfs", Page::Lfs, IconName::HardDrive, None),
         ];
         for (label, page, ic, keys) in pages {
             let t = tab.clone();
@@ -257,6 +264,15 @@ fn open_now(app: Entity<CairnApp>, window: &mut Window, cx: &mut App) {
         items.push(cmd("palette.git", "toolbar.undo", Some("Ctrl Z"), IconName::Undo2, Rc::new(move |w, cx| crate::dialogs::undo_history(t.clone(), w, cx))));
         let t = tab.clone();
         items.push(cmd("palette.git", "toolbar.force_push", None, IconName::TriangleAlert, Rc::new(move |w, cx| crate::dialogs::confirm_force_push(t.clone(), w, cx))));
+        let t = tab.clone();
+        items.push(cmd("palette.git", "toolbar.stash_some", None, IconName::ArchiveRestore, Rc::new(move |w, cx| crate::dialogs::stash_dialog(t.clone(), Vec::new(), w, cx))));
+        let t = tab.clone();
+        items.push(cmd("palette.git", "toolbar.apply_patch", None, IconName::FileInput, Rc::new(move |w, cx| t.update(cx, |v, cx| v.apply_patch_file(w, cx)))));
+        let t = tab.clone();
+        items.push(cmd("palette.repo", "toolbar.open_editor", None, IconName::Code, Rc::new(move |_, cx| t.update(cx, |v, cx| {
+            let root = v.repo.root.clone();
+            v.open_in_editor(&root, cx)
+        }))));
         let t = tab.clone();
         items.push(cmd("palette.ai", "toolbar.ask_ai", Some("Ctrl Shift A"), IconName::Sparkles, Rc::new(move |w, cx| crate::assist::open(t.clone(), w, cx))));
         let t = tab.clone();

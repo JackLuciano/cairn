@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -131,6 +131,112 @@ fn new_branch_now(view: Entity<RepoView>, start: Option<String>, window: &mut Wi
                     let label = t!("op.create_branch", name = name.clone()).to_string();
                     v.run_op(label.into(), Some(t!("undo.create_branch", name = name.clone()).to_string()), move |git| {
                         cairn_core::refs::create_branch(git, &name, &start, co).map(|_| String::new())
+                    }, window, cx);
+                });
+                window.close_dialog(cx);
+            }))
+    });
+}
+
+/// Opens the stash dialog once the caller's update of `view` has finished.
+///
+/// # Arguments
+/// * `view` - the repository view, possibly mid-update
+/// * `preselected` - files to tick; every changed file when empty
+pub(crate) fn stash_dialog(view: Entity<RepoView>, preselected: Vec<String>, window: &mut Window, cx: &mut App) {
+    window.defer(cx, move |window, cx| stash_dialog_now(view, preselected, window, cx));
+}
+
+fn stash_dialog_now(view: Entity<RepoView>, preselected: Vec<String>, window: &mut Window, cx: &mut App) {
+    let files: Vec<(String, bool)> = view.read(cx).status.files.iter().filter(|f| !f.is_conflicted()).map(|f| (f.path.clone(), f.is_untracked())).collect();
+    if files.is_empty() {
+        window.push_notification(gpui_kit::component::notification::Notification::info(tr("op.nothing_to_stash")), cx);
+        return;
+    }
+    let has_staged = view.read(cx).status.staged().next().is_some();
+    let picked: Rc<std::cell::RefCell<std::collections::BTreeSet<String>>> = Rc::new(std::cell::RefCell::new(
+        files.iter().filter(|(p, _)| preselected.is_empty() || preselected.contains(p)).map(|(p, _)| p.clone()).collect(),
+    ));
+    let staged_only = Rc::new(Cell::new(false));
+    let untracked = Rc::new(Cell::new(true));
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("stashes.message_placeholder")));
+    let first = Cell::new(true);
+    window.open_dialog(cx, move |dialog, window, cx| {
+        if first.replace(false) {
+            input.focus_handle(cx).focus(window, cx);
+        }
+        let theme = cx.theme().clone();
+        let only_staged = staged_only.get();
+        let mut list = v_flex().gap_0p5();
+        for (i, (path, is_new)) in files.iter().enumerate() {
+            let on = picked.borrow().contains(path);
+            let p = path.clone();
+            let picked = picked.clone();
+            list = list.child(
+                hstack()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        gpui_kit::component::checkbox::Checkbox::new(("stash-pick", i)).checked(on).disabled(only_staged).on_click(move |v, window, _| {
+                            if *v {
+                                picked.borrow_mut().insert(p.clone());
+                            } else {
+                                picked.borrow_mut().remove(&p);
+                            }
+                            window.refresh();
+                        }),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().text_sm().when(only_staged, |d| d.text_color(theme.muted_foreground)).child(path.clone()))
+                    .when(*is_new, |d| d.child(crate::widgets::badge(tr("stashes.new_file"), theme.green))),
+            );
+        }
+        let count = picked.borrow().len();
+        let (view, input_ok, picked_ok, staged_ok, untracked_ok) = (view.clone(), input.clone(), picked.clone(), staged_only.clone(), untracked.clone());
+        let (staged_toggle, untracked_toggle) = (staged_only.clone(), untracked.clone());
+        dialog
+            .title(tr("stashes.dialog_title"))
+            .w(px(560.))
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(Input::new(&input))
+                    .when(has_staged, |d| {
+                        d.child(
+                            Switch::new("stash-staged-only").checked(only_staged).label(tr("stashes.staged_only")).on_click(move |v, window, _| {
+                                staged_toggle.set(*v);
+                                window.refresh();
+                            }),
+                        )
+                    })
+                    .when(!only_staged, |d| {
+                        d.child(
+                            Switch::new("stash-untracked").checked(untracked.get()).label(tr("stashes.include_untracked")).on_click(move |v, window, _| {
+                                untracked_toggle.set(*v);
+                                window.refresh();
+                            }),
+                        )
+                    })
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(if only_staged { tr("stashes.staged_only_hint") } else { tr("stashes.pick_hint") }))
+                    .child(div().id("stash-pick-list").max_h(px(300.)).overflow_y_scroll().rounded(px(8.)).border_1().border_color(theme.border).p_1().child(list)),
+            )
+            .footer(footer(if only_staged { tr("stashes.stash_staged") } else { crate::widgets::plural("stashes.stash_n", count).into() }, false, move |window, cx| {
+                let message = input_ok.read(cx).value().trim().to_string();
+                let message = Some(message).filter(|m| !m.is_empty());
+                let staged = staged_ok.get();
+                let paths: Vec<String> = picked_ok.borrow().iter().cloned().collect();
+                if !staged && paths.is_empty() {
+                    return;
+                }
+                let with_untracked = untracked_ok.get();
+                view.update(cx, |v, cx| {
+                    v.run_op(tr("op.stash"), None, move |git| {
+                        if staged {
+                            cairn_core::refs::stash_push_staged(git, message.as_deref())
+                        } else {
+                            cairn_core::refs::stash_push_paths(git, message.as_deref(), &paths, with_untracked)
+                        }
+                        .map(|_| String::new())
                     }, window, cx);
                 });
                 window.close_dialog(cx);

@@ -1,6 +1,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=assets/cairn.ico");
     println!("cargo:rerun-if-changed=locales");
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:16777216");
+    }
     #[cfg(windows)]
     {
         let mut res = winresource::WindowsResource::new();

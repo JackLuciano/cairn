@@ -87,6 +87,17 @@ impl RepoView {
                                 v.run_op(tr("op.rebase"), Some(t!("undo.rebase").to_string()), move |git| cairn_core::rebase::rebase_onto(git, &n, update_refs), window, cx)
                             });
                         }))
+                        .item({
+                            let v = view.clone();
+                            let n = name.clone();
+                            PopupMenuItem::new(t!("actions.compare_current").to_string()).icon(icon(IconName::GitCompareArrows)).on_click(move |_, _, cx| {
+                                let n = n.clone();
+                                v.update(cx, |v, cx| {
+                                    let current = v.current_branch().map(str::to_string).unwrap_or_else(|| "HEAD".into());
+                                    v.open_compare(current, n, cx);
+                                });
+                            })
+                        })
                         .when(!remote, |m| {
                             m.item(PopupMenuItem::new(t!("branches.new_from").to_string()).icon(icon(IconName::GitBranchPlus)).on_click(move |_, window, cx| {
                                 crate::dialogs::new_branch(v3.clone(), Some(n3.clone()), window, cx);
@@ -256,22 +267,36 @@ impl RepoView {
             let mut stash_card = card(cx).child(card_header(IconName::Archive, tr("branches.stashes"), Some(stashes.len()), cx));
             for (i, s) in stashes.iter().enumerate() {
                 let idx = s.index;
+                let sid = s.id.clone();
                 stash_card = stash_card.child(
                     hstack()
+                        .id(SharedString::from(format!("branches-stash-{}", s.id)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.stash_page.selected = Some(sid.clone());
+                            this.stash_page.files.clear();
+                            this.open_page(crate::repo_view::Page::Stashes, window, cx);
+                        }))
                         .gap_3()
                         .px(px(14.))
                         .py(px(10.))
                         .when(i > 0, |d| d.border_t_1().border_color(theme.border))
                         .hover(|st| st.bg(theme.list_hover))
                         .child(icon_tile(IconName::Archive, theme.magenta))
-                        .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(s.message.clone())).child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(s.time))))
+                        .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(cairn_core::refs::stash_title(&s.message).0)).child(div().text_xs().text_color(theme.muted_foreground).child(match cairn_core::refs::stash_title(&s.message).1 {
+                            Some(b) => format!("{b} · {}", relative_time(s.time)),
+                            None => relative_time(s.time).to_string(),
+                        })))
                         .child(framed(Button::new(("stash-pop", idx)), Tone::Plain, cx).h(px(28.)).icon(icon(IconName::RotateCcw)).label(tr("branches.stash_pop")).on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             this.run_op(tr("op.stash_pop"), None, move |git| cairn_core::refs::stash_apply(git, idx, true).map(|_| String::new()), window, cx);
                         })))
                         .child(Button::new(("stash-apply", idx)).small().ghost().label(tr("branches.stash_apply")).on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             this.run_op(tr("op.stash_apply"), None, move |git| cairn_core::refs::stash_apply(git, idx, false).map(|_| String::new()), window, cx);
                         })))
                         .child(Button::new(("stash-drop", idx)).small().ghost().icon(icon(IconName::Trash)).tooltip(tr("branches.stash_drop")).on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             this.run_op(tr("op.stash_drop"), None, move |git| cairn_core::refs::stash_drop(git, idx).map(|_| String::new()), window, cx);
                         }))),
                 );

@@ -7,14 +7,14 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::diff_view::DiffSource;
 use crate::repo_view::{RepoView, SelectedChange};
-use crate::widgets::{Tone, empty_state, framed, hstack, icon, section_label, spacer, status_letter, tr};
+use crate::widgets::{Tone, empty_state, hstack, icon, section_label, spacer, status_letter, tr};
 
 impl RepoView {
     pub(crate) fn apply_selection(&mut self, diff: FileDiff, sel: LineSelection, staged: bool, discard: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -116,6 +116,20 @@ impl RepoView {
                     true
                 })
         });
+    }
+
+    /// Adds a pattern to `.gitignore` and tells the user what happened.
+    ///
+    /// # Arguments
+    /// * `pattern` - the `.gitignore` line
+    pub(crate) fn ignore_pattern(&mut self, pattern: String, window: &mut Window, cx: &mut Context<Self>) {
+        let note = match cairn_core::ignore::add(&self.repo.root, &pattern) {
+            Ok(true) => gpui_kit::component::notification::Notification::success(t!("actions.ignored", pattern = pattern).to_string()),
+            Ok(false) => gpui_kit::component::notification::Notification::info(t!("actions.already_ignored", pattern = pattern).to_string()),
+            Err(e) => gpui_kit::component::notification::Notification::error(crate::repo_view::friendly_error(&e)),
+        };
+        window.push_notification(note, cx);
+        self.reload(cx);
     }
 
     fn stage_paths(&mut self, paths: Vec<String>, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,6 +315,7 @@ impl RepoView {
                 let v2 = view.clone();
                 let p1 = path_menu.clone();
                 let file = file.clone();
+                let untracked = file.is_untracked();
                 let root = root.clone();
                 let full = root.join(&path_menu);
                 menu.item(
@@ -320,7 +335,31 @@ impl RepoView {
                             }),
                     )
                 })
+                .item({
+                    let v = view.clone();
+                    let p = path_menu.clone();
+                    PopupMenuItem::new(t!("actions.stash_file").to_string()).icon(icon(IconName::Archive)).on_click(move |_, window, cx| crate::dialogs::stash_dialog(v.clone(), vec![p.clone()], window, cx))
+                })
+                .when(untracked, |m| {
+                    let mut m = m.separator().label(t!("actions.ignore").to_string());
+                    for pattern in cairn_core::ignore::suggestions(&path_menu) {
+                        let v = view.clone();
+                        m = m.item(PopupMenuItem::new(t!("actions.ignore_pattern", pattern = pattern.clone()).to_string()).icon(icon(IconName::EyeOff)).on_click(move |_, window, cx| {
+                            let pattern = pattern.clone();
+                            v.update(cx, |this, cx| this.ignore_pattern(pattern, window, cx));
+                        }));
+                    }
+                    m
+                })
                 .separator()
+                .item({
+                    let v = view.clone();
+                    let p = path_menu.clone();
+                    PopupMenuItem::new(t!("actions.file_history").to_string()).icon(icon(IconName::ScrollText)).on_click(move |_, _, cx| {
+                        let p = p.clone();
+                        v.update(cx, |this, cx| this.open_file_history(p, cx));
+                    })
+                })
                 .item({
                     let v3 = view.clone();
                     let p3 = path_menu.clone();
@@ -328,6 +367,20 @@ impl RepoView {
                         let p = p3.clone();
                         v3.update(cx, |this, cx| this.open_blame(p, cx));
                     })
+                })
+                .when(!untracked, |m| {
+                    let v = view.clone();
+                    let p = path_menu.clone();
+                    m.item(PopupMenuItem::new(t!("actions.open_difftool").to_string()).icon(icon(IconName::ArrowLeftRight)).on_click(move |_, window, cx| {
+                        let what = if staged { cairn_core::ops::ToolDiff::Staged } else { cairn_core::ops::ToolDiff::Unstaged };
+                        let p = p.clone();
+                        v.update(cx, |this, cx| this.open_difftool(what, p, window, cx));
+                    }))
+                })
+                .item({
+                    let v = view.clone();
+                    let f = full.clone();
+                    PopupMenuItem::new(t!("actions.open_editor").to_string()).icon(icon(IconName::Code)).on_click(move |_, _, cx| v.update(cx, |this, cx| this.open_in_editor(&f, cx)))
                 })
                 .item(
                     PopupMenuItem::new(t!("changes.reveal").to_string())
@@ -401,6 +454,16 @@ impl RepoView {
                     .child(spacer())
                     .when(!staged.is_empty(), |d| {
                         d.child(
+                            Button::new("stash-staged")
+                                .xsmall()
+                                .ghost()
+                                .icon(icon(IconName::Archive))
+                                .tooltip(tr("actions.stash_staged_tip"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.run_op(tr("op.stash"), None, |git| cairn_core::refs::stash_push_staged(git, None).map(|_| String::new()), window, cx);
+                                })),
+                        )
+                        .child(
                             crate::widgets::framed(Button::new("unstage-all"), crate::widgets::Tone::Plain, cx)
                                 .h(px(26.))
                                 .px_2()
@@ -441,13 +504,12 @@ impl RepoView {
             )
             .when(self.settings.commits.ai_messages != cairn_core::settings::AiSuggest::Never, |d| {
                 d.child(
-                    framed(Button::new("ai-message"), Tone::Ai, cx)
+                    crate::widgets::framed_if(Button::new("ai-message"), Tone::Ai, self.busy.is_none() && (staged > 0 || !self.settings.ai.enabled), cx)
                         .w_full()
                         .h(px(34.))
                         .icon(icon(IconName::Sparkles))
                         .label(tr("changes.write_message"))
                         .tooltip(tr("changes.write_message_tip"))
-                        .disabled(self.busy.is_some())
                         .on_click(cx.listener(|this, _, window, cx| this.suggest_message(window, cx))),
                 )
             })
@@ -492,23 +554,23 @@ impl RepoView {
                 hstack()
                     .gap_2()
                     .child(
-                        framed(Button::new("commit"), Tone::Accent, cx)
+                        crate::widgets::framed_if(Button::new("commit"), Tone::Accent, can_commit, cx)
                             .flex_1()
                             .h(px(36.))
                             .icon(icon(IconName::Check))
                             .label(if amend {
                                 tr("changes.amend_button")
+                            } else if staged == 0 {
+                                tr("changes.commit_title")
                             } else {
                                 crate::widgets::plural("changes.commit_button", staged).into()
                             })
-                            .disabled(!can_commit)
                             .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
                     )
                     .child(
-                        framed(Button::new("commit-push"), Tone::Plain, cx)
+                        crate::widgets::framed_if(Button::new("commit-push"), Tone::Plain, can_commit, cx)
                             .h(px(36.))
                             .label(tr("changes.commit_push"))
-                            .disabled(!can_commit)
                             .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
                     ),
             )

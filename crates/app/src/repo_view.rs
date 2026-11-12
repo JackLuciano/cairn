@@ -11,11 +11,11 @@ use cairn_core::settings::Settings;
 use cairn_core::status::RepoStatus;
 use cairn_core::{Git, Repository};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -33,6 +33,24 @@ pub(crate) enum Page {
     Conflicts,
     Blame,
     Bisect,
+    FileHistory,
+    Compare,
+    Recover,
+    Stashes,
+    Submodules,
+    Lfs,
+    PullRequests,
+}
+
+impl Page {
+    /// Pages reached from the "More" tab instead of a tab of their own.
+    pub(crate) const MORE: [(Page, &'static str, IconName); 5] = [
+        (Page::FileHistory, "page.file_history", IconName::FileClock),
+        (Page::Compare, "page.compare", IconName::GitCompareArrows),
+        (Page::Recover, "page.recover", IconName::LifeBuoy),
+        (Page::Submodules, "page.submodules", IconName::Boxes),
+        (Page::Lfs, "page.lfs", IconName::HardDrive),
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,11 +76,16 @@ pub(crate) struct OpenRepoEvent(pub std::path::PathBuf);
 
 impl EventEmitter<OpenRepoEvent> for RepoView {}
 
+/// Sent when the History page switches between this branch and all branches, so the choice is saved.
+pub(crate) struct HistoryScopeEvent(pub bool);
+
+impl EventEmitter<HistoryScopeEvent> for RepoView {}
+
 fn load_all(repo: &Repository, settings: &Settings, search: Option<String>) -> cairn_core::Result<Loaded> {
     let git = &repo.git;
     let status = cairn_core::status::load_status(git)?;
     let opts = LogOptions {
-        scope: LogScope::AllRefs,
+        scope: if settings.graph.all_branches || !repo.has_commits() { LogScope::AllRefs } else { LogScope::CurrentBranch },
         limit: settings.graph.page_size.max(50),
         first_parent: settings.graph.first_parent,
         include_remotes: settings.graph.show_remotes,
@@ -105,6 +128,7 @@ pub(crate) struct RepoView {
     pub history_scroll: UniformListScrollHandle,
     pub show_graph: bool,
     pub graph_w: f32,
+    pub graph_lane_w: f32,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
     pub selected_commit: Option<String>,
@@ -123,6 +147,8 @@ pub(crate) struct RepoView {
     pub img_amount: f32,
     pub change_pane: crate::diff_view::DiffPane,
     pub commit_pane: crate::diff_view::DiffPane,
+    pub page_pane: crate::diff_view::DiffPane,
+    pub page_revs: Option<(Option<String>, String)>,
     pub pending_notice: Option<String>,
     pub rebase: crate::pages::rebase::RebaseState,
     pub absorb: crate::pages::absorb::AbsorbState,
@@ -130,6 +156,13 @@ pub(crate) struct RepoView {
     pub stack: crate::pages::stack::StackState,
     pub blame: crate::pages::blame::BlameState,
     pub bisect: crate::pages::bisect::BisectPageState,
+    pub file_history: crate::pages::file_history::FileHistoryState,
+    pub compare: crate::pages::compare::CompareState,
+    pub recover: crate::pages::recover::RecoverState,
+    pub stash_page: crate::pages::stashes::StashPageState,
+    pub submodules: crate::pages::submodules::SubmoduleState,
+    pub lfs: crate::pages::lfs::LfsPageState,
+    pub pulls: crate::pages::pulls::PullsState,
     focus: FocusHandle,
     watcher: Option<crate::watcher::RepoWatcher>,
     _tasks: Vec<Task<()>>,
@@ -184,6 +217,7 @@ impl RepoView {
             history_scroll: UniformListScrollHandle::new(),
             show_graph: true,
             graph_w: 40.,
+            graph_lane_w: 14.,
             multi_select: Vec::new(),
             last_clicked: None,
             selected_commit: None,
@@ -202,6 +236,8 @@ impl RepoView {
             img_amount: 0.5,
             change_pane: crate::diff_view::DiffPane::new(cx),
             commit_pane: crate::diff_view::DiffPane::new(cx),
+            page_pane: crate::diff_view::DiffPane::new(cx),
+            page_revs: None,
             pending_notice: None,
             rebase: Default::default(),
             absorb: Default::default(),
@@ -209,6 +245,13 @@ impl RepoView {
             stack: Default::default(),
             blame: crate::pages::blame::BlameState::new(window, cx),
             bisect: crate::pages::bisect::BisectPageState::new(window, cx),
+            file_history: Default::default(),
+            compare: Default::default(),
+            recover: Default::default(),
+            stash_page: Default::default(),
+            submodules: Default::default(),
+            lfs: Default::default(),
+            pulls: crate::pages::pulls::PullsState::new(window, cx),
             focus: cx.focus_handle(),
             watcher: None,
             _tasks: Vec::new(),
@@ -305,6 +348,13 @@ impl RepoView {
             "conflicts" => Page::Conflicts,
             "blame" => Page::Blame,
             "bisect" => Page::Bisect,
+            "file_history" => Page::FileHistory,
+            "compare" => Page::Compare,
+            "recover" => Page::Recover,
+            "stashes" => Page::Stashes,
+            "submodules" => Page::Submodules,
+            "lfs" => Page::Lfs,
+            "pulls" => Page::PullRequests,
             _ => Page::History,
         };
         match self.page {
@@ -317,7 +367,23 @@ impl RepoView {
                     self.open_blame(f, cx);
                 }
             }
+            Page::FileHistory => {
+                self.load_blame_files(cx);
+                if let Ok(f) = std::env::var("CAIRN_DEBUG_FILE") {
+                    self.open_file_history(f, cx);
+                }
+            }
+            Page::Compare => {
+                let base = std::env::var("CAIRN_DEBUG_BASE").unwrap_or_default();
+                let target = std::env::var("CAIRN_DEBUG_TARGET").unwrap_or_default();
+                self.open_compare(base, target, cx);
+            }
             Page::Bisect => self.load_bisect(cx),
+            Page::Recover => self.load_recover(cx),
+            Page::Stashes => self.load_stash_page(cx),
+            Page::Submodules => self.load_submodules(cx),
+            Page::Lfs => self.load_lfs(cx),
+            Page::PullRequests => self.load_pulls(cx),
             _ => {}
         }
         if self.page == Page::Changes {
@@ -381,12 +447,112 @@ impl RepoView {
             Page::Absorb => self.load_absorb(cx),
             Page::Conflicts => self.load_conflicts(cx),
             Page::Stack => self.load_stack(cx),
-            Page::Blame => self.load_blame_files(cx),
+            Page::Blame | Page::FileHistory => self.load_blame_files(cx),
             Page::Bisect => self.load_bisect(cx),
+            Page::Compare => {
+                if self.compare.result.is_none() && !self.compare.loading {
+                    self.open_compare(String::new(), String::new(), cx);
+                }
+            }
+            Page::Recover => self.load_recover(cx),
+            Page::Stashes => self.load_stash_page(cx),
+            Page::Submodules => self.load_submodules(cx),
+            Page::Lfs => self.load_lfs(cx),
+            Page::PullRequests => self.load_pulls(cx),
             _ => {}
         }
         let _ = window;
         cx.notify();
+    }
+
+    /// Opens a file or folder in the editor from Settings → Tools, or the system's default program.
+    ///
+    /// # Arguments
+    /// * `path` - the file or folder
+    /// * `cx` - the repository view's context
+    pub(crate) fn open_in_editor(&self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if !crate::platform::open_in_editor(&self.settings.tools.editor, path) {
+            cx.open_with_system(path);
+        }
+    }
+
+    /// Shows one file's diff in the external diff tool.
+    ///
+    /// # Arguments
+    /// * `what` - which states to compare
+    /// * `path` - the file
+    pub(crate) fn open_difftool(&mut self, what: cairn_core::ops::ToolDiff, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let tool = self.settings.tools.diff_tool.clone();
+        let git = self.git();
+        cx.spawn_in(window, async move |_, cx| {
+            let result = cx.background_executor().spawn(async move { cairn_core::ops::open_difftool(&git, &tool, &what, &path) }).await;
+            if let Err(e) = result {
+                let _ = cx.update(|window, cx| window.push_notification(Notification::error(friendly_error(&e)).title(tr("tools.diff_failed")), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Opens a conflicted file in the external merge tool.
+    ///
+    /// # Arguments
+    /// * `path` - the conflicted file
+    pub(crate) fn open_mergetool(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let tool = self.settings.tools.merge_tool.clone();
+        let git = self.git();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { cairn_core::ops::open_mergetool(&git, &tool, &path) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Err(e) = result {
+                    window.push_notification(Notification::error(friendly_error(&e)).title(tr("tools.merge_failed")), cx);
+                }
+                this.conflicts.file = None;
+                this.reload(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Asks for a patch file and applies it: mailbox patches become commits, plain diffs change files.
+    pub(crate) fn apply_patch_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(tr("tools.apply_patch_prompt")) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(file) = paths.into_iter().next() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.run_op(tr("op.apply_patch"), Some(t!("undo.apply_patch").to_string()), move |git| cairn_core::ops::apply_patch(git, &file), window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Asks where to save, then writes commits as a patch file.
+    ///
+    /// # Arguments
+    /// * `ids` - the commits to save
+    pub(crate) fn save_patch_file(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let summary = self.commits.iter().find(|c| ids.len() == 1 && c.id == ids[0]).map(|c| c.summary.clone());
+        let name = summary
+            .map(|s| s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect::<String>())
+            .map(|s| s.split('-').filter(|p| !p.is_empty()).take(8).collect::<Vec<_>>().join("-"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{}-commits", ids.len()));
+        let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(|| self.repo.root.clone());
+        let picked = cx.prompt_for_new_path(&dir, Some(&format!("{name}.patch")));
+        let git = self.git();
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(dest))) = picked.await else { return };
+            let d2 = dest.clone();
+            let result = cx.background_executor().spawn(async move { cairn_core::ops::save_patch(&git, &ids, &d2) }).await;
+            let _ = cx.update(|window, cx| match result {
+                Ok(()) => window.push_notification(Notification::success(t!("tools.patch_saved", path = dest.display().to_string()).to_string()), cx),
+                Err(e) => window.push_notification(Notification::error(friendly_error(&e)).title(tr("tools.patch_failed")), cx),
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn spawn_bg<T, F, A>(&mut self, work: F, apply: A, cx: &mut Context<Self>)
@@ -404,6 +570,28 @@ impl RepoView {
         });
         self._tasks.push(task);
         self._tasks.retain(|t| !t.is_ready());
+    }
+
+    /// Runs `then` once the operation started by `run_op` has finished.
+    ///
+    /// # Arguments
+    /// * `then` - what to do afterwards, such as reloading a page
+    pub(crate) fn after_op(&mut self, then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                match this.read_with(cx, |v, _| v.busy.is_some()) {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(_) => return,
+                }
+            }
+            let _ = this.update(cx, |v, cx| {
+                then(v, cx);
+                cx.notify();
+            });
+        });
+        self._tasks.push(task);
     }
 
     pub(crate) fn current_branch(&self) -> Option<&str> {
@@ -1063,31 +1251,28 @@ impl RepoView {
                         )
                     })
                     .child(
-                        framed(Button::new("fetch"), Tone::Plain, cx)
+                        crate::widgets::framed_if(Button::new("fetch"), Tone::Plain, busy.is_none(), cx)
                             .icon(icon(IconName::RefreshCw))
                             .label(tr("toolbar.fetch"))
                             .tooltip(tr("toolbar.fetch_tip"))
-                            .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.fetch(window, cx))),
                     )
                     .child(
-                        framed(Button::new("pull"), Tone::Plain, cx)
+                        crate::widgets::framed_if(Button::new("pull"), Tone::Plain, busy.is_none(), cx)
                             .icon(icon(IconName::ArrowDownToLine))
                             .label(tr("toolbar.pull"))
                             .when(behind > 0, |b| b.child(count_chip(behind.to_string(), theme.primary.opacity(0.18), theme.primary)))
                             .tooltip(tr("toolbar.pull_tip"))
-                            .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.pull(window, cx))),
                     )
                     .child({
                         let unpublished = self.status.branch.upstream.is_none() && !self.remotes.is_empty() && self.current_branch().is_some();
                         let tone = if ahead > 0 || unpublished { Tone::Accent } else { Tone::Plain };
-                        framed(Button::new("push"), tone, cx)
+                        crate::widgets::framed_if(Button::new("push"), tone, busy.is_none(), cx)
                             .icon(icon(IconName::ArrowUpToLine))
                             .label(tr("toolbar.push"))
                             .when(ahead > 0, |b| b.child(count_chip(ahead.to_string(), gpui_kit::black().opacity(0.18), theme.primary_foreground)))
                             .tooltip(tr("toolbar.push_tip"))
-                            .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.push(false, window, cx)))
                     })
                     .child(
@@ -1101,14 +1286,29 @@ impl RepoView {
                                 move |menu, _, _| {
                                     let root_a = root.clone();
                                     let root_b = root.clone();
+                                    let root_c = root.clone();
                                     let v1 = view.clone();
                                     let v2 = view.clone();
                                     let v4 = view.clone();
+                                    let v5 = view.clone();
+                                    let v6 = view.clone();
+                                    let v7 = view.clone();
                                     menu.item(
                                         PopupMenuItem::new(t!("toolbar.stash").to_string())
                                             .icon(icon(IconName::Archive))
                                             .on_click(move |_, window, cx| v4.update(cx, |v, cx| v.stash(window, cx))),
                                     )
+                                    .item(
+                                        PopupMenuItem::new(t!("toolbar.stash_some").to_string())
+                                            .icon(icon(IconName::ArchiveRestore))
+                                            .on_click(move |_, window, cx| crate::dialogs::stash_dialog(v5.clone(), Vec::new(), window, cx)),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new(t!("toolbar.apply_patch").to_string())
+                                            .icon(icon(IconName::FileInput))
+                                            .on_click(move |_, window, cx| v6.update(cx, |v, cx| v.apply_patch_file(window, cx))),
+                                    )
+                                    .separator()
                                     .item(
                                         PopupMenuItem::new(t!("toolbar.open_folder").to_string())
                                             .icon(icon(IconName::FolderOpen))
@@ -1118,6 +1318,11 @@ impl RepoView {
                                         PopupMenuItem::new(t!("toolbar.open_terminal").to_string())
                                             .icon(icon(IconName::Terminal))
                                             .on_click(move |_, _, _| crate::platform::open_terminal(&root_b)),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new(t!("toolbar.open_editor").to_string())
+                                            .icon(icon(IconName::Code))
+                                            .on_click(move |_, _, cx| v7.update(cx, |v, cx| v.open_in_editor(&root_c, cx))),
                                     )
                                     .item({
                                         let v3 = view.clone();
@@ -1158,7 +1363,32 @@ impl RepoView {
                     .child(page_tab("page-absorb", Page::Absorb, tr("page.absorb"), 0, cx))
                     .child(page_tab("page-conflicts", Page::Conflicts, tr("page.conflicts"), conflict_count, cx))
                     .child(page_tab("page-blame", Page::Blame, tr("page.blame"), 0, cx))
-                    .child(page_tab("page-bisect", Page::Bisect, tr("page.bisect"), 0, cx)),
+                    .child(page_tab("page-bisect", Page::Bisect, tr("page.bisect"), 0, cx))
+                    .child(page_tab("page-stashes", Page::Stashes, tr("page.stashes"), self.stashes.len(), cx))
+                    .child(page_tab("page-pulls", Page::PullRequests, tr("page.pulls"), self.prs.len(), cx))
+                    .child({
+                        let current = Page::MORE.iter().find(|(p, _, _)| *p == self.page);
+                        let active = current.is_some();
+                        let label: SharedString = current.map(|(_, l, _)| tr(l)).unwrap_or_else(|| tr("page.more"));
+                        let view = view.clone();
+                        Button::new("page-more")
+                            .ghost()
+                            .h(px(40.))
+                            .px_3()
+                            .rounded_none()
+                            .text_sm()
+                            .when(active, |b| b.font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).border_b_2().border_color(theme.primary))
+                            .when(!active, |b| b.font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground))
+                            .label(label)
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for (page, label, ic) in Page::MORE {
+                                    let v = view.clone();
+                                    menu = menu.item(PopupMenuItem::new(t!(label).to_string()).icon(icon(ic)).on_click(move |_, window, cx| v.update(cx, |v, cx| v.open_page(page, window, cx))));
+                                }
+                                menu
+                            })
+                    }),
             )
             .when(self.in_progress != InProgress::None, |d| d.child(self.render_in_progress(window, cx)))
     }
@@ -1210,9 +1440,8 @@ impl RepoView {
             })
             .when_some(cont, |d, cmd| {
                 d.child(
-                    framed(Button::new("continue-op"), Tone::Accent, cx)
+                    crate::widgets::framed_if(Button::new("continue-op"), Tone::Accent, conflicts == 0, cx)
                         .label(tr("progress.continue"))
-                        .disabled(conflicts > 0)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let cmd = cmd.to_string();
                             this.run_op(tr("progress.continue"), None, move |git| {
@@ -1259,6 +1488,13 @@ impl Render for RepoView {
                 Page::Conflicts => self.render_conflicts(window, cx).into_any_element(),
                 Page::Blame => self.render_blame(window, cx).into_any_element(),
                 Page::Bisect => self.render_bisect(window, cx).into_any_element(),
+                Page::FileHistory => self.render_file_history(window, cx).into_any_element(),
+                Page::Compare => self.render_compare(window, cx).into_any_element(),
+                Page::Recover => self.render_recover(window, cx).into_any_element(),
+                Page::Stashes => self.render_stash_page(window, cx).into_any_element(),
+                Page::Submodules => self.render_submodules(window, cx).into_any_element(),
+                Page::Lfs => self.render_lfs(window, cx).into_any_element(),
+                Page::PullRequests => self.render_pulls(window, cx).into_any_element(),
             }
         };
         v_flex()

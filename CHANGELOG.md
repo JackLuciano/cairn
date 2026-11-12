@@ -5,6 +5,46 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
+Find anything, undo anything, and a calmer History.
+
+### Added
+
+- File history: every commit that changed a file, followed through renames, with each change.
+  Open it from a file's right-click menu, Line history or More → File history.
+- Compare: pick two branches, tags or commits to see what is only on each side and how the files
+  differ. "Compare with current branch" is in the branch and commit menus.
+- Lost & found: commits from deleted branches, resets and dropped stashes, with "Restore as
+  branch".
+- A Stashes page: look inside a stash, restore a single file from it, apply, restore or delete it.
+  Stash only some files, or only what you staged, including single blocks and lines.
+- Drag a branch label onto another branch in History to merge or rebase it, or drag commits onto a
+  branch to cherry-pick them.
+- A Pull requests page: filter by "To review", "Mine" or "Drafts", see at a glance what each pull
+  request still needs (reviews, checks, conflicts), read the conversation, commits and checks, go
+  through the changed files with a "viewed" tick per file, comment on single lines, approve or
+  request changes, check it out locally, mark a draft ready and merge it (squash, merge commit or
+  rebase).
+- Submodules: see their state, download and update them, add new ones and open them in a tab.
+- Git LFS: track file types, download LFS files, lock and unlock files.
+- Settings → Tools: your editor, external diff tool and merge tool. "Open in editor", "Open in
+  diff tool" and "Open in merge tool" are in the matching menus.
+- Ignore an untracked file, its file type or its folder from the Changes list.
+- Save commits as a patch file, and apply patch files from the ⋯ menu.
+- macOS and Linux builds are compiled on every pull request (not packaged yet).
+
+### Changed
+
+- History opens on the branch you are on. Switch to "All branches" at the top; Cairn remembers it.
+- In "All branches", branches that start from the same commit share a lane instead of each getting
+  its own line, and the graph never grows wider than its column.
+- The sidebar groups branches into folders such as `feat/`, keeps the current branch on top, and
+  lets you fold Branches, Worktrees and Stashes. Worktrees take one line each.
+- Buttons that can't be used right now, such as Commit with nothing staged, are dimmed and can't
+  be clicked.
+- Stashes show their own message instead of "On branch: …".
+
 ## [0.2.4] - 2026-11-12
 
 ### Fixed

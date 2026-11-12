@@ -66,6 +66,43 @@ were made, whatever order you clicked them in.
 staged changes. Tell it how you like your messages in Settings → Commits, or share rules with
 your team in `.cairn/commit-message.md`.
 
+**History that stays readable.** History opens on the branch you are on, so twenty open feature
+branches don't turn the graph into a wall of lines. Switch to "All branches" when you want the
+whole picture; branches that grow from the same commit share a lane instead of fanning out.
+
+**Drag and drop.** Drag a branch label onto another branch to merge or rebase it, or drag commits
+onto a branch to cherry-pick them. Cairn always asks first and tells you if it needs to switch
+branches.
+
+### Find anything, undo anything
+
+- **File history.** Every commit that changed a file, followed through renames, with the change
+  each one made.
+- **Compare.** Pick any two branches, tags or commits and see what is only on each side and how
+  the files differ.
+- **Lost & found.** Deleted a branch, reset too far or dropped a stash? Cairn lists the commits
+  nothing points at any more and brings them back as a branch in one click.
+- **Stashes, properly.** Stash only some files, or only the blocks and lines you staged. Look
+  inside a stash before applying it and restore single files from it.
+
+### Pull requests, submodules and large files
+
+<img src="docs/screenshots/dark/pull-requests.png" alt="Pull request ready to merge" width="100%">
+
+- **Review pull requests in Cairn.** A ring shows what each pull request still needs (reviews,
+  checks, conflicts) and what to do next. Read the conversation, commits and checks, tick off
+  files as you review them, comment on a line, approve or request changes, check it out locally
+  and merge it. Uses the GitHub CLI.
+- **Submodules.** See which are missing or on a different commit, download and update them, add
+  new ones and open them as their own tab.
+- **Git LFS.** Track file types, download LFS files, and lock and unlock files your team edits.
+
+### Your tools
+
+Open files and repositories in your editor, send a diff to your external diff tool or a conflict
+to your merge tool, ignore a file or a whole file type from the Changes list, and save commits as
+a patch or apply someone else's. Set your programs in Settings → Tools.
+
 ### Rewrite history without fear
 
 <table>
@@ -168,7 +205,8 @@ The installer is not code-signed yet, so Windows SmartScreen may ask you to conf
 
 **Requirements**
 
-- Windows 10 or 11 (macOS and Linux builds are planned)
+- Windows 10 or 11. macOS and Linux builds are compiled by the "Build (macOS and Linux)" workflow
+  but are not packaged or tested yet.
 - [Git](https://git-scm.com/download/win) 2.40 or newer on your `PATH`
 - Optional: the [GitHub CLI](https://cli.github.com) for pull requests (run `gh auth login` once)
 

@@ -223,10 +223,9 @@ impl RepoView {
                         .child(div().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("absorb.ready", count)))
                         .child(spacer())
                         .child(
-                            framed(Button::new("absorb-run"), Tone::Accent, cx)
+                            crate::widgets::framed_if(Button::new("absorb-run"), Tone::Accent, count > 0 && self.busy.is_none(), cx)
                                 .icon(icon(IconName::Combine))
                                 .label(t!("absorb.run", n = count).to_string())
-                                .disabled(count == 0 || self.busy.is_some())
                                 .on_click(cx.listener(|this, _, window, cx| this.run_absorb(window, cx))),
                         ),
                 )
@@ -333,7 +332,7 @@ impl RepoView {
                                 this.absorb.split = None;
                                 cx.notify();
                             })))
-                            .child(framed(Button::new("split-run"), Tone::Accent, cx).icon(icon(IconName::Scissors)).label(tr("split.run")).disabled(self.busy.is_some()).on_click(cx.listener(|this, _, window, cx| this.run_split(window, cx)))),
+                            .child(crate::widgets::framed_if(Button::new("split-run"), Tone::Accent, self.busy.is_none(), cx).icon(icon(IconName::Scissors)).label(tr("split.run")).on_click(cx.listener(|this, _, window, cx| this.run_split(window, cx)))),
                     )
                     .into_any_element()
             }

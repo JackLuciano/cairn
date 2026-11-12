@@ -1,6 +1,7 @@
 use cairn_core::ops::ResetMode;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
@@ -17,10 +18,28 @@ use crate::widgets::{icon, tr};
 /// The menu with copy, cherry-pick and revert for the whole selection.
 pub(crate) fn build_multi(menu: PopupMenu, view: Entity<RepoView>, n: usize) -> PopupMenu {
     let item = |label: String, ic: IconName| PopupMenuItem::new(label).icon(icon(ic));
-    let (v1, v2, v3, v4, v5) = (view.clone(), view.clone(), view.clone(), view.clone(), view);
+    let (v1, v2, v3, v4, v5, v6, v7) = (view.clone(), view.clone(), view.clone(), view.clone(), view.clone(), view.clone(), view);
     menu.label(t!("history.selected_n", n = n).to_string())
         .item(item(t!("history.copy_hashes").to_string(), IconName::Copy).on_click(move |_, window, cx| v1.update(cx, |v, cx| v.copy_selected_hashes(window, cx))))
         .item(item(t!("history.copy_list").to_string(), IconName::ListOrdered).on_click(move |_, window, cx| v5.update(cx, |v, cx| v.copy_selected_list(window, cx))))
+        .item(item(t!("actions.save_patch").to_string(), IconName::FileDown).on_click(move |_, window, cx| {
+            v6.update(cx, |v, cx| {
+                let ids = v.multi_select.clone();
+                v.save_patch_file(ids, window, cx)
+            })
+        }))
+        .when(n == 2, |m| {
+            m.item(item(t!("history.compare_two").to_string(), IconName::GitCompareArrows).on_click(move |_, _, cx| {
+                v7.update(cx, |v, cx| {
+                    let ordered = v.commits.iter().rev().filter(|c| v.multi_select.contains(&c.id)).map(|c| c.id.clone()).collect::<Vec<_>>();
+                    if let [older, newer] = ordered.as_slice() {
+                        let (older, newer) = (older.clone(), newer.clone());
+                        v.multi_select.clear();
+                        v.open_compare(older, newer, cx);
+                    }
+                })
+            }))
+        })
         .separator()
         .item(item(crate::widgets::plural("undo.cherry_pick_n", n), IconName::GitCommitHorizontal).on_click(move |_, window, cx| v2.update(cx, |v, cx| v.cherry_pick_selected(window, cx))))
         .item(item(crate::widgets::plural("undo.revert_n", n), IconName::Undo2).on_click(move |_, window, cx| v3.update(cx, |v, cx| v.revert_selected(window, cx))))
@@ -90,6 +109,23 @@ pub(crate) fn build(menu: PopupMenu, view: Entity<RepoView>, id: String) -> Popu
         item(t!("commit_menu.split").to_string(), IconName::Scissors).on_click(move |_, window, cx| {
             let id = i.clone();
             v.update(cx, |v, cx| v.start_split(id, window, cx));
+        })
+    })
+    .item({
+        let (v, i) = (view.clone(), id.clone());
+        item(t!("actions.compare_current").to_string(), IconName::GitCompareArrows).on_click(move |_, _, cx| {
+            let id = i.clone();
+            v.update(cx, |v, cx| {
+                let current = v.current_branch().map(str::to_string).unwrap_or_else(|| "HEAD".into());
+                v.open_compare(current, id, cx);
+            });
+        })
+    })
+    .item({
+        let (v, i) = (view.clone(), id.clone());
+        item(t!("actions.save_patch").to_string(), IconName::FileDown).on_click(move |_, window, cx| {
+            let id = i.clone();
+            v.update(cx, |v, cx| v.save_patch_file(vec![id], window, cx));
         })
     })
     .item({
