@@ -5,6 +5,10 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-12
+
+The first public release of Cairn.
+
 ### Added
 
 - Categories that work like folders: create, rename, reorder and delete them, add repositories
