@@ -219,6 +219,25 @@ fn cherry_pick_and_revert_many_keep_history_order() {
 }
 
 #[test]
+fn ordering_many_commits_including_the_root_is_fast_and_correct() {
+    let _data = data_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let git = repo(dir.path());
+    let mut made = Vec::new();
+    for i in 0..60 {
+        write(dir.path(), "n.txt", &format!("{i}\n"));
+        made.push(commit(&git, &format!("c{i}")));
+    }
+    let mut scrambled = made.clone();
+    scrambled.reverse();
+    scrambled.swap(3, 40);
+    let started = std::time::Instant::now();
+    let ordered = ops::oldest_first(&git, &scrambled);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "ordering took {:?}", started.elapsed());
+    assert_eq!(ordered, made);
+}
+
+#[test]
 fn push_fetch_pull_round_trip() {
     let _data = data_dir();
     let (root, bare, git) = with_remote();

@@ -103,10 +103,24 @@ impl RepoView {
 
     /// Copies the hashes of the selected commits, oldest first, one per line.
     pub(crate) fn copy_selected_hashes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ordered = cairn_core::ops::oldest_first(&self.repo.git, &self.multi_select);
+        let picked: std::collections::HashSet<&str> = self.multi_select.iter().map(String::as_str).collect();
+        let ordered: Vec<&str> = self.commits.iter().rev().map(|c| c.id.as_str()).filter(|id| picked.contains(id)).collect();
         let n = ordered.len();
         cx.write_to_clipboard(ClipboardItem::new_string(ordered.join("\n")));
         window.push_notification(gpui_kit::component::notification::Notification::success(crate::widgets::plural("history.copied_hashes", n)), cx);
+    }
+
+    /// Copies the selected commits as `hash - message` lines, newest first like `git log`.
+    ///
+    /// # Arguments
+    /// * `window` - shows the confirmation
+    /// * `cx` - the repository view's context
+    pub(crate) fn copy_selected_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked: std::collections::HashSet<&str> = self.multi_select.iter().map(String::as_str).collect();
+        let lines: Vec<String> = self.commits.iter().filter(|c| picked.contains(c.id.as_str())).map(|c| format!("{} - {}", c.short_id(7), c.summary)).collect();
+        let n = lines.len();
+        cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+        window.push_notification(gpui_kit::component::notification::Notification::success(crate::widgets::plural("history.copied_list", n)), cx);
     }
 
     /// Cherry-picks every selected commit onto the current branch, oldest first.
@@ -344,6 +358,7 @@ impl RepoView {
                                 .child(div().text_xs().text_color(theme.muted_foreground).child(tr("history.multi_hint")))
                                 .child(spacer())
                                 .child(crate::widgets::framed(Button::new("multi-copy"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::Copy)).label(tr("history.copy_hashes")).on_click(cx.listener(|this, _, window, cx| this.copy_selected_hashes(window, cx))))
+                                .child(crate::widgets::framed(Button::new("multi-copy-list"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::ListOrdered)).label(tr("history.copy_list")).on_click(cx.listener(|this, _, window, cx| this.copy_selected_list(window, cx))))
                                 .child(crate::widgets::framed(Button::new("multi-pick"), crate::widgets::Tone::Accent, cx).icon(icon(IconName::GitCommitHorizontal)).label(tr("history.cherry_pick_n")).on_click(cx.listener(|this, _, window, cx| this.cherry_pick_selected(window, cx))))
                                 .child(crate::widgets::framed(Button::new("multi-revert"), crate::widgets::Tone::Plain, cx).icon(icon(IconName::Undo2)).label(tr("history.revert_n")).on_click(cx.listener(|this, _, window, cx| this.revert_selected(window, cx))))
                                 .child(Button::new("multi-clear").small().ghost().icon(icon(IconName::X)).tooltip(tr("history.clear_selection")).on_click(cx.listener(|this, _, _, cx| {

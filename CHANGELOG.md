@@ -5,6 +5,19 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-12
+
+### Added
+
+- "Copy with messages" copies the selected commits as `hash - message` lines, newest first, like
+  `git log --oneline`. A single commit's menu has "Copy hash and message".
+
+### Fixed
+
+- Selecting dozens of commits and copying their hashes no longer freezes the app.
+- Opening Cairn from a pinned taskbar icon now lights up that icon instead of adding a second
+  one.
+
 ## [0.2.2] - 2026-11-12
 
 ### Fixed

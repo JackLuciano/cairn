@@ -284,33 +284,43 @@ pub fn revert(git: &Git, id: &str) -> Result<String> {
 /// # Returns
 /// The same commits, oldest first. Commits git cannot order keep their relative position at the end.
 pub fn oldest_first(git: &Git, ids: &[String]) -> Vec<String> {
-    let full: Vec<String> = ids
-        .iter()
-        .map(|id| git.run(["rev-parse".to_string(), "--verify".into(), "--quiet".into(), format!("{id}^{{commit}}")]).map(|s| s.trim().to_string()).unwrap_or_else(|_| id.clone()))
-        .collect();
+    if ids.len() < 2 {
+        return ids.to_vec();
+    }
+    let mut parse_args: Vec<String> = vec!["rev-parse".into()];
+    parse_args.extend(ids.iter().map(|id| format!("{id}^{{commit}}")));
+    let full: Vec<String> = match git.run(&parse_args) {
+        Ok(out) => out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+        Err(_) => return ids.to_vec(),
+    };
+    if full.len() != ids.len() {
+        return ids.to_vec();
+    }
+    let index: std::collections::HashMap<&str, usize> = full.iter().enumerate().map(|(i, f)| (f.as_str(), i)).collect();
     let mut args: Vec<String> = vec!["rev-list".into(), "--topo-order".into(), "--reverse".into()];
     args.extend(full.iter().cloned());
     let mut base_args: Vec<String> = vec!["merge-base".into(), "--octopus".into()];
     base_args.extend(full.iter().cloned());
     if let Ok(base) = git.run(&base_args) {
         let base = base.trim();
-        if !base.is_empty() && !full.iter().any(|f| f == base) {
-            args.push(format!("^{base}"));
+        if !base.is_empty() {
+            args.push("--not".into());
+            args.push(format!("{base}^@"));
         }
     }
     match git.run(&args) {
         Ok(out) => {
-            let mut ordered: Vec<String> = out
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .filter_map(|l| full.iter().position(|f| *f == l).map(|i| ids[i].clone()))
-                .collect();
-            for id in ids {
-                if !ordered.iter().any(|o| o.starts_with(id.as_str()) || id.starts_with(o.as_str())) {
-                    ordered.push(id.clone());
+            let mut seen = vec![false; ids.len()];
+            let mut ordered: Vec<String> = Vec::with_capacity(ids.len());
+            for line in out.lines() {
+                if let Some(&i) = index.get(line.trim())
+                    && !seen[i]
+                {
+                    seen[i] = true;
+                    ordered.push(ids[i].clone());
                 }
             }
+            ordered.extend(ids.iter().enumerate().filter(|(i, _)| !seen[*i]).map(|(_, id)| id.clone()));
             ordered
         }
         Err(_) => ids.to_vec(),
