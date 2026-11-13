@@ -83,7 +83,28 @@ pub(crate) fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
 /// The empty card; add a `card_header` and rows as children.
 pub(crate) fn card(cx: &App) -> Div {
     let t = cx.theme();
-    v_flex().flex_none().w_full().rounded(px(12.)).border_1().border_color(t.border).bg(t.sidebar).overflow_hidden()
+    v_flex().flex_none().w_full().rounded(px(14.)).border_1().border_color(t.border).bg(t.sidebar).shadow(soft_shadow(cx)).overflow_hidden()
+}
+
+/// A soft colored halo, used for the selected item and the main action.
+///
+/// # Arguments
+/// * `color` - the glow color
+/// * `blur` - how far it spreads, in pixels
+///
+/// # Returns
+/// The shadow list for `.shadow(...)`.
+pub(crate) fn glow(color: Hsla, blur: f32) -> Vec<BoxShadow> {
+    vec![BoxShadow { color: color.opacity(0.35), offset: point(px(0.), px(0.)), blur_radius: px(blur), spread_radius: px(0.), inset: false }]
+}
+
+/// The gentle drop shadow under cards, lighter in light mode.
+///
+/// # Returns
+/// The shadow list for `.shadow(...)`.
+pub(crate) fn soft_shadow(cx: &App) -> Vec<BoxShadow> {
+    let dark = cx.theme().is_dark();
+    vec![BoxShadow { color: gpui_kit::black().opacity(if dark { 0.28 } else { 0.06 }), offset: point(px(0.), px(2.)), blur_radius: px(10.), spread_radius: px(0.), inset: false }]
 }
 
 /// The header strip of a `card`: an icon, a title, an optional count and room for actions.
@@ -263,7 +284,11 @@ pub(crate) fn framed(button: gpui_kit::component::button::Button, tone: Tone, cx
         _ => button.outline(),
     };
     let styled = base.h(px(32.)).px(px(10.)).rounded(px(8.)).border_1().border_color(border).bg(bg).text_color(fg).text_sm();
-    if tone == Tone::Plain { styled.font_weight(FontWeight::MEDIUM) } else { styled.font_weight(FontWeight::SEMIBOLD) }
+    match tone {
+        Tone::Plain => styled.font_weight(FontWeight::MEDIUM),
+        Tone::Accent => styled.font_weight(FontWeight::SEMIBOLD).bg(linear_gradient(180., linear_color_stop(t.primary.blend(gpui_kit::white().opacity(0.14)), 0.), linear_color_stop(t.primary, 1.))).shadow(glow(t.primary, 10.)),
+        Tone::Ai => styled.font_weight(FontWeight::SEMIBOLD).bg(linear_gradient(135., linear_color_stop(t.magenta.opacity(0.2), 0.), linear_color_stop(t.blue.opacity(0.1), 1.))),
+    }
 }
 
 /// Styles a framed button that may be unavailable: when `enabled` is false it is dimmed, drawn

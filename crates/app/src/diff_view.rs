@@ -26,6 +26,35 @@ pub(crate) struct DiffPane {
     shown: Option<(FileDiff, u32)>,
     path: Option<SharedString>,
     anchor: Rc<RefCell<Option<DiffLinePosition>>>,
+    pub show_all: Option<String>,
+}
+
+/// The beginning of a very large diff, so it appears at once; whole hunks are kept, and a hunk
+/// that alone is too long is cut with its line counts fixed up.
+///
+/// # Arguments
+/// * `diff` - the full diff
+/// * `limit` - roughly how many lines to keep
+///
+/// # Returns
+/// A diff with at most about `limit` lines.
+fn first_lines(diff: &FileDiff, limit: usize) -> FileDiff {
+    let mut out = FileDiff { hunks: Vec::new(), ..diff.clone() };
+    let mut used = 0;
+    for hunk in &diff.hunks {
+        if used >= limit {
+            break;
+        }
+        let mut h = hunk.clone();
+        if used + h.lines.len() > limit {
+            h.lines.truncate(limit - used);
+            h.old_count = h.lines.iter().filter(|l| matches!(l.kind, LineKind::Removed | LineKind::Context)).count() as u32;
+            h.new_count = h.lines.iter().filter(|l| matches!(l.kind, LineKind::Added | LineKind::Context)).count() as u32;
+        }
+        used += h.lines.len();
+        out.hunks.push(h);
+    }
+    out
 }
 
 impl DiffPane {
@@ -42,6 +71,7 @@ impl DiffPane {
             shown: None,
             path: None,
             anchor: Rc::default(),
+            show_all: None,
         }
     }
 
@@ -243,10 +273,51 @@ impl RepoView {
         }
         let total: usize = diff.hunks.iter().map(|h| h.lines.len()).sum();
         let limit_lines = (self.settings.diffs.collapse_larger_than_kb as usize).saturating_mul(1024) / 40;
-        if limit_lines > 0 && total > limit_lines.max(2000) {
-            return empty_state(IconName::TriangleAlert, tr("diff.too_large_title"), tr("diff.too_large_body"), cx).into_any_element();
-        }
+        let first_part = if limit_lines > 0 { limit_lines.clamp(1500, 6000) } else { 20000 };
         let settings = self.settings.clone();
+        let pane = match source {
+            DiffSource::Change => &mut self.change_pane,
+            DiffSource::CommitFile => &mut self.commit_pane,
+            DiffSource::Page => &mut self.page_pane,
+        };
+        let cut = total > first_part && pane.show_all.as_deref() != Some(diff.path.as_str());
+        let shown = if cut { first_lines(diff, first_part) } else { diff.clone() };
+        let diff = &shown;
+        if cut {
+            let view = cx.entity().downgrade();
+            let which = source;
+            let file = diff.path.clone();
+            let theme = cx.theme().clone();
+            let banner = h_flex()
+                .flex_none()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .bg(theme.yellow.opacity(0.1))
+                .border_b_1()
+                .border_color(theme.yellow.opacity(0.3))
+                .text_xs()
+                .child(icon(IconName::Zap).xsmall().text_color(theme.yellow))
+                .child(div().flex_1().child(gpui_kit::SharedString::from(rust_i18n::t!("diff.first_part", shown = first_part, total = total).to_string())))
+                .child(Button::new("diff-show-all").xsmall().ghost().label(tr("diff.show_all")).on_click(move |_, _, cx| {
+                    let file = file.clone();
+                    let _ = view.update(cx, |v, cx| {
+                        let pane = match which {
+                            DiffSource::Change => &mut v.change_pane,
+                            DiffSource::CommitFile => &mut v.commit_pane,
+                            DiffSource::Page => &mut v.page_pane,
+                        };
+                        pane.show_all = Some(file);
+                        cx.notify();
+                    });
+                }));
+            let body = self.render_shown_diff(source, diff, settings, cx);
+            return v_flex().size_full().child(banner).child(div().flex_1().min_h_0().child(body)).into_any_element();
+        }
+        self.render_shown_diff(source, diff, settings, cx)
+    }
+
+    fn render_shown_diff(&mut self, source: DiffSource, diff: &FileDiff, settings: Settings, cx: &mut Context<Self>) -> AnyElement {
         let pane = match source {
             DiffSource::Change => &mut self.change_pane,
             DiffSource::CommitFile => &mut self.commit_pane,

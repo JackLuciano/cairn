@@ -74,7 +74,7 @@ impl RepoView {
                 .when(st.version.is_some(), |d| d.child(crate::widgets::framed_if(Button::new("lfs-track"), Tone::Accent, !busy, cx).icon(icon(IconName::Plus)).label(tr("lfs.track")).on_click(cx.listener(|this, _, window, cx| this.lfs_track_prompt(window, cx))))),
         );
         if self.lfs.loading && !self.lfs.loaded {
-            return col.child(div().py_6().flex().justify_center().child(gpui_kit::component::spinner::Spinner::new())).into_any_element();
+            return col.child(crate::skeleton::list(4, cx)).into_any_element();
         }
         if st.version.is_none() {
             return col

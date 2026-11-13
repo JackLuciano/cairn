@@ -3,7 +3,7 @@ use cairn_core::log::{CommitInfo, RefKind};
 use cairn_core::settings::{DateFormat, GraphStyle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu as _};
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
 use rust_i18n::t;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -18,6 +18,103 @@ const LANE_W: f32 = 14.;
 const MIN_LANE_W: f32 = 6.;
 const MAX_GRAPH_W: f32 = 200.;
 const GRAPH_PAD: f32 = 10.;
+const DIM_ALPHA: f32 = 0.4;
+const TEXT_DIM_ALPHA: f32 = 0.72;
+const BRANCH_COL_W: f32 = 150.;
+
+const LEGEND_MAX: usize = 10;
+
+/// The card shown when hovering a commit: message, author, branch and labels at a glance.
+#[derive(Clone)]
+struct CommitCard {
+    summary: String,
+    author: String,
+    email: String,
+    time: i64,
+    hash: String,
+    branch: Option<String>,
+    branch_color: Option<Hsla>,
+    refs: Vec<String>,
+    merge: bool,
+    on_branch: bool,
+}
+
+impl Render for CommitCard {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let color = self.branch_color.unwrap_or(theme.primary);
+        v_flex()
+            .w(px(360.))
+            .gap_2()
+            .p_3()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(color.opacity(0.45))
+            .bg(theme.popover)
+            .shadow(crate::widgets::soft_shadow(cx))
+            .child(
+                hstack()
+                    .gap_2()
+                    .child(avatar(&self.author, px(28.), cx))
+                    .child(v_flex().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(self.author.clone())).child(div().text_xs().text_color(theme.muted_foreground).truncate().child(self.email.clone())))
+                    .child(spacer())
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(self.time))),
+            )
+            .child(div().text_sm().whitespace_normal().child(self.summary.clone()))
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .items_center()
+                    .when_some(self.branch.clone(), |d, b| d.child(hstack().gap_1().px_2().h(px(20.)).rounded(px(10.)).bg(color.opacity(0.15)).text_xs().font_family(theme.mono_font_family.clone()).text_color(color).child(div().size(px(6.)).rounded_full().bg(color)).child(b)))
+                    .when(self.merge, |d| d.child(crate::widgets::badge(tr("history.card_merge"), theme.magenta)))
+                    .when(!self.on_branch, |d| d.child(crate::widgets::badge(tr("history.card_off_branch"), theme.yellow)))
+                    .children(self.refs.iter().take(3).map(|r| crate::widgets::badge(r.clone(), theme.muted_foreground)))
+                    .child(spacer())
+                    .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(self.hash.clone())),
+            )
+            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("history.card_hint")))
+    }
+}
+
+/// Everything derived from the loaded commits for drawing History: lanes, branch names and
+/// colors. Worked out off the UI thread so large histories stay smooth.
+pub(crate) struct HistoryLayout {
+    pub rows: Vec<GraphRow>,
+    pub owners: Vec<Option<String>>,
+    pub palette: Vec<usize>,
+    pub owner_colors: std::collections::HashMap<String, usize>,
+}
+
+impl HistoryLayout {
+    /// Lays out the graph for the given commits.
+    ///
+    /// # Arguments
+    /// * `commits` - the loaded history, newest first
+    /// * `focus` - the branch to highlight; the checked-out one when `None`
+    /// * `searching` - whether the list is filtered by a search
+    ///
+    /// # Returns
+    /// The finished layout.
+    pub(crate) fn compute(commits: &[CommitInfo], focus: Option<&str>, searching: bool) -> Self {
+        let hot = crate::repo_view::focus_hot(commits, focus, searching);
+        let owners = if searching { vec![None; commits.len()] } else { cairn_core::graph::branch_owners(commits) };
+        let (palette, owner_colors) = cairn_core::graph::owner_colors(&owners);
+        let rows = cairn_core::graph::layout_focused(commits, hot.as_deref(), (!searching).then_some(palette.as_slice()));
+        Self { rows, owners, palette, owner_colors }
+    }
+
+    /// Puts the layout on the view, unless the commits changed in the meantime.
+    pub(crate) fn apply(self, view: &mut RepoView) {
+        if self.rows.len() != view.commits.len() {
+            return;
+        }
+        view.rows = self.rows;
+        view.owners = self.owners;
+        view.palette = self.palette;
+        view.owner_colors = self.owner_colors;
+    }
+}
 
 /// Works out lane spacing and column width so the whole graph fits a bounded column.
 ///
@@ -44,6 +141,7 @@ fn paint_graph_clipped(row: &GraphRow, is_head: bool, is_merge: bool, style: Gra
     let mid = top + (bottom - top) / 2.;
     let x = |lane: usize| bounds.left() + px(GRAPH_PAD + lane as f32 * lane_w);
     let color = |i: usize| colors[i % colors.len()];
+    let faded = |c: Hsla, dim: bool| if dim { c.opacity(DIM_ALPHA) } else { c };
     for line in &row.lines {
         let (p0, p1) = match line.part {
             LinePart::Through => (point(x(line.from), top), point(x(line.to), bottom)),
@@ -63,11 +161,11 @@ fn paint_graph_clipped(row: &GraphRow, is_head: bool, is_merge: bool, style: Gra
             path.cubic_bezier_to(p1, point(p0.x, cy), point(p1.x, cy));
         }
         if let Ok(p) = path.build() {
-            window.paint_path(p, color(line.color));
+            window.paint_path(p, faded(color(line.color), line.dim));
         }
     }
     let c = point(x(row.lane), mid);
-    let dot_color = color(row.color);
+    let dot_color = faded(color(row.color), row.dim);
     if is_head {
         let ring = Bounds::centered_at(c, size(px(16.), px(16.)));
         window.paint_quad(fill(ring, dot_color.opacity(0.25)).corner_radii(px(8.)));
@@ -170,8 +268,153 @@ impl RepoView {
         }
     }
 
-    fn render_ref_chips(&self, c: &CommitInfo, cx: &App) -> Vec<AnyElement> {
+    /// Highlights one branch's commits in the history and fades the rest.
+    ///
+    /// # Arguments
+    /// * `name` - the branch to highlight, or `None` for the checked-out branch; picking the
+    ///   highlighted branch again goes back to the checked-out branch
+    pub(crate) fn set_focus_branch(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.focus_branch = if name.is_some() && name == self.focus_branch { None } else { name };
+        if self.focus_branch.as_deref().is_some_and(|n| self.current_branch() == Some(n)) {
+            self.focus_branch = None;
+        }
+        let searching = !self.search.read(cx).value().trim().is_empty();
+        let commits = self.commits.clone();
+        let focus = self.focus_branch.clone();
+        cx.notify();
+        self.spawn_bg(move || HistoryLayout::compute(&commits, focus.as_deref(), searching), |this, laid, _| laid.apply(this), cx);
+    }
+
+    /// The color a branch is drawn in, matching its line in the graph.
+    ///
+    /// # Arguments
+    /// * `name` - a local or remote branch name
+    ///
+    /// # Returns
+    /// The branch's lane color, or `None` when it owns no loaded commit.
+    pub(crate) fn branch_color(&self, name: &str, cx: &App) -> Option<Hsla> {
+        let ix = self.owner_colors.get(name).or_else(|| name.split_once('/').and_then(|(_, b)| self.owner_colors.get(b))).or_else(|| {
+            let remote = self.remotes.iter().map(|r| format!("{}/{name}", r.name)).find(|n| self.owner_colors.contains_key(n))?;
+            self.owner_colors.get(&remote)
+        })?;
+        Some(lane_color(*ix, cx))
+    }
+
+    /// Whether the history has commits of more than one branch, so the branch column helps.
+    fn shows_branch_column(&self) -> bool {
+        let mut names = self.owners.iter().flatten();
+        let first = names.next();
+        first.is_some() && names.any(|n| Some(n) != first)
+    }
+
+    /// Loads another page of history once the list is scrolled near its end.
+    ///
+    /// # Arguments
+    /// * `last_visible` - index of the last row being drawn
+    fn maybe_load_more(&mut self, last_visible: usize, cx: &mut Context<Self>) {
+        let page = self.settings.graph.page_size.max(50);
+        let limit = self.history_limit.max(page);
+        if self.loading_more || self.commits.len() < limit || last_visible + 20 < self.commits.len() {
+            return;
+        }
+        self.history_limit = limit + page;
+        self.loading_more = true;
+        let git = self.git();
+        let settings = self.settings.clone();
+        let have = self.commits.clone();
+        let focus = self.focus_branch.clone();
+        let opts = cairn_core::log::LogOptions {
+            scope: if settings.graph.all_branches { cairn_core::log::LogScope::AllRefs } else { cairn_core::log::LogScope::CurrentBranch },
+            limit: page,
+            skip: have.len(),
+            first_parent: settings.graph.first_parent,
+            include_remotes: settings.graph.show_remotes,
+            include_stashes: settings.graph.show_stashes,
+            ..Default::default()
+        };
+        self.spawn_bg(
+            move || {
+                let more = cairn_core::log::load_log(&git, &opts).unwrap_or_default();
+                let mut all = have;
+                let known: std::collections::HashSet<String> = all.iter().map(|c| c.id.clone()).collect();
+                all.extend(more.into_iter().filter(|c| !known.contains(&c.id)));
+                let laid = HistoryLayout::compute(&all, focus.as_deref(), false);
+                (all, laid)
+            },
+            |this, (all, laid), _| {
+                this.loading_more = false;
+                if all.len() >= this.commits.len() {
+                    this.commits = all;
+                    laid.apply(this);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Commits that arrived since the last load, shown with a short slide-in.
+    ///
+    /// # Arguments
+    /// * `before` - the commit ids shown until now
+    pub(crate) fn mark_fresh(&mut self, before: &std::collections::HashSet<String>, cx: &mut Context<Self>) {
+        if before.is_empty() || self.settings.appearance.reduce_motion {
+            return;
+        }
+        self.fresh = self.commits.iter().take(50).filter(|c| !before.contains(&c.id)).map(|c| c.id.clone()).collect();
+        if self.fresh.is_empty() {
+            return;
+        }
+        self.spawn_bg(|| std::thread::sleep(std::time::Duration::from_millis(1200)), |this, _, _| this.fresh.clear(), cx);
+    }
+
+    fn render_legend(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.shows_branch_column() {
+            return None;
+        }
         let theme = cx.theme().clone();
+        let mut names: Vec<(String, usize)> = self.owner_colors.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        names.sort_by_key(|(_, i)| *i);
+        let total = names.len();
+        let focus = self.focus_branch.clone().or_else(|| self.current_branch().map(str::to_string));
+        let mut row = hstack().gap_1p5().px_4().py(px(6.)).border_b_1().border_color(theme.border.opacity(0.6)).overflow_hidden();
+        for (k, (name, ix)) in names.into_iter().take(LEGEND_MAX).enumerate() {
+            let color = lane_color(ix, cx);
+            let on = focus.as_deref() == Some(name.as_str());
+            let pick = name.clone();
+            row = row.child(
+                hstack()
+                    .id(("legend", k))
+                    .flex_none()
+                    .gap_1p5()
+                    .h(px(22.))
+                    .px_2()
+                    .rounded(px(11.))
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .border_1()
+                    .border_color(if on { color } else { color.opacity(0.3) })
+                    .bg(color.opacity(if on { 0.2 } else { 0.07 }))
+                    .text_color(if on { theme.foreground } else { theme.muted_foreground })
+                    .when(on, |d| d.shadow(crate::widgets::glow(color, 8.)))
+                    .hover(move |s| s.bg(color.opacity(0.16)).text_color(color))
+                    .child(div().size(px(7.)).rounded_full().bg(color))
+                    .child(name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.focus_branch = None;
+                        this.set_focus_branch(Some(pick.clone()), cx);
+                    })),
+            );
+        }
+        if total > LEGEND_MAX {
+            row = row.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(format!("+{}", total - LEGEND_MAX)));
+        }
+        Some(row.into_any_element())
+    }
+
+    fn render_ref_chips(&self, c: &CommitInfo, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let focus = self.focus_branch.clone();
         let pr_chips: Vec<AnyElement> = if self.settings.remotes.show_prs_in_graph {
             c.refs
                 .iter()
@@ -211,6 +454,11 @@ impl RepoView {
                     RefKind::Stash => (theme.magenta, IconName::Archive),
                     RefKind::Head => (theme.red, IconName::CircleDot),
                 };
+                let color = match r.kind {
+                    RefKind::LocalBranch | RefKind::RemoteBranch => self.branch_color(&r.name, cx).unwrap_or(color),
+                    _ => color,
+                };
+                let focused = focus.as_deref() == Some(r.name.as_str());
                 let chip = hstack()
                     .id(SharedString::from(format!("chip-{}-{}", c.id, r.name)))
                     .flex_none()
@@ -220,16 +468,24 @@ impl RepoView {
                     .rounded(px(4.))
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if r.is_head { theme.primary_foreground } else { color })
-                    .bg(if r.is_head { color } else { color.opacity(0.14) })
+                    .text_color(if r.is_head || focused { theme.primary_foreground } else { color })
+                    .bg(if r.is_head { color } else if focused { theme.magenta } else { color.opacity(0.14) })
                     .border_1()
-                    .border_color(color.opacity(0.45))
+                    .border_color(if focused { theme.magenta } else { color.opacity(0.45) })
                     .child(icon(ic).xsmall())
                     .child(r.name.clone());
+                let name = r.name.clone();
+                let chip = if matches!(r.kind, RefKind::LocalBranch | RefKind::RemoteBranch) {
+                    let pick = name.clone();
+                    chip.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_focus_branch(Some(pick.clone()), cx);
+                    }))
+                } else {
+                    chip
+                };
                 if r.kind == RefKind::LocalBranch {
-                    let name = r.name.clone();
-                    chip.cursor_grab()
-                        .on_drag(crate::drag::DragBranch { name: name.clone() }, move |_, _, _, cx| crate::drag::DragPreview::new(name.clone(), IconName::GitBranch, cx))
+                    chip.on_drag(crate::drag::DragBranch { name: name.clone() }, move |_, _, _, cx| crate::drag::DragPreview::new(name.clone(), IconName::GitBranch, cx))
                         .into_any_element()
                 } else {
                     chip.into_any_element()
@@ -258,14 +514,34 @@ impl RepoView {
         let short = commit.short_id(self.settings.graph.hash_length.clamp(4, 40)).to_string();
         let time = self.format_time(commit.time);
         let view = cx.entity();
+        let faded = row.dim && !selected;
+        let branch_col = self.shows_branch_column().then(|| self.owners.get(ix).cloned().flatten());
+        let continues = ix > 0 && self.owners.get(ix - 1) == self.owners.get(ix) && !commit.refs.iter().any(|r| matches!(r.kind, RefKind::LocalBranch | RefKind::RemoteBranch));
+        let text = if faded { theme.foreground.opacity(TEXT_DIM_ALPHA) } else { theme.foreground };
+        let muted = if faded { theme.muted_foreground.opacity(TEXT_DIM_ALPHA + 0.1) } else { theme.muted_foreground };
 
-        div()
+        let card = CommitCard {
+            summary: commit.summary.clone(),
+            author: commit.author.clone(),
+            email: commit.email.clone(),
+            time: commit.time,
+            hash: commit.id.chars().take(10).collect(),
+            branch: self.owners.get(ix).cloned().flatten(),
+            branch_color: self.owners.get(ix).cloned().flatten().and_then(|o| self.branch_color(&o, cx)),
+            refs: commit.refs.iter().map(|r| r.name.clone()).collect(),
+            merge: is_merge,
+            on_branch: !row.dim,
+        };
+        let fresh = self.fresh.contains(&commit.id);
+        let row_el = div()
             .id(("commit", ix))
             .h(px(ROW_H))
             .w_full()
             .flex()
             .items_center()
             .bg(bg)
+            .when(selected, |d| d.bg(linear_gradient(90., linear_color_stop(theme.primary.opacity(0.22), 0.), linear_color_stop(bg, 0.45))).border_l_2().border_color(theme.primary))
+            .tooltip(move |_, cx| cx.new(|_| card.clone()).into())
             .border_b_1()
             .border_color(theme.border.opacity(0.4))
             .when(!selected, |d| d.hover(|s| s.bg(cx.theme().list_hover)))
@@ -311,14 +587,36 @@ impl RepoView {
                             .min_w_0()
                             .truncate()
                             .text_sm()
-                            .text_color(theme.foreground)
+                            .text_color(text)
                             .child(commit.summary.clone()),
                     ),
             )
-            .when(self.settings.appearance.show_avatars, |d| d.child(avatar(&commit.author, px(22.), cx)))
-            .child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone()))
-            .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(theme.muted_foreground).child(time))
-            .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(short))
+            .when_some(branch_col, |d, owner| {
+                let color = owner.as_deref().and_then(|o| self.branch_color(o, cx)).unwrap_or(theme.muted_foreground);
+                let color = if faded { color.opacity(TEXT_DIM_ALPHA + 0.1) } else { color };
+                d.child(
+                    hstack()
+                        .flex_none()
+                        .w(px(BRANCH_COL_W))
+                        .gap_1p5()
+                        .overflow_hidden()
+                        .child(div().flex_none().w(px(3.)).h(px(16.)).rounded(px(2.)).bg(color.opacity(if continues { 0.45 } else { 1. })))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(if continues { color.opacity(0.6) } else { color })
+                                .when(!continues, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                .child(owner.unwrap_or_else(|| "·".into())),
+                        ),
+                )
+            })
+            .when(self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(avatar(&commit.author, px(22.), cx))))
+            .child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted).child(commit.author.clone()))
+            .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(muted).child(time))
+            .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(muted).child(short))
             .context_menu(move |menu, _window, cx| {
                 let v = view.clone();
                 let id = menu_id.clone();
@@ -328,8 +626,15 @@ impl RepoView {
                 } else {
                     crate::commit_menu::build(menu, v, id)
                 }
-            })
-            .into_any_element()
+            });
+        if fresh {
+            let tint = theme.primary;
+            row_el
+                .with_animation(SharedString::from(format!("fresh-{}", commit.id)), Animation::new(std::time::Duration::from_millis(520)).with_easing(ease_out_quint()), move |d, t| d.opacity(0.2 + 0.8 * t).pl(px(12. + 18. * (1. - t))).bg(tint.opacity(0.18 * (1. - t))))
+                .into_any_element()
+        } else {
+            row_el.into_any_element()
+        }
     }
 
     pub(crate) fn render_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -349,16 +654,15 @@ impl RepoView {
             "history-list",
             count,
             cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                this.maybe_load_more(range.end, cx);
                 range.map(|ix| this.render_commit_row(ix, cx)).collect::<Vec<_>>()
             }),
         )
         .track_scroll(&self.history_scroll)
         .size_full();
+        let legend = self.render_legend(cx);
 
-        h_flex()
-            .size_full()
-            .child(
-                v_flex()
+        let main = v_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -406,6 +710,42 @@ impl RepoView {
                                     .child(segment("scope-all", tr("history.all_branches"), all, true, cx))
                             })
                             .child(div().flex_none().whitespace_nowrap().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("history.commits_shown", count)))
+                            .when(self.loading_more, |d| d.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(tr("history.loading_more"))))
+                            .when(self.settings.graph.all_branches, |d| {
+                                let view = cx.entity();
+                                let current = self.current_branch().map(str::to_string);
+                                let shown = self.focus_branch.clone().or(current.clone()).unwrap_or_else(|| "HEAD".into());
+                                let other = self.focus_branch.is_some();
+                                d.child(
+                                    crate::widgets::framed(Button::new("history-focus"), if other { crate::widgets::Tone::Accent } else { crate::widgets::Tone::Plain }, cx)
+                                        .h(px(28.))
+                                        .text_xs()
+                                        .icon(icon(IconName::Highlighter))
+                                        .label(SharedString::from(t!("history.highlight", name = shown).to_string()))
+                                        .tooltip(tr("history.highlight_hint"))
+                                        .dropdown_caret(true)
+                                        .dropdown_menu(move |menu, _, cx| {
+                                            let mut menu = menu.label(t!("history.highlight_title").to_string());
+                                            if let Some(cur) = current.clone() {
+                                                let v = view.clone();
+                                                menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(t!("history.highlight_current", name = cur).to_string()).icon(icon(IconName::CircleDot)).on_click(move |_, _, cx| {
+                                                    v.update(cx, |v, cx| v.set_focus_branch(None, cx));
+                                                }));
+                                            }
+                                            crate::pages::compare::ref_menu(menu.separator(), &view, |v, name, cx| {
+                                                if name == "HEAD" {
+                                                    v.set_focus_branch(None, cx);
+                                                } else {
+                                                    v.focus_branch = None;
+                                                    v.set_focus_branch(Some(name), cx);
+                                                }
+                                            }, cx)
+                                        }),
+                                )
+                                .when(other, |d| {
+                                    d.child(Button::new("history-focus-clear").xsmall().ghost().icon(icon(IconName::X)).tooltip(tr("history.highlight_clear")).on_click(cx.listener(|this, _, _, cx| this.set_focus_branch(None, cx))))
+                                })
+                            })
                             .child(div().flex_1().min_w(px(120.)).max_w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
                             .child(spacer())
                             .child(toggle_pill("toggle-graph", tr("history.graph"), self.show_graph, cx).on_click(cx.listener(|this, _, _, cx| {
@@ -448,6 +788,7 @@ impl RepoView {
                                 }))),
                         )
                     })
+                    .children(legend)
                     .child(
                         hstack()
                             .h(px(30.))
@@ -461,30 +802,35 @@ impl RepoView {
                             .border_color(theme.border.opacity(0.6))
                             .when(self.show_graph, |d| d.child(div().w(px(graph_header_w)).whitespace_nowrap().overflow_hidden().child(tr("history.col_graph").to_uppercase())))
                             .child(div().flex_1().child(tr("history.col_description").to_uppercase()))
+                            .when(self.shows_branch_column(), |d| d.child(div().w(px(BRANCH_COL_W)).child(tr("history.col_branch").to_uppercase())))
                             .when(self.settings.appearance.show_avatars, |d| d.child(div().w(px(22.))))
                             .child(div().w(px(110.)).child(tr("history.col_author").to_uppercase()))
                             .child(div().w(px(76.)).text_right().child(tr("history.col_date").to_uppercase()))
                             .child(div().w(px(64.)).child(tr("history.col_commit").to_uppercase())),
                     )
-                    .child(div().flex_1().min_h_0().child(list)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .when(self.detail_file.is_none(), |d| d.w(px(380.)))
-                    .when(self.detail_file.is_some(), |d| d.w(relative(0.5)).min_w(px(380.)))
-                    .h_full()
-                    .border_l_1()
-                    .border_color(theme.border)
-                    .bg(theme.sidebar)
-                    .child(self.render_commit_details(window, cx)),
-            )
+                    .child(div().flex_1().min_h_0().child(list));
+        let details = div().size_full().border_l_1().border_color(theme.border).bg(theme.sidebar).child(self.render_commit_details(window, cx));
+        if self.detail_file.is_some() {
+            return h_flex().size_full().child(main).child(div().flex_none().w(relative(0.5)).min_w(px(380.)).h_full().child(details)).into_any_element();
+        }
+        let view = cx.entity();
+        gpui_kit::component::resizable::h_resizable("history-split")
+            .child(gpui_kit::component::resizable::resizable_panel().child(main.size_full()))
+            .child(gpui_kit::component::resizable::resizable_panel().size(px(self.settings.appearance.details_width.clamp(300., 900.))).size_range(px(300.)..px(900.)).child(details))
+            .on_resize(move |state, _, cx| {
+                if let Some(w) = state.read(cx).sizes().get(1).copied() {
+                    view.update(cx, |v, cx| v.remember_panel(Some(f32::from(w)), None, cx));
+                }
+            })
             .into_any_element()
     }
 
     fn render_commit_details(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(d) = self.details.clone() else {
+            if self.selected_commit.is_some() {
+                return crate::skeleton::details(cx).into_any_element();
+            }
             return div().size_full().child(empty_state(IconName::MousePointerClick, tr("history.pick_title"), tr("history.pick_body"), cx)).into_any_element();
         };
         if let Some(file) = self.detail_file.clone() {

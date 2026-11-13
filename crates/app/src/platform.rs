@@ -32,6 +32,28 @@ pub(crate) fn open_in_editor(editor: &str, path: &Path) -> bool {
     }
 }
 
+/// The Windows build number, such as 22631 for Windows 11 23H2.
+///
+/// # Returns
+/// The build number, or `None` on other systems or when it cannot be read.
+pub(crate) fn windows_build() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = Command::new("reg")
+            .args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "CurrentBuildNumber"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).split_whitespace().last()?.parse().ok()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 pub(crate) fn open_terminal(dir: &Path) {
     #[cfg(windows)]
     {

@@ -92,6 +92,49 @@ pub struct RepoStatus {
 }
 
 impl RepoStatus {
+    /// Shows files as staged or unstaged right away, before git has finished, so the screen
+    /// answers a click instantly. The next status load replaces this guess with the truth.
+    ///
+    /// # Arguments
+    /// * `paths` - the files that were clicked
+    /// * `stage` - `true` to stage them, `false` to unstage them
+    pub fn assume_staged(&mut self, paths: &[String], stage: bool) {
+        for f in self.files.iter_mut().filter(|f| paths.contains(&f.path) && !f.is_conflicted()) {
+            if stage {
+                let kind = match f.unstaged.or(f.staged) {
+                    Some(ChangeKind::Untracked) | None => ChangeKind::Added,
+                    Some(k) => k,
+                };
+                f.staged = Some(kind);
+                f.unstaged = None;
+            } else {
+                let kind = match f.staged.or(f.unstaged) {
+                    Some(ChangeKind::Added) => ChangeKind::Untracked,
+                    Some(k) => k,
+                    None => ChangeKind::Modified,
+                };
+                f.unstaged = Some(kind);
+                f.staged = None;
+            }
+        }
+    }
+
+    /// Shows the staged files as committed right away.
+    pub fn assume_committed(&mut self) {
+        for f in &mut self.files {
+            f.staged = None;
+        }
+        self.files.retain(|f| f.unstaged.is_some());
+        if self.branch.upstream.is_some() {
+            self.branch.ahead += 1;
+        }
+    }
+
+    /// Shows the working tree as clean right away after stashing.
+    pub fn assume_stashed(&mut self) {
+        self.files.retain(|f| f.is_conflicted());
+    }
+
     /// Files with changes in the index.
     ///
     /// # Returns
@@ -234,6 +277,23 @@ pub fn parse_status(out: &str) -> RepoStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instant_updates_move_files_between_lists() {
+        let file = |path: &str, staged, unstaged| FileStatus { path: path.into(), old_path: None, staged, unstaged };
+        let mut s = RepoStatus { branch: BranchInfo { upstream: Some("origin/main".into()), ..Default::default() }, files: vec![file("new.rs", None, Some(ChangeKind::Untracked)), file("a.rs", None, Some(ChangeKind::Modified)), file("b.rs", Some(ChangeKind::Modified), None)] };
+        s.assume_staged(&["new.rs".into(), "a.rs".into()], true);
+        assert_eq!(s.files[0].staged, Some(ChangeKind::Added));
+        assert_eq!(s.files[1].staged, Some(ChangeKind::Modified));
+        assert!(s.files.iter().all(|f| f.unstaged.is_none()));
+        s.assume_staged(&["new.rs".into()], false);
+        assert_eq!(s.files[0].unstaged, Some(ChangeKind::Untracked));
+        s.assume_committed();
+        assert_eq!(s.files.len(), 1);
+        assert_eq!(s.branch.ahead, 1);
+        s.assume_stashed();
+        assert!(s.files.is_empty());
+    }
 
     #[test]
     fn parses_all_entry_kinds() {

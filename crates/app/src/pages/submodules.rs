@@ -79,7 +79,7 @@ impl RepoView {
             col = col.child(div().p_3().rounded(px(8.)).bg(theme.red.opacity(0.1)).text_sm().text_color(theme.red).child(e));
         }
         if self.submodules.loading && !self.submodules.loaded {
-            return col.child(div().py_6().flex().justify_center().child(gpui_kit::component::spinner::Spinner::new())).into_any_element();
+            return col.child(crate::skeleton::list(4, cx)).into_any_element();
         }
         if list.is_empty() {
             return col

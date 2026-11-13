@@ -15,7 +15,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -64,6 +64,9 @@ pub(crate) struct Loaded {
     status: RepoStatus,
     commits: Vec<CommitInfo>,
     rows: Vec<GraphRow>,
+    owners: Vec<Option<String>>,
+    palette: Vec<usize>,
+    owner_colors: std::collections::HashMap<String, usize>,
     branches: Vec<Branch>,
     tags: Vec<Tag>,
     stashes: Vec<Stash>,
@@ -81,12 +84,40 @@ pub(crate) struct HistoryScopeEvent(pub bool);
 
 impl EventEmitter<HistoryScopeEvent> for RepoView {}
 
-fn load_all(repo: &Repository, settings: &Settings, search: Option<String>) -> cairn_core::Result<Loaded> {
+/// Sent when a side panel was resized, so the width is saved: the commit details panel, the file
+/// list on the Changes and Pull requests pages.
+pub(crate) struct PanelWidthEvent {
+    pub details: Option<f32>,
+    pub list: Option<f32>,
+}
+
+impl EventEmitter<PanelWidthEvent> for RepoView {}
+
+/// Works out which loaded commits belong to the highlighted branch.
+///
+/// # Arguments
+/// * `commits` - the loaded history, newest first
+/// * `focus` - the branch to highlight; the checked-out commit when `None` or not loaded
+/// * `searching` - whether the history is filtered by a search, which breaks the parent chain
+///
+/// # Returns
+/// One flag per commit, or `None` to show every commit at full strength.
+pub(crate) fn focus_hot(commits: &[CommitInfo], focus: Option<&str>, searching: bool) -> Option<Vec<bool>> {
+    if searching {
+        return None;
+    }
+    let named = focus.and_then(|name| commits.iter().find(|c| c.refs.iter().any(|r| r.name == name && r.kind != cairn_core::log::RefKind::Stash)));
+    let tip = named.or_else(|| commits.iter().find(|c| c.refs.iter().any(|r| r.is_head)))?;
+    graph::reachable(commits, &tip.id)
+}
+
+fn load_all(repo: &Repository, settings: &Settings, search: Option<String>, limit: usize, focus: Option<String>) -> cairn_core::Result<Loaded> {
     let git = &repo.git;
     let status = cairn_core::status::load_status(git)?;
+    let searching = search.is_some();
     let opts = LogOptions {
         scope: if settings.graph.all_branches || !repo.has_commits() { LogScope::AllRefs } else { LogScope::CurrentBranch },
-        limit: settings.graph.page_size.max(50),
+        limit: limit.max(settings.graph.page_size.max(50)),
         first_parent: settings.graph.first_parent,
         include_remotes: settings.graph.show_remotes,
         include_stashes: settings.graph.show_stashes,
@@ -94,11 +125,14 @@ fn load_all(repo: &Repository, settings: &Settings, search: Option<String>) -> c
         ..Default::default()
     };
     let commits = cairn_core::log::load_log(git, &opts)?;
-    let rows = graph::layout(&commits);
+    let laid = crate::history::HistoryLayout::compute(&commits, focus.as_deref(), searching);
     Ok(Loaded {
         status,
         commits,
-        rows,
+        rows: laid.rows,
+        owners: laid.owners,
+        palette: laid.palette,
+        owner_colors: laid.owner_colors,
         branches: cairn_core::refs::list_branches(git).unwrap_or_default(),
         tags: cairn_core::refs::list_tags(git).unwrap_or_default(),
         stashes: cairn_core::refs::list_stashes(git).unwrap_or_default(),
@@ -115,6 +149,9 @@ pub(crate) struct RepoView {
     pub status: RepoStatus,
     pub commits: Vec<CommitInfo>,
     pub rows: Vec<GraphRow>,
+    pub owners: Vec<Option<String>>,
+    pub palette: Vec<usize>,
+    pub owner_colors: std::collections::HashMap<String, usize>,
     pub branches: Vec<Branch>,
     pub tags: Vec<Tag>,
     pub stashes: Vec<Stash>,
@@ -124,11 +161,19 @@ pub(crate) struct RepoView {
     pub in_progress: InProgress,
     pub page: Page,
     pub loaded_once: bool,
+    pub started: bool,
     pub busy: Option<SharedString>,
     pub history_scroll: UniformListScrollHandle,
     pub show_graph: bool,
     pub graph_w: f32,
     pub graph_lane_w: f32,
+    pub focus_branch: Option<String>,
+    pub fresh: std::collections::HashSet<String>,
+    pub trunk: Option<String>,
+    pub clashes: std::collections::HashMap<String, Vec<String>>,
+    conflict_sig: String,
+    pub history_limit: usize,
+    pub loading_more: bool,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
     pub selected_commit: Option<String>,
@@ -204,6 +249,9 @@ impl RepoView {
             status: RepoStatus::default(),
             commits: Vec::new(),
             rows: Vec::new(),
+            owners: Vec::new(),
+            palette: Vec::new(),
+            owner_colors: Default::default(),
             branches: Vec::new(),
             tags: Vec::new(),
             stashes: Vec::new(),
@@ -213,11 +261,19 @@ impl RepoView {
             in_progress: InProgress::None,
             page: Page::History,
             loaded_once: false,
+            started: false,
             busy: None,
             history_scroll: UniformListScrollHandle::new(),
             show_graph: true,
             graph_w: 40.,
             graph_lane_w: 14.,
+            focus_branch: None,
+            fresh: Default::default(),
+            trunk: None,
+            clashes: Default::default(),
+            conflict_sig: String::new(),
+            history_limit: 0,
+            loading_more: false,
             multi_select: Vec::new(),
             last_clicked: None,
             selected_commit: None,
@@ -256,12 +312,40 @@ impl RepoView {
             watcher: None,
             _tasks: Vec::new(),
         };
-        view.reload(cx);
-        view.start_auto_fetch(cx);
-        view.start_watching(cx);
-        view.start_pr_polling(cx);
-        view.start_worktree_cleanup(cx);
+        #[cfg(debug_assertions)]
+        if let Ok(f) = std::env::var("CAIRN_DEBUG_FOCUS") {
+            view.focus_branch = Some(f);
+        }
         view
+    }
+
+    /// Remembers a resized panel width for this session and asks the app to save it.
+    ///
+    /// # Arguments
+    /// * `details` - the new commit details panel width
+    /// * `list` - the new file list width
+    pub(crate) fn remember_panel(&mut self, details: Option<f32>, list: Option<f32>, cx: &mut Context<Self>) {
+        if let Some(w) = details {
+            self.settings.appearance.details_width = w;
+        }
+        if let Some(w) = list {
+            self.settings.appearance.list_width = w;
+        }
+        cx.emit(PanelWidthEvent { details, list });
+    }
+
+    /// Starts loading the repository and its background work the first time its tab is shown,
+    /// so restoring many tabs at startup only loads the one on screen.
+    pub(crate) fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        self.reload(cx);
+        self.start_auto_fetch(cx);
+        self.start_watching(cx);
+        self.start_pr_polling(cx);
+        self.start_worktree_cleanup(cx);
     }
 
     fn start_pr_polling(&mut self, cx: &mut Context<Self>) {
@@ -606,6 +690,9 @@ impl RepoView {
         let reload = settings.graph != self.settings.graph || settings.diffs != self.settings.diffs;
         let watch_changed = settings.general.watch_files != self.settings.general.watch_files;
         self.settings = settings;
+        if !self.started {
+            return;
+        }
         if watch_changed {
             self.start_watching(cx);
         }
@@ -620,9 +707,12 @@ impl RepoView {
         let repo = self.repo.clone();
         let settings = self.settings.clone();
         let search = Some(self.search.read(cx).value().trim().to_string()).filter(|s| !s.is_empty());
+        let limit = self.history_limit;
+        let focus = self.focus_branch.clone();
         let task = cx.spawn(async move |this, cx| {
-            let loaded = cx.background_executor().spawn(async move { load_all(&repo, &settings, search) }).await;
+            let loaded = cx.background_executor().spawn(async move { load_all(&repo, &settings, search, limit, focus) }).await;
             let _ = this.update(cx, |this, cx| {
+                this.loading_more = false;
                 match loaded {
                     Ok(l) => this.apply_loaded(l, cx),
                     Err(e) => {
@@ -649,7 +739,9 @@ impl RepoView {
             }
         }
         self.status = l.status;
+        let before: std::collections::HashSet<String> = if self.loaded_once { self.commits.iter().take(50).map(|c| c.id.clone()).collect() } else { Default::default() };
         self.commits = l.commits;
+        self.mark_fresh(&before, cx);
         let commits = &self.commits;
         self.multi_select.retain(|id| commits.iter().any(|c| &c.id == id));
         if self.multi_select.len() < 2 {
@@ -662,6 +754,9 @@ impl RepoView {
             self.multi_select = self.commits.iter().skip(1).take(n).map(|c| c.id.clone()).collect();
         }
         self.rows = l.rows;
+        self.owners = l.owners;
+        self.palette = l.palette;
+        self.owner_colors = l.owner_colors;
         self.branches = l.branches;
         self.tags = l.tags;
         self.stashes = l.stashes;
@@ -698,6 +793,59 @@ impl RepoView {
             let id = first.id.clone();
             self.select_commit(id, cx);
         }
+        self.check_conflicts(cx);
+    }
+
+    /// Finds branches and pull requests that would conflict with the branch they go into, in the
+    /// background and only when a branch tip moved since the last check.
+    pub(crate) fn check_conflicts(&mut self, cx: &mut Context<Self>) {
+        let mut local: Vec<&Branch> = self.branches.iter().filter(|b| !b.is_remote).collect();
+        local.sort_by_key(|b| std::cmp::Reverse(b.last_commit_time));
+        let local: Vec<(String, String)> = local.into_iter().take(40).map(|b| (b.name.clone(), b.target.clone())).collect();
+        let prs: Vec<(u64, String, String)> = self.prs.iter().chain(self.pulls.list.iter()).map(|p| (p.number, p.head.clone(), p.base.clone())).collect();
+        let remote_tips: String = self.branches.iter().filter(|b| b.is_remote).map(|b| b.target.as_str()).collect::<Vec<_>>().join(",");
+        let sig = format!("{local:?}{prs:?}{remote_tips}");
+        if sig == self.conflict_sig {
+            return;
+        }
+        self.conflict_sig = sig;
+        let git = self.git();
+        self.spawn_bg(
+            move || {
+                let trunk = cairn_core::conflicts::default_trunk(&git);
+                let mut found = std::collections::HashMap::new();
+                if let Some(trunk) = trunk.as_deref() {
+                    let trunk_short = trunk.split_once('/').map(|(_, b)| b).unwrap_or(trunk);
+                    for (name, tip) in &local {
+                        if name == trunk_short || name == trunk || git.succeeds(["merge-base", "--is-ancestor", tip, trunk]) {
+                            continue;
+                        }
+                        if let Some(files) = cairn_core::conflicts::merge_conflicts(&git, trunk, tip).filter(|f| !f.is_empty()) {
+                            found.insert(name.clone(), files);
+                        }
+                    }
+                }
+                let mut seen = std::collections::HashSet::new();
+                for (number, head, base) in prs {
+                    if !seen.insert(number) {
+                        continue;
+                    }
+                    let (h, b) = (format!("origin/{head}"), format!("origin/{base}"));
+                    if let Some(files) = cairn_core::conflicts::merge_conflicts(&git, &b, &h).filter(|f| !f.is_empty()) {
+                        found.insert(format!("#{number}"), files);
+                    }
+                }
+                (trunk, found)
+            },
+            |this, (trunk, mut found), _| {
+                this.trunk = trunk.map(|t| t.split_once('/').filter(|(r, _)| this.remotes.iter().any(|x| x.name == *r)).map(|(_, b)| b.to_string()).unwrap_or(t));
+                if this.pulls.mock {
+                    found.insert("#45".into(), vec!["src/screens/Settings.tsx".into()]);
+                }
+                this.clashes = found;
+            },
+            cx,
+        );
     }
 
     fn start_auto_fetch(&mut self, cx: &mut Context<Self>) {
@@ -998,6 +1146,54 @@ impl RepoView {
         self.run_op(tr("op.fetch"), None, move |git| cairn_core::ops::fetch(git, None, prune), window, cx);
     }
 
+    /// One button for staying in step with the remote: fetches, pulls when the remote has new
+    /// commits and pushes when this branch has commits the remote lacks. Publishes a branch that
+    /// was never pushed.
+    pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remotes.is_empty() {
+            window.push_notification(Notification::info(tr("op.no_remote")), cx);
+            return;
+        }
+        if self.status.branch.upstream.is_none() && self.current_branch().is_some() {
+            self.push(false, window, cx);
+            return;
+        }
+        self.fetch(window, cx);
+        let git = self.git();
+        cx.spawn_in(window, async move |this, cx| {
+            let idle = async |this: &WeakEntity<Self>, cx: &mut AsyncWindowContext| loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                match this.read_with(cx, |v, _| v.busy.is_some()) {
+                    Ok(true) => continue,
+                    Ok(false) => return true,
+                    Err(_) => return false,
+                }
+            };
+            if !idle(&this, cx).await {
+                return;
+            }
+            let g = git.clone();
+            let count = |range: &'static str| {
+                let g = g.clone();
+                move || g.run(["rev-list", "--count", range]).ok().and_then(|n| n.trim().parse::<u32>().ok()).unwrap_or(0)
+            };
+            let behind_of = count("HEAD..@{upstream}");
+            let behind = cx.background_executor().spawn(async move { behind_of() }).await;
+            if behind > 0 {
+                let _ = this.update_in(cx, |v, window, cx| v.pull(window, cx));
+                if !idle(&this, cx).await {
+                    return;
+                }
+            }
+            let ahead_of = count("@{upstream}..HEAD");
+            let ahead = cx.background_executor().spawn(async move { ahead_of() }).await;
+            if ahead > 0 {
+                let _ = this.update_in(cx, |v, window, cx| v.push(false, window, cx));
+            }
+        })
+        .detach();
+    }
+
     fn pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.status.branch.upstream.is_none() {
             window.push_notification(Notification::info(tr("op.no_upstream_pull")), cx);
@@ -1055,6 +1251,12 @@ impl RepoView {
             window.push_notification(Notification::info(tr("op.nothing_to_stash")), cx);
             return;
         }
+        if self.busy.is_none() {
+            self.status.assume_stashed();
+            self.change = None;
+            self.change_diff = None;
+            cx.notify();
+        }
         self.run_op(
             tr("op.stash"),
             None,
@@ -1066,6 +1268,14 @@ impl RepoView {
 
     pub(crate) fn checkout(&mut self, target: String, remote: bool, window: &mut Window, cx: &mut Context<Self>) {
         let label = t!("op.checkout", name = target.clone()).to_string();
+        let local_name = if remote { target.split_once('/').map(|(_, b)| b.to_string()).unwrap_or_else(|| target.clone()) } else { target.clone() };
+        if self.busy.is_none() && (self.branches.iter().any(|b| !b.is_remote && b.name == local_name) || remote) {
+            self.status.branch.head = Some(local_name.clone());
+            for b in &mut self.branches {
+                b.is_head = !b.is_remote && b.name == local_name;
+            }
+            cx.notify();
+        }
         self.run_op(
             label.into(),
             Some(t!("undo.checkout", name = target.clone()).to_string()),
@@ -1095,6 +1305,7 @@ impl RepoView {
         let ahead = self.status.branch.ahead;
         let behind = self.status.branch.behind;
         let busy = self.busy.clone();
+        let compact = self.settings.appearance.compact_toolbar;
         let local: Vec<Branch> = self.branches.iter().filter(|b| !b.is_remote).cloned().collect();
         let remote_only: Vec<Branch> = self
             .branches
@@ -1139,13 +1350,22 @@ impl RepoView {
                         }
                     }
                     let view_new = view.clone();
-                    menu.separator().item(
-                        PopupMenuItem::new(t!("toolbar.new_branch").to_string())
-                            .icon(icon(IconName::GitBranchPlus))
-                            .on_click(move |_, window, cx| {
-                                crate::dialogs::new_branch(view_new.clone(), None, window, cx);
-                            }),
-                    )
+                    let view_issue = view.clone();
+                    menu.separator()
+                        .item(
+                            PopupMenuItem::new(t!("toolbar.new_branch").to_string())
+                                .icon(icon(IconName::GitBranchPlus))
+                                .on_click(move |_, window, cx| {
+                                    crate::dialogs::new_branch(view_new.clone(), None, window, cx);
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new(t!("issue_branch.button_long").to_string())
+                                .icon(icon(IconName::Ticket))
+                                .on_click(move |_, window, cx| {
+                                    crate::issue_branch::open(view_issue.clone(), window, cx);
+                                }),
+                        )
                 }
             });
 
@@ -1171,6 +1391,7 @@ impl RepoView {
                 .text_color(fg)
                 .border_b_2()
                 .border_color(border)
+                .when(active, |d| d.bg(linear_gradient(0., linear_color_stop(theme.primary.opacity(0.16), 0.), linear_color_stop(theme.primary.opacity(0.), 0.75))))
                 .when(!active, |d| d.hover(move |s| s.text_color(hover)))
                 .child(label)
                 .when(count > 0, |d| d.child(count_chip(count.to_string(), tint.opacity(0.15), tint)))
@@ -1234,46 +1455,46 @@ impl RepoView {
                                 .child(label),
                         )
                     })
-                    .child(
-                        framed(Button::new("undo"), Tone::Plain, cx)
-                            .icon(icon(IconName::Undo2))
-                            .label(tr("toolbar.undo"))
-                            .tooltip(tr("toolbar.undo_tip"))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_undo(window, cx))),
-                    )
-                    .when(self.settings.ai.enabled, |d| {
-                        d.child(
-                            framed(Button::new("ask-ai"), Tone::Ai, cx)
-                                .icon(icon(IconName::Sparkles))
-                                .label(tr("toolbar.ask_ai"))
-                                .tooltip(tr("toolbar.ask_ai_tip"))
-                                .on_click(cx.listener(|_, _, window, cx| crate::assist::open(cx.entity(), window, cx))),
-                        )
+                    .child({
+                        let b = framed(Button::new("undo"), Tone::Plain, cx).icon(icon(IconName::Undo2)).tooltip(tr("toolbar.undo_tip")).on_click(cx.listener(|this, _, window, cx| this.open_undo(window, cx)));
+                        if compact { b.px(px(8.)) } else { b.label(tr("toolbar.undo")) }
                     })
-                    .child(
-                        crate::widgets::framed_if(Button::new("fetch"), Tone::Plain, busy.is_none(), cx)
-                            .icon(icon(IconName::RefreshCw))
-                            .label(tr("toolbar.fetch"))
-                            .tooltip(tr("toolbar.fetch_tip"))
-                            .on_click(cx.listener(|this, _, window, cx| this.fetch(window, cx))),
-                    )
-                    .child(
-                        crate::widgets::framed_if(Button::new("pull"), Tone::Plain, busy.is_none(), cx)
-                            .icon(icon(IconName::ArrowDownToLine))
-                            .label(tr("toolbar.pull"))
-                            .when(behind > 0, |b| b.child(count_chip(behind.to_string(), theme.primary.opacity(0.18), theme.primary)))
-                            .tooltip(tr("toolbar.pull_tip"))
-                            .on_click(cx.listener(|this, _, window, cx| this.pull(window, cx))),
-                    )
+                    .when(self.settings.ai.enabled, |d| {
+                        let b = framed(Button::new("ask-ai"), Tone::Ai, cx).icon(icon(IconName::Sparkles)).tooltip(tr("toolbar.ask_ai_tip")).on_click(cx.listener(|_, _, window, cx| crate::assist::open(cx.entity(), window, cx)));
+                        d.child(if compact { b.px(px(8.)) } else { b.label(tr("toolbar.ask_ai")) })
+                    })
                     .child({
                         let unpublished = self.status.branch.upstream.is_none() && !self.remotes.is_empty() && self.current_branch().is_some();
-                        let tone = if ahead > 0 || unpublished { Tone::Accent } else { Tone::Plain };
-                        crate::widgets::framed_if(Button::new("push"), tone, busy.is_none(), cx)
-                            .icon(icon(IconName::ArrowUpToLine))
-                            .label(tr("toolbar.push"))
-                            .when(ahead > 0, |b| b.child(count_chip(ahead.to_string(), gpui_kit::black().opacity(0.18), theme.primary_foreground)))
-                            .tooltip(tr("toolbar.push_tip"))
-                            .on_click(cx.listener(|this, _, window, cx| this.push(false, window, cx)))
+                        let pending = ahead > 0 || behind > 0 || unpublished;
+                        let tone = if pending { Tone::Accent } else { Tone::Plain };
+                        let chip_fg = if pending { theme.primary_foreground } else { theme.muted_foreground };
+                        let tip = if unpublished { tr("toolbar.sync_publish_tip") } else if pending { t!("toolbar.sync_pending_tip", down = behind, up = ahead).to_string().into() } else { tr("toolbar.sync_tip") };
+                        let sync = crate::widgets::framed_if(Button::new("sync"), tone, busy.is_none(), cx)
+                            .icon(icon(IconName::RefreshCw))
+                            .when(!compact, |b| b.label(if unpublished { tr("toolbar.publish") } else { tr("toolbar.sync") }))
+                            .when(behind > 0, |b| b.child(count_chip(format!("↓{behind}"), gpui_kit::black().opacity(0.18), chip_fg)))
+                            .when(ahead > 0, |b| b.child(count_chip(format!("↑{ahead}"), gpui_kit::black().opacity(0.18), chip_fg)))
+                            .tooltip(tip)
+                            .rounded_r(px(0.))
+                            .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx)));
+                        let caret = framed(Button::new("sync-menu"), tone, cx)
+                            .px(px(6.))
+                            .rounded_l(px(0.))
+                            .border_l_0()
+                            .icon(icon(IconName::ChevronDown).xsmall())
+                            .tooltip(tr("toolbar.sync_menu_tip"))
+                            .dropdown_menu({
+                                let view = view.clone();
+                                move |menu, _, _| {
+                                    let (a, b, c, d) = (view.clone(), view.clone(), view.clone(), view.clone());
+                                    menu.item(PopupMenuItem::new(t!("toolbar.fetch").to_string()).icon(icon(IconName::RefreshCw)).on_click(move |_, window, cx| a.update(cx, |v, cx| v.fetch(window, cx))))
+                                        .item(PopupMenuItem::new(t!("toolbar.pull").to_string()).icon(icon(IconName::ArrowDownToLine)).on_click(move |_, window, cx| b.update(cx, |v, cx| v.pull(window, cx))))
+                                        .item(PopupMenuItem::new(t!("toolbar.push").to_string()).icon(icon(IconName::ArrowUpToLine)).on_click(move |_, window, cx| c.update(cx, |v, cx| v.push(false, window, cx))))
+                                        .separator()
+                                        .item(PopupMenuItem::new(t!("toolbar.force_push").to_string()).icon(icon(IconName::TriangleAlert)).on_click(move |_, window, cx| crate::dialogs::confirm_force_push(d.clone(), window, cx)))
+                                }
+                            });
+                        h_flex().child(sync).child(caret)
                     })
                     .child(
                         framed(Button::new("more"), Tone::Plain, cx)
@@ -1464,6 +1685,52 @@ impl RepoView {
     }
 }
 
+impl RepoView {
+    /// The thin bar along the bottom: branch and sync state, last fetch, changes, stashes,
+    /// warnings and what is running in the background.
+    fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let item = |ic: IconName, text: SharedString, color: Hsla| hstack().flex_none().gap_1().text_color(color).child(icon(ic).xsmall()).child(text);
+        let fetched = std::fs::metadata(self.repo.git_dir.join("FETCH_HEAD"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| t!("status_bar.fetched", when = crate::widgets::relative_time(d.as_secs() as i64).to_string()).to_string())
+            .unwrap_or_else(|| t!("status_bar.never_fetched").to_string());
+        let ahead = self.status.branch.ahead;
+        let behind = self.status.branch.behind;
+        let sync_text: SharedString = match (self.status.branch.upstream.as_ref(), ahead, behind) {
+            (None, _, _) => tr("status_bar.no_upstream"),
+            (Some(_), 0, 0) => tr("status_bar.in_sync"),
+            (Some(_), a, b) => format!("↑{a} ↓{b}").into(),
+        };
+        let changes = self.status.files.len();
+        let clash = self.current_branch().is_some_and(|b| self.clashes.contains_key(b));
+        let muted = theme.muted_foreground;
+        h_flex()
+            .flex_none()
+            .h(px(26.))
+            .px_3()
+            .gap_4()
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.sidebar)
+            .text_size(px(11.5))
+            .text_color(muted)
+            .child(item(IconName::GitBranch, self.current_branch().map(str::to_string).unwrap_or_else(|| t!("toolbar.detached").to_string()).into(), theme.foreground).font_family(theme.mono_font_family.clone()))
+            .child(item(IconName::ArrowDownUp, sync_text, if ahead + behind > 0 { theme.primary } else { muted }))
+            .child(item(IconName::Clock, fetched.into(), muted))
+            .child(item(IconName::FilePen, crate::widgets::plural("status_bar.changes", changes).into(), if changes > 0 { theme.yellow } else { muted }))
+            .when(!self.stashes.is_empty(), |d| d.child(item(IconName::Archive, crate::widgets::plural("status_bar.stashes", self.stashes.len()).into(), muted)))
+            .when(clash, |d| d.child(item(IconName::TriangleAlert, t!("conflicts_early.with", base = self.trunk.clone().unwrap_or_else(|| "main".into())).to_string().into(), theme.red)))
+            .child(div().flex_1())
+            .when_some(self.busy.clone(), |d, b| d.child(hstack().gap_1p5().child(gpui_kit::component::spinner::Spinner::new().xsmall()).child(b)))
+            .when(self.loading_more, |d| d.child(tr("history.loading_more")))
+            .child(crate::widgets::plural("status_bar.commits", self.commits.len()))
+    }
+}
+
 impl Focusable for RepoView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -1472,11 +1739,26 @@ impl Focusable for RepoView {
 
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.wake(cx);
         if let Some(text) = self.pending_notice.take() {
             window.push_notification(Notification::info(text).title(self.name.clone()).in_app_and_system(), cx);
         }
-        let body = if !self.loaded_once {
-            div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element()
+        let forced = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SKELETON").ok() } else { None };
+        let body = if let Some(kind) = forced {
+            match kind.as_str() {
+                "changes" => crate::skeleton::changes(cx).into_any_element(),
+                "pulls" => h_flex()
+                    .size_full()
+                    .child(div().flex_none().w(px(340.)).h_full().bg(cx.theme().sidebar).border_r_1().border_color(cx.theme().border).child(crate::skeleton::pr_list(5, cx)))
+                    .child(div().flex_1().min_w_0().h_full().child(crate::skeleton::pr_detail(cx)))
+                    .into_any_element(),
+                _ => crate::skeleton::history(self.settings.appearance.show_avatars, cx).into_any_element(),
+            }
+        } else if !self.loaded_once {
+            match self.page {
+                Page::Changes => crate::skeleton::changes(cx).into_any_element(),
+                _ => crate::skeleton::history(self.settings.appearance.show_avatars, cx).into_any_element(),
+            }
         } else {
             match self.page {
                 Page::History => self.render_history(window, cx).into_any_element(),
@@ -1504,7 +1786,19 @@ impl Render for RepoView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.handle_key(ev, window, cx)))
             .on_action(cx.listener(|this, _: &crate::palette::UndoHistory, window, cx| this.open_undo(window, cx)))
             .child(self.render_toolbar(window, cx))
-            .child(div().flex_1().min_h_0().child(body))
+            .child({
+                let page = div().size_full().child(body);
+                if self.settings.appearance.reduce_motion {
+                    div().flex_1().min_h_0().child(page).into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(page.with_animation(SharedString::from(format!("page-{:?}", self.page)), Animation::new(std::time::Duration::from_millis(160)).with_easing(ease_out_quint()), |d, t| d.opacity(0.35 + 0.65 * t)))
+                        .into_any_element()
+                }
+            })
+            .child(self.render_status_bar(cx))
     }
 }
 

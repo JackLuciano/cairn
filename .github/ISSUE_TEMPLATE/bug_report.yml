@@ -1,0 +1,99 @@
+name: Bug report
+description: Something in Cairn is broken or behaves unexpectedly.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please check the [open issues](https://github.com/JackLuciano/cairn/issues) first in case it is already known.
+        Do not paste tokens, passwords or private repository content.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected to happen instead.
+      placeholder: When I drag a branch onto a commit, the rebase dialog never appears.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest way to make it happen again.
+      placeholder: |
+        1. Open a repository with two branches
+        2. Switch History to "All branches"
+        3. Drag `feature` onto `main`
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Cairn version
+      description: Shown in Settings → Updates, for example 0.3.2.
+      placeholder: "0.3.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: git
+    attributes:
+      label: Git version
+      description: Output of `git --version`.
+      placeholder: git version 2.47.1.windows.1
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Cairn?
+      multiple: true
+      options:
+        - History / graph
+        - Changes / committing
+        - Branches, tags, stashes
+        - Pull requests
+        - Merge conflicts
+        - Rebase, absorb, stack
+        - Search, file history, line history
+        - AI features
+        - Settings
+        - Updates / installation
+        - Other
+
+  - type: textarea
+    id: repo
+    attributes:
+      label: Repository details
+      description: Anything unusual about the repository, such as size, submodules, Git LFS, a partial clone or worktrees.
+      placeholder: About 40,000 commits, partial clone (blob:none), 3 worktrees.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Relevant lines from `cairn.log`. On Windows it is in `%APPDATA%\Cairn`, on macOS in `~/Library/Application Support/Cairn` and on Linux in `~/.config/Cairn`.
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Drag images here if they help explain the problem.

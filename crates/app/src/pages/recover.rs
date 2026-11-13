@@ -169,8 +169,8 @@ impl RepoView {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(gpui_kit::component::spinner::Spinner::new())
                 .child(div().text_sm().text_color(theme.muted_foreground).child(tr("recover.searching")))
+                .child(div().w(px(560.)).child(crate::skeleton::list(4, cx)))
                 .into_any_element();
         }
         let lost = self.recover.lost.clone();
@@ -211,7 +211,7 @@ impl RepoView {
 
         let right = match (&self.recover.selected, self.recover.details.clone()) {
             (None, _) => empty_state(IconName::MousePointerClick, tr("recover.pick_title"), tr("recover.pick_body"), cx).into_any_element(),
-            (Some(_), None) => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+            (Some(_), None) => crate::skeleton::details(cx).into_any_element(),
             (Some(_), Some(d)) => {
                 if let (Some(file), Some(diff)) = (self.recover.file.clone(), self.recover.diff.clone()) {
                     v_flex()

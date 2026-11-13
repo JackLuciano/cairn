@@ -98,7 +98,7 @@ impl RepoView {
             );
         }
         let center = if self.blame.loading {
-            div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element()
+            crate::skeleton::diff(cx).into_any_element()
         } else if self.blame.file.is_none() {
             empty_state(IconName::FileClock, tr("blame.pick_title"), tr("blame.pick_body"), cx).into_any_element()
         } else {

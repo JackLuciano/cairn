@@ -29,7 +29,8 @@ gpui_kit::actions!(
         GoHistory,
         GoChanges,
         GoBranches,
-        CommitStaged
+        CommitStaged,
+        GoToFile
     ]
 );
 
@@ -40,6 +41,7 @@ gpui_kit::actions!(
 pub(crate) fn open_keymap(vim: bool, window: &mut Window, cx: &mut App) {
     let keys: Vec<(&'static str, &'static str)> = vec![
         ("Ctrl K", "palette.key_palette"),
+        ("Ctrl P", "goto_file.button"),
         ("Ctrl ,", "palette.key_settings"),
         ("Ctrl 1", "page.history"),
         ("Ctrl 2", "page.changes"),
@@ -108,6 +110,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-2", GoChanges, None),
         KeyBinding::new("ctrl-3", GoBranches, None),
         KeyBinding::new("ctrl-enter", CommitStaged, None),
+        KeyBinding::new("ctrl-p", GoToFile, None),
     ]);
 }
 
@@ -129,7 +132,7 @@ pub(crate) struct Palette {
     _sub: Subscription,
 }
 
-fn fuzzy(text: &str, q: &str) -> Option<usize> {
+pub(crate) fn fuzzy(text: &str, q: &str) -> Option<usize> {
     let t = text.to_lowercase();
     let q = q.to_lowercase();
     if q.is_empty() {
@@ -268,6 +271,12 @@ fn open_now(app: Entity<CairnApp>, window: &mut Window, cx: &mut App) {
         items.push(cmd("palette.git", "toolbar.stash_some", None, IconName::ArchiveRestore, Rc::new(move |w, cx| crate::dialogs::stash_dialog(t.clone(), Vec::new(), w, cx))));
         let t = tab.clone();
         items.push(cmd("palette.git", "toolbar.apply_patch", None, IconName::FileInput, Rc::new(move |w, cx| t.update(cx, |v, cx| v.apply_patch_file(w, cx)))));
+        let t = tab.clone();
+        items.push(cmd("palette.git", "new_pr.button_long", None, IconName::GitPullRequestCreate, Rc::new(move |w, cx| crate::new_pr::open(t.clone(), w, cx))));
+        let t = tab.clone();
+        items.push(cmd("palette.git", "issue_branch.button_long", None, IconName::Ticket, Rc::new(move |w, cx| crate::issue_branch::open(t.clone(), w, cx))));
+        let t = tab.clone();
+        items.push(cmd("palette.repo", "goto_file.button", Some("Ctrl P"), IconName::FileSearch, Rc::new(move |w, cx| crate::goto_file::open(t.clone(), w, cx))));
         let t = tab.clone();
         items.push(cmd("palette.repo", "toolbar.open_editor", None, IconName::Code, Rc::new(move |_, cx| t.update(cx, |v, cx| {
             let root = v.repo.root.clone();

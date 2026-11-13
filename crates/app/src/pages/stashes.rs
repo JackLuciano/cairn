@@ -171,7 +171,7 @@ impl RepoView {
         }
         let diff = match (&self.stash_page.file, self.stash_page.diff.clone()) {
             (Some(_), Some(d)) => self.render_file_diff(DiffSource::Page, &d, cx),
-            (Some(_), None) => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+            (Some(_), None) => crate::skeleton::diff(cx).into_any_element(),
             _ => empty_state(IconName::FileDiff, tr("changes.pick_title"), tr("stashes.pick_file"), cx).into_any_element(),
         };
         h_flex()

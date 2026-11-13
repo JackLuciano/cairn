@@ -25,6 +25,7 @@ pub mod settings;
 pub mod stack;
 pub mod status;
 pub mod submodule;
+pub mod viewed;
 pub mod workspace;
 
 pub use error::{Error, Result};
