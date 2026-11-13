@@ -489,7 +489,7 @@ impl RepoView {
                     )
                     .into_any_element()
             }
-            _ => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+            _ => crate::skeleton::diff(cx).into_any_element(),
         };
         h_flex()
             .size_full()

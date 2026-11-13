@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -134,6 +134,14 @@ impl RepoView {
 
     fn stage_paths(&mut self, paths: Vec<String>, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
         let label = if staged { tr("op.unstage") } else { tr("op.stage") };
+        if self.busy.is_none() {
+            self.status.assume_staged(&paths, !staged);
+            if let Some(sel) = self.change.as_mut().filter(|c| paths.contains(&c.path)) {
+                sel.staged = !staged;
+                sel.untracked = false;
+            }
+            cx.notify();
+        }
         self.run_op_quiet(label, move |git| {
             if staged {
                 cairn_core::ops::unstage_files(git, &paths)
@@ -228,7 +236,13 @@ impl RepoView {
         let undo = if self.amend { t!("undo.amend").to_string() } else { t!("undo.commit", summary = summary.clone()).to_string() };
         self.summary.update(cx, |s, cx| s.set_value("", window, cx));
         self.body.update(cx, |s, cx| s.set_value("", window, cx));
+        if !self.amend && self.busy.is_none() {
+            self.status.assume_committed();
+            self.change = None;
+            self.change_diff = None;
+        }
         self.amend = false;
+        cx.notify();
         self.run_op(label, Some(undo), move |git| cairn_core::ops::commit(git, &message, &opts), window, cx);
         if push_after {
             let view = cx.entity();
@@ -657,32 +671,26 @@ impl RepoView {
                     .child(div().flex_1().min_h_0().child(self.render_file_diff(DiffSource::Change, &diff, cx)))
                     .into_any_element()
             }
-            (Some(_), None) => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+            (Some(_), None) => crate::skeleton::diff(cx).into_any_element(),
             _ => empty_state(IconName::FileDiff, tr("changes.pick_title"), tr("changes.pick_body"), cx).into_any_element(),
         };
 
-        h_flex()
-            .size_full()
+        use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+        let view = cx.entity();
+        h_resizable("changes-split")
             .child(
-                v_flex()
-                    .flex_none()
-                    .w(px(280.))
-                    .h_full()
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .bg(theme.sidebar)
-                    .child(div().flex_1().min_h_0().child(self.render_file_list(cx))),
+                resizable_panel()
+                    .size(px(self.settings.appearance.list_width.clamp(220., 640.)))
+                    .size_range(px(220.)..px(640.))
+                    .child(v_flex().size_full().border_r_1().border_color(theme.border).bg(theme.sidebar).child(div().flex_1().min_h_0().child(self.render_file_list(cx)))),
             )
-            .child(div().flex_1().min_w_0().h_full().child(diff_panel))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(330.))
-                    .h_full()
-                    .border_l_1()
-                    .border_color(theme.border)
-                    .child(self.render_commit_box(cx)),
-            )
+            .child(resizable_panel().child(div().size_full().child(diff_panel)))
+            .child(resizable_panel().size(px(330.)).size_range(px(280.)..px(560.)).child(div().size_full().border_l_1().border_color(theme.border).child(self.render_commit_box(cx))))
+            .on_resize(move |state, _, cx| {
+                if let Some(w) = state.read(cx).sizes().first().copied() {
+                    view.update(cx, |v, cx| v.remember_panel(None, Some(f32::from(w)), cx));
+                }
+            })
             .into_any_element()
     }
 }

@@ -16,7 +16,11 @@ mod history;
 mod platform;
 mod repo_view;
 mod secrets;
+mod goto_file;
+mod issue_branch;
+mod new_pr;
 mod settings_dialog;
+mod skeleton;
 mod theme;
 mod updater;
 mod watcher;
@@ -63,6 +67,7 @@ fn main() {
             window_min_size: Some(size(px(960.), px(600.))),
             app_id: Some("dev.cairn.app".into()),
             focus: !hidden,
+            window_background: if settings.appearance.glass && theme::glass_supported() { WindowBackgroundAppearance::MicaBackdrop } else { WindowBackgroundAppearance::Opaque },
             ..TitleBar::window_options()
         };
         gpui_kit::open_window(options, cx, move |window, cx| {

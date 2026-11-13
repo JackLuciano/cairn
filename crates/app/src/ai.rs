@@ -360,6 +360,24 @@ pub(crate) fn review(settings: &Settings, diff: &str) -> Result<Vec<Finding>, St
     serde_json::from_str::<Vec<Finding>>(&json).map_err(|e| format!("Could not read the review: {e}"))
 }
 
+/// Reviews someone else's pull request and drafts comments for its author.
+///
+/// # Arguments
+/// * `settings` - AI connection settings
+/// * `title` - the pull request title
+/// * `body` - the pull request description
+/// * `diff` - the pull request's unified diff
+///
+/// # Returns
+/// Findings whose `problem` is written as a review comment, or an error message for the user.
+pub(crate) fn review_pr(settings: &Settings, title: &str, body: &str, diff: &str) -> Result<Vec<Finding>, String> {
+    let system = "You review a teammate's pull request. Report only things worth a reviewer's comment: bugs, crashes, security issues, data loss, missing error handling, and code that clearly contradicts the rest of the change. Skip style nits and praise. Write each problem as a short, friendly review comment addressed to the author (one to three sentences, may suggest the fix). Reply with only a JSON array; each item has: severity (\"bug\", \"security\", \"consistency\" or \"minor\"), file (path as in the diff), line (a line number in the new version that appears in the diff, or null), problem (the comment), old (null) and fix (null). Reply with [] when nothing is worth a comment.";
+    let user = format!("Title: {title}\n\nDescription:\n{body}\n\nDiff:\n{}", sanitize_diff(settings, diff));
+    let text = complete(settings, Tier::Deep, system, &user)?;
+    let json = extract_json(&text, '[', ']').ok_or("The review did not come back in the expected format.")?;
+    serde_json::from_str::<Vec<Finding>>(&json).map_err(|e| format!("Could not read the review: {e}"))
+}
+
 pub(crate) fn pr_description(settings: &Settings, commits: &str, diff: &str) -> Result<(String, String), String> {
     let system = "You write pull request descriptions in Markdown. First line: a short title. Then a blank line, then: a one-paragraph summary, a \"## Changes\" bullet list, and a \"## Testing\" section containing only the placeholder [Describe how you tested this]. Do not invent test results.";
     let user = format!("Commits:\n{commits}\n\nDiff:\n{}", sanitize_diff(settings, diff));

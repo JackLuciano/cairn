@@ -3,6 +3,48 @@ use serde::{Deserialize, Serialize};
 use crate::git::Git;
 use crate::Result;
 
+/// The branch most work is merged into: the remote's default branch, or a local `main`/`master`.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+///
+/// # Returns
+/// A ref such as `origin/main`, or `None` when no such branch exists.
+pub fn default_trunk(git: &Git) -> Option<String> {
+    let remote = git
+        .run(["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .or_else(|| ["origin/main", "origin/master", "main", "master"].iter().find(|r| git.succeeds(["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")])).map(|r| r.to_string()))?;
+    let Some((_, local)) = remote.split_once('/') else { return Some(remote) };
+    let local_ahead = git.succeeds(["rev-parse", "--verify", "-q", &format!("refs/heads/{local}")]) && git.succeeds(["merge-base", "--is-ancestor", &remote, local]);
+    Some(if local_ahead { local.to_string() } else { remote })
+}
+
+/// Checks whether merging two commits would conflict, without touching the working tree or
+/// the index.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `ours` - the branch that would receive the merge
+/// * `theirs` - the branch that would be merged
+///
+/// # Returns
+/// The files that would conflict (empty when the merge is clean), or `None` when the check
+/// could not run, for example because a ref does not exist.
+pub fn merge_conflicts(git: &Git, ours: &str, theirs: &str) -> Option<Vec<String>> {
+    let out = git.run_any_status(["merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs]).ok()?;
+    let mut lines = out.lines();
+    let tree = lines.next()?.trim();
+    if tree.len() < 40 || !tree.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut files: Vec<String> = lines.map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+    files.dedup();
+    Some(files)
+}
+
 /// A piece of a conflicted file: either text both sides agree on, or a conflict.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Segment {

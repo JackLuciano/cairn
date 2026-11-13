@@ -152,7 +152,7 @@ impl RepoView {
         }
         let current = versions.get(selected).cloned();
         let right = match (&current, self.file_history.diff.clone()) {
-            _ if self.file_history.loading => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+            _ if self.file_history.loading => crate::skeleton::list(6, cx).into_any_element(),
             (None, _) => empty_state(IconName::FileClock, tr("file_history.empty_title"), tr("file_history.empty_body"), cx).into_any_element(),
             (Some(v), diff) => {
                 let id = v.id.clone();
@@ -195,7 +195,7 @@ impl RepoView {
                     )
                     .child(div().flex_1().min_h_0().child(match diff {
                         Some(d) => self.render_file_diff(DiffSource::Page, &d, cx),
-                        None => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+                        None => crate::skeleton::diff(cx).into_any_element(),
                     }))
                     .into_any_element()
             }

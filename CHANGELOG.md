@@ -5,6 +5,51 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
+Ship from Cairn, see every branch at a glance, and a faster, fresher look.
+
+### Added
+
+- History shows which branch every commit belongs to: a Branch column, one color per branch
+  from its line to its label, and names for merged branches taken from the merge message.
+- Commits that are not on your branch fade out. Pick another branch in the new legend, the
+  Highlight menu or by clicking any branch label to highlight that one instead.
+- Hover a commit in History for a card with its message, author, branch and labels.
+- History loads older commits as you scroll, past the first 500.
+- Open a pull request from Cairn: base branch, reviewers, labels and draft mode, with the title
+  and description written by AI if you like. A branch that was never pushed is published first.
+- AI review of a pull request: Claude drafts comments on the exact lines; untick what you don't
+  want and post the rest as one review.
+- "Waiting for your review" in each category shows the pull requests that need you across all
+  of its repositories.
+- Branches and pull requests that would conflict with `main` get a warning that names the files,
+  checked in the background without touching your work.
+- Files you marked as viewed in a pull request stay marked after a restart, and are unmarked
+  when they change again.
+- Go to file (Ctrl+P) opens any file's history, line history or the file itself.
+- New branch from a GitHub issue, named after the issue and linked to it.
+- Six color themes (Graphite, Midnight, Nord, Solarized, Rosé, High contrast) in dark and
+  light, a glass window on Windows 11 and a compact toolbar option.
+- A status bar with the branch, sync state, last fetch, changes and background work.
+- Bug report, feature request and translation forms for GitHub issues, and a pull request
+  template.
+
+### Changed
+
+- One Sync button fetches, pulls and pushes whatever is needed; Fetch, Pull and Push are still
+  in its menu.
+- Pages show skeleton placeholders while loading instead of spinners, and keep what they showed
+  while refreshing, so switching pages is instant.
+- Restored tabs only load when you open them, so Cairn starts faster with many tabs.
+- Staging, unstaging, committing, stashing and switching branches update the screen right away.
+- Very large diffs open at once with their first part and a "Show everything" button, instead
+  of being hidden.
+- Softer cards, glowing main buttons and active tabs, and short fades between pages. "Reduce
+  motion" turns the animations off.
+- The commit details, file list and pull request list panels can be resized, and keep their
+  width.
+
 ## [0.3.2] - 2026-11-12
 
 A new look for pull requests.

@@ -179,6 +179,11 @@ pub struct Appearance {
     pub code_font_size: f32,
     pub show_avatars: bool,
     pub reduce_motion: bool,
+    pub palette: Palette,
+    pub glass: bool,
+    pub compact_toolbar: bool,
+    pub details_width: f32,
+    pub list_width: f32,
 }
 
 impl Default for Appearance {
@@ -192,8 +197,31 @@ impl Default for Appearance {
             code_font_size: 12.5,
             show_avatars: true,
             reduce_motion: false,
+            palette: Palette::Graphite,
+            glass: true,
+            compact_toolbar: false,
+            details_width: 380.,
+            list_width: 300.,
         }
     }
+}
+
+/// The set of surface colors the whole app is painted with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Palette {
+    #[default]
+    Graphite,
+    Midnight,
+    Nord,
+    Solarized,
+    Rose,
+    HighContrast,
+}
+
+impl Palette {
+    /// Every palette, in the order the gallery shows them.
+    pub const ALL: [Palette; 6] = [Palette::Graphite, Palette::Midnight, Palette::Nord, Palette::Solarized, Palette::Rose, Palette::HighContrast];
 }
 
 /// Commit list and graph.

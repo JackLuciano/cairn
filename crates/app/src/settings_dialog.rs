@@ -97,7 +97,10 @@ fn schema() -> Vec<Category> {
                     label: "settings.group.theme",
                     rows: vec![
                         row("theme", "settings.theme", None, Control::Choice(&["opt.dark", "opt.light", "opt.system"], |s| match s.appearance.theme { ThemeMode::Dark => 0, ThemeMode::Light => 1, ThemeMode::System => 2 }, |s, i| s.appearance.theme = [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System][i])),
+                        row("palette", "settings.palette", Some("settings.palette_desc"), Control::Choice(&["opt.palette_graphite", "opt.palette_midnight", "opt.palette_nord", "opt.palette_solarized", "opt.palette_rose", "opt.palette_contrast"], |s| Palette::ALL.iter().position(|p| *p == s.appearance.palette).unwrap_or(0), |s, i| s.appearance.palette = Palette::ALL[i])),
                         row("accent", "settings.accent", None, Control::Choice(&["opt.blue", "opt.purple", "opt.teal", "opt.orange"], |s| s.appearance.accent as usize, |s, i| s.appearance.accent = [Accent::Blue, Accent::Purple, Accent::Teal, Accent::Orange][i])),
+                        RowDef { visible: Some(|_| crate::theme::glass_supported()), ..row("glass", "settings.glass", Some("settings.glass_desc"), Control::Toggle(|s| s.appearance.glass, |s, v| s.appearance.glass = v)) },
+                        row("compact_toolbar", "settings.compact_toolbar", Some("settings.compact_toolbar_desc"), Control::Toggle(|s| s.appearance.compact_toolbar, |s, v| s.appearance.compact_toolbar = v)),
                         row("reduce_motion", "settings.reduce_motion", Some("settings.reduce_motion_desc"), Control::Toggle(|s| s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v)),
                     ],
                 },
@@ -563,6 +566,52 @@ impl SettingsPanel {
                     );
                 }
                 cards.into_any_element()
+            }
+            Control::Choice(options, get, set) if r.id == "palette" => {
+                let current = get(&self.draft);
+                let dark = cx.theme().is_dark();
+                let accent = crate::theme::accent_color(self.draft.appearance.accent, dark);
+                let (fg, muted) = (theme.foreground, theme.muted_foreground);
+                let mut grid = div().grid().grid_cols(3).gap_2();
+                for (i, key) in options.iter().enumerate() {
+                    let on = i == current;
+                    let s = crate::theme::surface(Palette::ALL[i], dark);
+                    let c = |v: u32| -> Hsla { rgb(v).into() };
+                    let lanes: Vec<Hsla> = (0..3).map(|k| crate::widgets::lane_color(k, cx)).collect();
+                    let preview = h_flex()
+                        .h(px(58.))
+                        .rounded(px(8.))
+                        .overflow_hidden()
+                        .bg(c(s.background))
+                        .child(v_flex().w(px(26.)).h_full().bg(c(s.sidebar)).border_r_1().border_color(c(s.border)).p_1().gap_1().children((0..3).map(move |_| div().h(px(4.)).rounded(px(2.)).bg(c(s.border)))))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .p_1p5()
+                                .gap(px(5.))
+                                .child(div().h(px(5.)).w(px(38.)).rounded(px(2.)).bg(accent))
+                                .children(lanes.into_iter().enumerate().map(move |(k, lane)| h_flex().gap_1().items_center().child(div().size(px(5.)).rounded_full().bg(lane)).child(div().h(px(4.)).w(px(54. - k as f32 * 10.)).rounded(px(2.)).bg(c(s.muted_foreground).opacity(0.5))))),
+                        );
+                    grid = grid.child(
+                        v_flex()
+                            .id((r.id, i))
+                            .gap_1p5()
+                            .p_1p5()
+                            .rounded(px(12.))
+                            .border_2()
+                            .border_color(if on { accent } else { theme.border })
+                            .when(on, |d| d.shadow(crate::widgets::glow(accent, 12.)))
+                            .cursor_pointer()
+                            .hover(move |s| s.border_color(accent.opacity(0.6)))
+                            .child(preview)
+                            .child(div().text_xs().text_center().font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL }).text_color(if on { fg } else { muted }).child(tr(key)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                set(&mut this.draft, i);
+                                this.after_change(window, cx);
+                            })),
+                    );
+                }
+                grid.into_any_element()
             }
             Control::Choice(options, get, set) if r.id == "accent" => {
                 let current = get(&self.draft);

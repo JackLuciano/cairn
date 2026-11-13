@@ -212,7 +212,7 @@ impl RepoView {
             .child(div().max_w(px(360.)).text_xs().text_color(theme.muted_foreground).child(tr("compare.explain")));
 
         let body = if self.compare.loading {
-            div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element()
+            crate::skeleton::list(6, cx).into_any_element()
         } else if let Some(err) = self.compare.error.clone() {
             empty_state(IconName::TriangleAlert, tr("compare.failed"), err, cx).into_any_element()
         } else if let Some(r) = self.compare.result.clone() {
@@ -249,7 +249,7 @@ impl RepoView {
                     }
                     let diff = match (&self.compare.file, self.compare.diff.clone()) {
                         (Some(_), Some(d)) => self.render_file_diff(DiffSource::Page, &d, cx),
-                        (Some(_), None) => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+                        (Some(_), None) => crate::skeleton::diff(cx).into_any_element(),
                         _ => empty_state(IconName::FileDiff, tr("changes.pick_title"), tr("compare.pick_file"), cx).into_any_element(),
                     };
                     h_flex()

@@ -1,0 +1,36 @@
+name: Translation problem
+description: A wrong, missing or awkward text in English or Hungarian.
+title: "[Text] "
+labels: ["documentation"]
+body:
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - English
+        - Magyar (Hungarian)
+    validations:
+      required: true
+
+  - type: input
+    id: where
+    attributes:
+      label: Where does it appear?
+      placeholder: Pull requests page, the merge button tooltip
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current text
+    validations:
+      required: true
+
+  - type: textarea
+    id: better
+    attributes:
+      label: Suggested text
+    validations:
+      required: true

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use cairn_core::settings::Settings;
+use cairn_core::stack::QueuedPr;
 use cairn_core::workspace::{self, RepoOutcome, RepoSummary};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -28,6 +29,47 @@ pub(crate) struct WorkspacePanel {
     message: Entity<InputState>,
     open_prs: bool,
     files: Vec<(PathBuf, Vec<(char, String)>)>,
+    queue: Option<Result<Vec<(PathBuf, QueuedPr)>, String>>,
+}
+
+/// Asks the app to open a repository on one of its pull requests.
+pub(crate) struct OpenPrEvent(pub PathBuf, pub u64);
+
+impl EventEmitter<OpenPrEvent> for WorkspacePanel {}
+
+fn mock_queue(paths: &[PathBuf]) -> Vec<(PathBuf, QueuedPr)> {
+    let find = |name: &str| paths.iter().find(|p| p.file_name().is_some_and(|f| f == name)).cloned();
+    let pr = |repo: &str, number: u64, title: &str, author: &str, created: &str, mine: bool| QueuedPr { repo: format!("aurora/{repo}"), number, title: title.into(), url: String::new(), author: author.into(), created: created.into(), is_draft: false, mine };
+    [
+        ("aurora", pr("aurora", 48, "Offline mode: queue changes and sync when back online", "kai", "2026-11-11T09:12:00Z", false)),
+        ("aurora-mobile", pr("aurora-mobile", 17, "Widgets: show the next three hours", "noor", "2026-11-12T14:40:00Z", false)),
+        ("aurora-docs", pr("aurora-docs", 9, "Document the sync queue", "sam", "2026-11-13T08:05:00Z", false)),
+        ("aurora", pr("aurora", 47, "Refresh the session token before it expires", "mira", "2026-11-10T16:20:00Z", true)),
+    ]
+    .into_iter()
+    .filter_map(|(name, p)| find(name).map(|path| (path, p)))
+    .collect()
+}
+
+/// Finds pull requests waiting for the user's review in the given repositories.
+///
+/// # Arguments
+/// * `paths` - the repositories of the category
+///
+/// # Returns
+/// Each matching pull request with the local repository it belongs to.
+fn load_queue(paths: &[PathBuf]) -> Result<Vec<(PathBuf, QueuedPr)>, String> {
+    let slugs: Vec<(PathBuf, String)> = paths
+        .iter()
+        .filter_map(|p| {
+            let git = cairn_core::Git::new(p);
+            let url = git.run(["remote", "get-url", "origin"]).ok().or_else(|| git.run(["remote"]).ok().and_then(|r| r.lines().next().and_then(|n| git.run(["remote", "get-url", n]).ok())))?;
+            cairn_core::stack::github_slug(url.trim()).map(|s| (p.clone(), s))
+        })
+        .collect();
+    let Some((first, _)) = slugs.first() else { return Ok(Vec::new()) };
+    let all = cairn_core::stack::review_queue(&cairn_core::Git::new(first)).map_err(|e| t!("stack.gh_missing", error = e.to_string()).to_string())?;
+    Ok(all.into_iter().filter_map(|q| slugs.iter().find(|(_, s)| *s == q.repo.to_lowercase()).map(|(p, _)| (p.clone(), q))).collect())
 }
 
 impl WorkspacePanel {
@@ -46,9 +88,77 @@ impl WorkspacePanel {
             message,
             open_prs: true,
             files: Vec::new(),
+            queue: None,
         };
         panel.refresh(cx);
+        panel.load_queue(cx);
         panel
+    }
+
+    fn load_queue(&mut self, cx: &mut Context<Self>) {
+        let paths = self.paths.clone();
+        let mock = cfg!(debug_assertions) && std::env::var("CAIRN_DEBUG_MOCK_PRS").is_ok();
+        cx.spawn(async move |this, cx| {
+            let queue = cx.background_executor().spawn(async move { if mock { Ok(mock_queue(&paths)) } else { load_queue(&paths) } }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.queue = Some(queue);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_queue(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let mut col = v_flex().gap_2();
+        let mut head = hstack().gap_2().child(icon(IconName::Inbox).text_color(theme.magenta)).child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("queue.title")));
+        let list = match &self.queue {
+            None => return col.child(head).child(crate::skeleton::sidebar(3, cx)).into_any_element(),
+            Some(Err(e)) => return col.child(head).child(div().text_xs().text_color(theme.muted_foreground).child(e.clone())).into_any_element(),
+            Some(Ok(list)) => list.clone(),
+        };
+        let waiting = list.iter().filter(|(_, q)| !q.mine).count();
+        head = head.child(count_chip(waiting.to_string(), theme.magenta.opacity(0.15), theme.magenta)).child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("queue.subtitle", waiting)));
+        col = col.child(head);
+        if list.is_empty() {
+            return col.child(hstack().gap_1p5().text_sm().text_color(theme.green).child(icon(IconName::CircleCheck).small()).child(tr("queue.empty"))).into_any_element();
+        }
+        let mut grid = div().w_full().grid().grid_cols(2).gap_2();
+        for (i, (path, q)) in list.iter().enumerate() {
+            let name = self.name_of(path);
+            let (path, number) = (path.clone(), q.number);
+            let accent = if q.mine { theme.blue } else { theme.magenta };
+            let created = chrono::DateTime::parse_from_rfc3339(&q.created).map(|d| d.timestamp()).unwrap_or(0);
+            grid = grid.child(
+                h_flex()
+                    .id(("queue", i))
+                    .relative()
+                    .overflow_hidden()
+                    .gap_2p5()
+                    .pl(px(14.))
+                    .pr_3()
+                    .py(px(10.))
+                    .rounded(px(10.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(linear_gradient(100., linear_color_stop(accent.opacity(0.10), 0.), linear_color_stop(theme.sidebar, 0.6)))
+                    .hover(|s| s.border_color(accent.opacity(0.6)))
+                    .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(accent))
+                    .child(crate::widgets::avatar(&q.author, px(26.), cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(hstack().gap_1p5().text_xs().text_color(theme.muted_foreground).child(icon(IconName::FolderGit2).xsmall()).child(div().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(name)).child(format!("#{}", q.number)).child(spacer()).child(crate::widgets::relative_time(created)))
+                            .child(div().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(q.title.clone()))
+                            .child(hstack().gap_1p5().child(crate::widgets::badge(if q.mine { tr("queue.yours") } else { tr("pulls.your_turn") }, accent)).child(div().text_xs().text_color(theme.muted_foreground).child(q.author.clone()))),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(OpenPrEvent(path.clone(), number)))),
+            );
+        }
+        col.child(grid).into_any_element()
     }
 
     fn name_of(&self, p: &PathBuf) -> String {
@@ -367,7 +477,10 @@ impl Render for WorkspacePanel {
                     .child(div().text_xs().text_color(theme.muted_foreground).child(t!("workspace.subtitle", n = paths.len()).to_string()))
                     .child(spacer())
                     .when_some(busy.clone(), |d, b| d.child(hstack().gap_1().text_xs().text_color(theme.muted_foreground).child(gpui_kit::component::spinner::Spinner::new().xsmall()).child(b)))
-                    .child(framed(Button::new("ws-refresh"), Tone::Plain, cx).w(px(32.)).px_0().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
+                    .child(framed(Button::new("ws-refresh"), Tone::Plain, cx).w(px(32.)).px_0().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh(cx);
+                        this.load_queue(cx);
+                    })))
                     .child(crate::widgets::framed_if(Button::new("ws-fetch"), Tone::Plain, busy.is_none(), cx).icon(icon(IconName::CloudDownload)).label(tr("workspace.fetch_all")).on_click(cx.listener(move |this, _, window, cx| {
                         let p = p1.clone();
                         this.run_batch(tr("workspace.fetch_all"), move || workspace::fetch_all(&p, prune), window, cx);
@@ -385,8 +498,9 @@ impl Render for WorkspacePanel {
                         });
                     }))),
             )
-            .when(self.loading && self.summaries.is_empty(), |d| d.child(gpui_kit::component::spinner::Spinner::new()))
+            .when(self.loading && self.summaries.is_empty(), |d| d.child(crate::skeleton::sidebar(3, cx)))
             .child(grid)
+            .child(div().pt_2().child(self.render_queue(cx)))
             .child(
                 h_flex()
                     .items_start()

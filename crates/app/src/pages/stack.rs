@@ -105,7 +105,7 @@ impl RepoView {
     pub(crate) fn render_stack(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         if self.stack.loading && !self.stack.loaded {
-            return div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element();
+            return crate::skeleton::list(4, cx).into_any_element();
         }
         if !self.stack.loaded {
             self.load_stack(cx);

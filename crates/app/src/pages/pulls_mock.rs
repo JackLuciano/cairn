@@ -324,3 +324,27 @@ pub(crate) fn mock_prs() -> Vec<MockPr> {
         finish(bump, BUMP_DIFF, Vec::new()),
     ]
 }
+
+fn finding(severity: &str, file: &str, line: Option<u32>, text: &str) -> crate::ai::Finding {
+    crate::ai::Finding { severity: severity.into(), file: file.into(), line, problem: text.into(), old: None, fix: None }
+}
+
+/// What the AI review says about a mock pull request.
+///
+/// # Arguments
+/// * `number` - the mock pull request
+///
+/// # Returns
+/// Suggested review comments.
+pub(crate) fn mock_ai_review(number: u64) -> Vec<crate::ai::Finding> {
+    match number {
+        48 => vec![
+            finding("bug", "src/sync/queue.ts", Some(22), "Anything pushed while `drain` is still sending gets lost here, because the whole queue is replaced with an empty list. Could you remove only the changes that were actually sent?"),
+            finding("bug", "src/sync/queue.ts", Some(21), "If one `send` fails, the loop throws and every change before it is sent again on the next drain. Removing each change right after it succeeds would avoid the duplicates."),
+            finding("bug", "src/screens/Home.tsx", Some(6), "`useOnline` is used but never imported, so this screen will not compile."),
+            finding("minor", "src/api/client.ts", Some(15), "`navigator.onLine` can say \"online\" on a captive Wi-Fi. Treating a failed `fetch` as offline too would make the banner more reliable."),
+            finding("consistency", "src/sync/queue.ts", None, "There are no tests for `SyncQueue` yet. A test for a failing send in the middle of a drain would cover both issues above."),
+        ],
+        _ => Vec::new(),
+    }
+}

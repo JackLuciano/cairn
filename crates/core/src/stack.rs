@@ -647,6 +647,300 @@ pub fn submit(git: &Git, remote: &str, stack: &[StackBranch], draft: bool) -> Re
     Ok(format!("{} branches pushed, {created} pull requests opened", stack.len()))
 }
 
+fn gh_with_input(dir: &std::path::Path, args: &[&str], input: &str) -> Result<String> {
+    use std::io::Write as _;
+    let mut cmd = Command::new("gh");
+    cmd.current_dir(dir).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|_| crate::Error::Other("The GitHub CLI (gh) is not installed.".into()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(crate::Error::GitCommand { command: "gh".into(), message: String::from_utf8_lossy(&out.stderr).trim().to_string() })
+    }
+}
+
+/// What a new pull request should look like.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewPr {
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    pub body: String,
+    pub draft: bool,
+    pub reviewers: Vec<String>,
+    pub labels: Vec<String>,
+}
+
+/// Pushes the branch if it has no upstream yet, then opens a pull request for it.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `remote` - remote to push to when the branch was never pushed
+/// * `pr` - title, description, base branch, reviewers and labels
+///
+/// # Returns
+/// The new pull request's number and URL.
+pub fn open_pr(git: &Git, remote: &str, pr: &NewPr) -> Result<(u64, String)> {
+    let upstream = format!("{}@{{upstream}}", pr.head);
+    if !git.succeeds(["rev-parse", "--verify", "-q", &upstream]) {
+        git.run(["push", "-u", remote, &format!("refs/heads/{0}:refs/heads/{0}", pr.head)])?;
+    } else if git.run(["rev-list", "--count", &format!("{upstream}..{}", pr.head)]).map(|n| n.trim() != "0").unwrap_or(false) {
+        git.run(["push", remote, &format!("refs/heads/{0}:refs/heads/{0}", pr.head)])?;
+    }
+    let reviewers = pr.reviewers.join(",");
+    let labels = pr.labels.join(",");
+    let mut args = vec!["pr", "create", "--head", &pr.head, "--base", &pr.base, "--title", &pr.title, "--body", &pr.body];
+    if pr.draft {
+        args.push("--draft");
+    }
+    if !pr.reviewers.is_empty() {
+        args.extend(["--reviewer", reviewers.as_str()]);
+    }
+    if !pr.labels.is_empty() {
+        args.extend(["--label", labels.as_str()]);
+    }
+    let url = gh(git.dir(), &args)?.lines().rev().find(|l| l.contains("/pull/")).unwrap_or_default().trim().to_string();
+    let number = url.rsplit('/').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    Ok((number, url))
+}
+
+/// People who can be asked to review, taken from the repository's collaborators and recent
+/// pull request authors.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+///
+/// # Returns
+/// Login names, without the logged-in user.
+pub fn reviewer_candidates(git: &Git) -> Vec<String> {
+    let me = gh_account(git).unwrap_or_default();
+    let mut names: Vec<String> = gh(git.dir(), &["api", "repos/{owner}/{repo}/collaborators", "--jq", ".[].login"]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
+    if names.is_empty() {
+        names = gh(git.dir(), &["pr", "list", "--state", "all", "--limit", "50", "--json", "author", "--jq", ".[].author.login"]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
+    }
+    names.retain(|n| !n.is_empty() && *n != me && !n.ends_with("[bot]") && !n.starts_with("app/"));
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+/// The repository's labels.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+///
+/// # Returns
+/// Label names.
+pub fn repo_labels(git: &Git) -> Vec<String> {
+    gh(git.dir(), &["label", "list", "--limit", "100", "--json", "name", "--jq", ".[].name"]).map(|o| o.lines().map(str::to_string).filter(|l| !l.is_empty()).collect()).unwrap_or_default()
+}
+
+/// The raw unified diff of a pull request.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// The diff text.
+pub fn pr_diff_text(git: &Git, number: u64) -> Result<String> {
+    gh(git.dir(), &["pr", "diff", &number.to_string(), "--color=never"])
+}
+
+/// One comment of a review, attached to a line of the changed file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewNote {
+    pub path: String,
+    pub line: u32,
+    pub body: String,
+}
+
+/// Submits a review with line comments in one go, so reviewers get one notification.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `commit` - the pull request's head commit the lines refer to
+/// * `body` - the review's summary text
+/// * `notes` - comments on lines of the new version of files
+///
+/// # Returns
+/// The `gh` output.
+pub fn post_review(git: &Git, number: u64, commit: &str, body: &str, notes: &[ReviewNote]) -> Result<String> {
+    let payload = serde_json::json!({
+        "commit_id": commit,
+        "body": body,
+        "event": "COMMENT",
+        "comments": notes.iter().map(|n| serde_json::json!({ "path": n.path, "line": n.line, "side": "RIGHT", "body": n.body })).collect::<Vec<_>>(),
+    });
+    gh_with_input(git.dir(), &["api", "--method", "POST", &format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews"), "--input", "-"], &payload.to_string())
+}
+
+/// An open GitHub issue.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+}
+
+/// Lists the repository's open issues, the ones assigned to the logged-in user first.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+///
+/// # Returns
+/// Open issues.
+pub fn list_issues(git: &Git) -> Result<Vec<Issue>> {
+    let out = gh(git.dir(), &["issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,url,labels,assignees"])?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(&out)?;
+    let names = |v: &serde_json::Value, key: &str, field: &str| -> Vec<String> { v.get(key).and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.get(field).and_then(|s| s.as_str()).map(str::to_string)).collect()).unwrap_or_default() };
+    let me = gh_account(git).unwrap_or_default();
+    let mut issues: Vec<Issue> = raw
+        .iter()
+        .map(|v| Issue {
+            number: v.get("number").and_then(|n| n.as_u64()).unwrap_or(0),
+            title: v.get("title").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+            url: v.get("url").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+            labels: names(v, "labels", "name"),
+            assignees: names(v, "assignees", "login"),
+        })
+        .collect();
+    issues.sort_by_key(|i| !i.assignees.contains(&me));
+    Ok(issues)
+}
+
+/// Turns an issue into a branch name such as `42-fix-login-crash`.
+///
+/// # Arguments
+/// * `number` - issue number
+/// * `title` - issue title
+///
+/// # Returns
+/// A branch name of at most about 50 characters.
+pub fn issue_branch_name(number: u64, title: &str) -> String {
+    let plain: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'ö' | 'ő' | 'õ' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' | 'ű' => 'u',
+            'ç' => 'c',
+            'ñ' => 'n',
+            other => other,
+        })
+        .collect();
+    let slug: Vec<String> = plain
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut name = number.to_string();
+    for w in slug {
+        if name.len() + w.len() + 1 > 50 {
+            break;
+        }
+        name.push('-');
+        name.push_str(&w);
+    }
+    name
+}
+
+/// Creates a branch for an issue and checks it out. The branch is linked to the issue on
+/// GitHub when possible, so the issue shows it and closes when its pull request merges.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - issue number
+/// * `name` - the new branch name
+/// * `base` - branch to start from
+///
+/// # Returns
+/// Whether GitHub linked the branch to the issue.
+pub fn branch_from_issue(git: &Git, number: u64, name: &str, base: &str) -> Result<bool> {
+    let short_base = base.split_once('/').filter(|(r, _)| git.succeeds(["remote", "get-url", r])).map(|(_, b)| b).unwrap_or(base);
+    if gh(git.dir(), &["issue", "develop", &number.to_string(), "--name", name, "--base", short_base, "--checkout"]).is_ok() {
+        return Ok(true);
+    }
+    git.run(["switch", "-c", name, base])?;
+    Ok(false)
+}
+
+/// A pull request in any repository, as found by a GitHub search.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPr {
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub author: String,
+    pub created: String,
+    pub is_draft: bool,
+    pub mine: bool,
+}
+
+fn search_prs(git: &Git, filter: &str, mine: bool) -> Result<Vec<QueuedPr>> {
+    let out = gh(git.dir(), &["search", "prs", filter, "--state=open", "--limit", "100", "--json", "number,title,url,repository,author,createdAt,isDraft"])?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(&out)?;
+    let s = |v: &serde_json::Value, p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    Ok(raw
+        .iter()
+        .map(|v| QueuedPr {
+            repo: s(v, "/repository/nameWithOwner"),
+            number: v.get("number").and_then(|n| n.as_u64()).unwrap_or(0),
+            title: s(v, "/title"),
+            url: s(v, "/url"),
+            author: s(v, "/author/login"),
+            created: s(v, "/createdAt"),
+            is_draft: v.get("isDraft").and_then(|b| b.as_bool()).unwrap_or(false),
+            mine,
+        })
+        .collect())
+}
+
+/// Finds every open pull request that waits for the logged-in user's review, and the user's
+/// own open pull requests, across all of GitHub.
+///
+/// # Arguments
+/// * `git` - runner for any repository, used only to run `gh`
+///
+/// # Returns
+/// Pull requests to review first, then the user's own.
+pub fn review_queue(git: &Git) -> Result<Vec<QueuedPr>> {
+    let mut list = search_prs(git, "--review-requested=@me", false)?;
+    list.extend(search_prs(git, "--author=@me", true).unwrap_or_default());
+    Ok(list)
+}
+
+/// Reads `owner/name` from a GitHub remote URL.
+///
+/// # Arguments
+/// * `url` - an HTTPS, SSH or `git@` remote URL
+///
+/// # Returns
+/// The repository slug, or `None` when the URL is not a GitHub one.
+pub fn github_slug(url: &str) -> Option<String> {
+    let rest = url.split_once("github.com").map(|(_, r)| r)?;
+    let rest = rest.trim_start_matches([':', '/']).trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = rest.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    (!owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}").to_lowercase())
+}
+
 /// Opens a pull request for the current branch.
 ///
 /// # Arguments
@@ -664,4 +958,24 @@ pub fn create_pr(git: &Git, base: &str, title: &str, body: &str, draft: bool) ->
         args.push("--draft");
     }
     Ok(gh(git.dir(), &args)?.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_titles_become_short_branch_names() {
+        assert_eq!(issue_branch_name(42, "Fix: login crashes when the token expires!"), "42-fix-login-crashes-when-the-token-expires");
+        assert!(issue_branch_name(7, &"word ".repeat(40)).len() <= 50);
+        assert_eq!(issue_branch_name(9, "Ékezetes cím"), "9-ekezetes-cim");
+    }
+
+    #[test]
+    fn github_slugs_come_from_every_url_style() {
+        assert_eq!(github_slug("https://github.com/Second-Choice/server.git").as_deref(), Some("second-choice/server"));
+        assert_eq!(github_slug("git@github.com:JackLuciano/cairn.git").as_deref(), Some("jackluciano/cairn"));
+        assert_eq!(github_slug("ssh://git@github.com/a/b").as_deref(), Some("a/b"));
+        assert_eq!(github_slug("https://gitlab.com/a/b.git"), None);
+    }
 }

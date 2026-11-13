@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Release notes
+    url: https://github.com/JackLuciano/cairn/releases
+    about: Check whether your problem is already fixed in a newer version.
+  - name: Security problem
+    url: https://github.com/JackLuciano/cairn/security/advisories/new
+    about: Report security problems privately instead of in a public issue.

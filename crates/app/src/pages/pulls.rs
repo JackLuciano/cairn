@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use cairn_core::diff::FileDiff;
 use cairn_core::stack::{self, MergeMethod, PrComment, PrDetails, PullRequest, ReviewComment, ReviewVerdict};
 use gpui_kit::assets::IconName;
@@ -48,7 +46,9 @@ pub(crate) struct PullsState {
     pub tab: PrTab,
     pub filter: PrFilter,
     pub me: Option<String>,
-    pub viewed: HashSet<(u64, String)>,
+    pub viewed: cairn_core::viewed::ViewedFiles,
+    pub fingerprints: std::collections::HashMap<String, String>,
+    pub ai: PrAiReview,
     pub method: MergeMethod,
     pub mock: bool,
     pub sending: bool,
@@ -80,7 +80,9 @@ impl PullsState {
             tab,
             filter: PrFilter::All,
             me: None,
-            viewed: HashSet::new(),
+            viewed: cairn_core::viewed::ViewedFiles::load(),
+            fingerprints: Default::default(),
+            ai: Default::default(),
             method: MergeMethod::Squash,
             mock,
             sending: false,
@@ -88,6 +90,34 @@ impl PullsState {
             _sub: sub,
         }
     }
+}
+
+/// One comment the AI suggests for a pull request.
+#[derive(Clone)]
+pub(crate) struct AiNote {
+    pub finding: crate::ai::Finding,
+    pub picked: bool,
+    pub on_line: bool,
+}
+
+/// The AI review of the open pull request.
+#[derive(Clone, Default)]
+pub(crate) struct PrAiReview {
+    pub running: bool,
+    pub done: bool,
+    pub posted: bool,
+    pub error: Option<String>,
+    pub notes: Vec<AiNote>,
+}
+
+/// Whether a line number of the new file version is part of the diff, which GitHub requires
+/// for a line comment.
+///
+/// # Arguments
+/// * `diff` - the file's diff
+/// * `line` - the line in the new version
+fn line_in_diff(diff: &FileDiff, line: u32) -> bool {
+    diff.hunks.iter().flat_map(|h| h.lines.iter()).any(|l| l.new_no == Some(line))
 }
 
 /// Where a pull request stands on its way to being merged.
@@ -342,10 +372,14 @@ impl RepoView {
             self.pulls.loaded = true;
             self.pulls.me = Some(crate::pages::pulls_mock::ME.into());
             self.pulls.list = crate::pages::pulls_mock::mock_prs().into_iter().map(|m| m.details.pr).collect();
+            self.clashes.insert("#45".into(), vec!["src/screens/Settings.tsx".into()]);
             if self.pulls.selected.is_none()
                 && let Some(n) = wanted.or_else(|| self.pulls.list.first().map(|p| p.number))
             {
                 self.select_pull(n, cx);
+                if std::env::var("CAIRN_DEBUG_PR_AI").is_ok() {
+                    self.run_pr_ai_review(cx);
+                }
             }
             cx.notify();
             return;
@@ -373,6 +407,7 @@ impl RepoView {
                         let keep = this.pulls.selected.or(wanted).filter(|n| list.iter().any(|p| p.number == *n));
                         let first = keep.or_else(|| list.first().map(|p| p.number));
                         this.pulls.list = list;
+                        this.check_conflicts(cx);
                         if let Some(n) = first
                             && this.pulls.details.as_ref().map(|d| d.pr.number) != Some(n)
                         {
@@ -387,7 +422,14 @@ impl RepoView {
         cx.notify();
     }
 
-    fn select_pull(&mut self, number: u64, cx: &mut Context<Self>) {
+    fn refresh_fingerprints(&mut self) {
+        self.pulls.fingerprints = self.pulls.diffs.iter().map(|d| (d.path.clone(), cairn_core::viewed::fingerprint(d))).collect();
+    }
+
+    pub(crate) fn select_pull(&mut self, number: u64, cx: &mut Context<Self>) {
+        if self.pulls.selected != Some(number) {
+            self.pulls.ai = PrAiReview::default();
+        }
         self.pulls.selected = Some(number);
         self.pulls.details = None;
         self.pulls.diffs.clear();
@@ -400,6 +442,7 @@ impl RepoView {
                 self.pulls.details = Some(m.details);
                 self.pulls.diffs = m.diffs;
                 self.pulls.inline = m.inline;
+                self.refresh_fingerprints();
             }
             cx.notify();
             return;
@@ -417,6 +460,7 @@ impl RepoView {
                         this.pulls.file = diffs.first().map(|d| d.path.clone());
                         this.pulls.diffs = diffs;
                         this.pulls.inline = inline;
+                        this.refresh_fingerprints();
                     }
                     Err(e) => this.pulls.error = Some(crate::repo_view::friendly_error(&e)),
                 }
@@ -499,6 +543,92 @@ impl RepoView {
         }
     }
 
+    /// Asks the AI to review the open pull request's diff and drafts comments for it.
+    pub(crate) fn run_pr_ai_review(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.pulls.details.clone() else { return };
+        self.pulls.tab = PrTab::Files;
+        self.pulls.ai = PrAiReview { running: true, ..Default::default() };
+        cx.notify();
+        let number = d.pr.number;
+        if self.pulls.mock {
+            let notes = crate::pages::pulls_mock::mock_ai_review(number);
+            self.spawn_bg(
+                move || {
+                    std::thread::sleep(std::time::Duration::from_millis(900));
+                    notes
+                },
+                |this, notes, _| this.finish_ai_review(Ok(notes)),
+                cx,
+            );
+            return;
+        }
+        let git = self.git();
+        let settings = self.settings.clone();
+        self.spawn_bg(
+            move || {
+                let diff = stack::pr_diff_text(&git, number).map_err(|e| crate::repo_view::friendly_error(&e))?;
+                crate::ai::review_pr(&settings, &d.pr.title, &d.body, &diff)
+            },
+            move |this, result, _| {
+                if this.pulls.selected == Some(number) {
+                    this.finish_ai_review(result);
+                }
+            },
+            cx,
+        );
+    }
+
+    fn finish_ai_review(&mut self, result: Result<Vec<crate::ai::Finding>, String>) {
+        self.pulls.ai.running = false;
+        self.pulls.ai.done = true;
+        match result {
+            Ok(findings) => {
+                self.pulls.ai.notes = findings
+                    .into_iter()
+                    .map(|f| {
+                        let on_line = f.line.is_some_and(|l| self.pulls.diffs.iter().any(|d| d.path == f.file && line_in_diff(d, l)));
+                        let picked = matches!(f.severity.as_str(), "bug" | "security" | "consistency");
+                        AiNote { finding: f, picked, on_line }
+                    })
+                    .collect();
+                if let Some(first) = self.pulls.ai.notes.first() {
+                    let file = first.finding.file.clone();
+                    if self.pulls.diffs.iter().any(|d| d.path == file) {
+                        self.pulls.file = Some(file);
+                    }
+                }
+            }
+            Err(e) => self.pulls.ai.error = Some(e),
+        }
+    }
+
+    /// Posts the picked AI comments as one review: line comments where GitHub allows them, the
+    /// rest in the review text.
+    fn post_ai_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = self.pulls.details.clone() else { return };
+        let picked: Vec<AiNote> = self.pulls.ai.notes.iter().filter(|n| n.picked).cloned().collect();
+        if picked.is_empty() {
+            return;
+        }
+        let notes: Vec<stack::ReviewNote> = picked.iter().filter(|n| n.on_line).map(|n| stack::ReviewNote { path: n.finding.file.clone(), line: n.finding.line.unwrap_or(1), body: n.finding.problem.clone() }).collect();
+        let general: Vec<String> = picked.iter().filter(|n| !n.on_line).map(|n| format!("- `{}`: {}", n.finding.file, n.finding.problem)).collect();
+        let mut body = t!("pulls.ai_review_body", n = picked.len()).to_string();
+        if !general.is_empty() {
+            body.push_str("\n\n");
+            body.push_str(&general.join("\n"));
+        }
+        if self.pulls.mock {
+            let me = self.pulls.me.clone().unwrap_or_default();
+            for n in &notes {
+                self.pulls.inline.push(ReviewComment { author: me.clone(), body: n.body.clone(), path: n.path.clone(), line: Some(u64::from(n.line)) });
+            }
+        }
+        self.pulls.ai.posted = true;
+        let number = d.pr.number;
+        let head = d.head_oid.clone();
+        self.send_pr_action(move |git| stack::post_review(git, number, &head, &body, &notes), crate::widgets::plural("pulls.ai_posted", picked.len()).into(), window, cx);
+    }
+
     fn filtered_pulls(&self) -> Vec<PullRequest> {
         let me = self.pulls.me.clone().unwrap_or_default();
         self.pulls
@@ -551,7 +681,9 @@ impl RepoView {
             _ => (IconName::CircleDot, tr("pulls.checks_none")),
         };
         let chk_detail: SharedString = if total == 0 { tr("pulls.checks_none_body") } else { t!("pulls.checks_count", passed = passed, total = total).to_string().into() };
+        let local_conflicts = self.clashes.get(&format!("#{}", d.pr.number)).filter(|_| d.merge_state != "DIRTY").map(|f| f.join(", "));
         let (merge_ic, merge_color, merge_title, merge_detail, can_merge): (IconName, Hsla, SharedString, SharedString, bool) = match d.merge_state.as_str() {
+            _ if local_conflicts.is_some() => (IconName::GitMerge, theme.red, tr("pulls.merge_conflicts"), t!("conflicts_early.files", base = d.pr.base.clone(), files = local_conflicts.clone().unwrap_or_default()).to_string().into(), false),
             "CLEAN" | "HAS_HOOKS" => (IconName::GitMerge, theme.green, tr("pulls.merge_clean"), t!("pulls.merge_clean_body", base = d.pr.base.clone()).to_string().into(), true),
             "BEHIND" => (IconName::ArrowDownToLine, theme.yellow, tr("pulls.merge_behind"), t!("pulls.merge_behind_body", base = d.pr.base.clone()).to_string().into(), false),
             "DIRTY" => (IconName::GitMerge, theme.red, tr("pulls.merge_conflicts"), t!("pulls.merge_conflicts_body", base = d.pr.base.clone()).to_string().into(), false),
@@ -627,6 +759,7 @@ impl RepoView {
             let (label, color) = review_badge(p, cx);
             let (cstate, _, _) = checks_state(p);
             let to_review = p.review_requests.contains(&me);
+            let clash = self.clashes.contains_key(&format!("#{}", p.number));
             let accent = if p.is_draft {
                 theme.muted_foreground
             } else if to_review {
@@ -673,6 +806,7 @@ impl RepoView {
                             .gap_1p5()
                             .child(crate::widgets::badge(label, color))
                             .when(to_review, |d| d.child(crate::widgets::badge(tr("pulls.your_turn"), theme.magenta)))
+                            .when(clash, |d| d.child(crate::widgets::badge(tr("conflicts_early.badge"), theme.red)))
                             .child(spacer())
                             .when(!p.review_requests.is_empty(), |d| d.child(stacked_avatars(&p.review_requests, cx)))
                             .when(cstate != "none", |d| d.child(div().size(px(8.)).rounded_full().bg(state_color(cstate, cx))))
@@ -691,6 +825,7 @@ impl RepoView {
                     .child(div().text_base().font_weight(FontWeight::BOLD).child(tr("page.pulls")))
                     .child(count_chip(self.pulls.list.len().to_string(), theme.secondary, theme.muted_foreground))
                     .child(spacer())
+                    .child(framed(Button::new("pulls-new"), Tone::Accent, cx).h(px(26.)).icon(icon(IconName::GitPullRequestCreate)).label(tr("new_pr.button")).on_click(cx.listener(|_, _, window, cx| crate::new_pr::open(cx.entity(), window, cx))))
                     .child(Button::new("pulls-refresh").xsmall().ghost().icon(icon(IconName::RefreshCw)).tooltip(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| {
                         this.pulls.loaded = false;
                         this.load_pulls(cx);
@@ -775,6 +910,14 @@ impl RepoView {
                     .child(stat_tile(IconName::ListChecks, div().text_color(state_color(cstate, cx)).child(if total == 0 { "—".to_string() } else { format!("{passed}/{total}") }), tr("pulls.stat_checks"), cx))
                     .child(stat_tile(IconName::Users, div().text_color(if approvals > 0 { theme.green } else { theme.foreground }).child(format!("{approvals}/{}", d.reviewers.len())), tr("pulls.stat_approvals"), cx))
                     .child(spacer())
+                    .child(framed_if(Button::new("pr-ai-hero"), Tone::Ai, self.settings.ai.enabled && !self.pulls.ai.running, cx).icon(icon(IconName::Sparkles)).label(if self.pulls.ai.done { tr("pulls.ai_show") } else { tr("pulls.ai_button") }).on_click(cx.listener(|this, _, _, cx| {
+                        if this.pulls.ai.done {
+                            this.pulls.tab = PrTab::Files;
+                            cx.notify();
+                        } else {
+                            this.run_pr_ai_review(cx);
+                        }
+                    })))
                     .child(framed_if(Button::new("pr-checkout"), Tone::Plain, !on_branch && self.busy.is_none(), cx).icon(icon(IconName::LogIn)).label(if on_branch { tr("pulls.checked_out") } else { tr("pulls.checkout") }).on_click(cx.listener(move |this, _, window, cx| {
                         this.run_op(tr("op.checkout_pr"), Some(t!("undo.checkout", name = format!("#{number}")).to_string()), move |git| stack::pr_checkout(git, number), window, cx);
                     })))
@@ -787,7 +930,7 @@ impl RepoView {
         let theme = cx.theme().clone();
         let tab = self.pulls.tab;
         let talk = d.conversation.iter().filter(|c| !c.body.trim().is_empty() || c.review_state.as_deref().is_some_and(|s| s != "COMMENTED")).count() + self.pulls.inline.len();
-        let viewed = self.pulls.diffs.iter().filter(|f| self.pulls.viewed.contains(&(d.pr.number, f.path.clone()))).count();
+        let viewed = self.pulls.diffs.iter().filter(|f| self.pr_viewed(d.pr.number, &f.path)).count();
         let items: [(&'static str, SharedString, String, IconName, PrTab); 4] = [
             ("pr-tab-conv", tr("pulls.overview"), talk.to_string(), IconName::MessageSquare, PrTab::Conversation),
             ("pr-tab-files", tr("pulls.files_changed"), format!("{viewed}/{}", self.pulls.diffs.len()), IconName::FileDiff, PrTab::Files),
@@ -1179,7 +1322,141 @@ impl RepoView {
         let current = self.pulls.file.clone();
         let paths: Vec<&String> = self.pulls.diffs.iter().map(|d| &d.path).collect();
         let start = current.as_ref().and_then(|c| paths.iter().position(|p| *p == c)).map(|i| i + 1).unwrap_or(0);
-        paths.iter().cycle().skip(start).take(paths.len()).find(|p| !self.pulls.viewed.contains(&(number, (**p).clone()))).map(|p| (*p).clone())
+        paths.iter().cycle().skip(start).take(paths.len()).find(|p| !self.pr_viewed(number, p)).map(|p| (*p).clone())
+    }
+
+    /// Whether a file of the open pull request was marked viewed in its current version.
+    ///
+    /// # Arguments
+    /// * `number` - pull request number
+    /// * `path` - the file
+    pub(crate) fn pr_viewed(&self, number: u64, path: &str) -> bool {
+        let Some(fp) = self.pulls.fingerprints.get(path) else { return false };
+        self.pulls.viewed.is_viewed(&self.repo.root.to_string_lossy(), number, path, fp)
+    }
+
+    /// Marks a file of the open pull request as viewed or not, and remembers it across restarts.
+    ///
+    /// # Arguments
+    /// * `number` - pull request number
+    /// * `path` - the file
+    /// * `on` - viewed or not
+    fn set_pr_viewed(&mut self, number: u64, path: &str, on: bool) {
+        let Some(fp) = self.pulls.fingerprints.get(path).cloned() else { return };
+        let repo = self.repo.root.to_string_lossy().to_string();
+        self.pulls.viewed.set(&repo, number, path, &fp, on);
+        if !self.pulls.mock {
+            let snapshot = self.pulls.viewed.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = snapshot.save() {
+                    crate::repo_view::log_error(&format!("saving viewed files: {e}"));
+                }
+            });
+        }
+    }
+
+    fn render_ai_panel(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ai = self.pulls.ai.clone();
+        let enabled = self.settings.ai.enabled;
+        let mut col = v_flex().gap_2().px_3().py_3().border_b_1().border_color(theme.border).bg(theme.magenta.opacity(0.05));
+        let title = hstack().gap_1p5().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.magenta).child(icon(IconName::Sparkles).xsmall()).child(tr("pulls.ai_title"));
+        if !ai.done && !ai.running {
+            return col
+                .child(title)
+                .child(div().text_xs().text_color(theme.muted_foreground).child(if enabled { tr("pulls.ai_desc") } else { tr("pulls.ai_off") }))
+                .child(framed_if(Button::new("pr-ai-run"), Tone::Ai, enabled, cx).h(px(28.)).icon(icon(IconName::Sparkles)).label(t!("pulls.ai_run", n = self.pulls.diffs.len()).to_string()).on_click(cx.listener(|this, _, _, cx| this.run_pr_ai_review(cx))))
+                .into_any_element();
+        }
+        if ai.running {
+            return col.child(title).child(framed(Button::new("pr-ai-running"), Tone::Ai, cx).h(px(28.)).loading(true).label(t!("pulls.ai_running", n = self.pulls.diffs.len()).to_string())).into_any_element();
+        }
+        if let Some(e) = ai.error {
+            return col
+                .child(title)
+                .child(div().text_xs().text_color(theme.red).child(e))
+                .child(framed(Button::new("pr-ai-retry"), Tone::Plain, cx).h(px(28.)).icon(icon(IconName::RefreshCw)).label(tr("pulls.ai_retry")).on_click(cx.listener(|this, _, _, cx| this.run_pr_ai_review(cx))))
+                .into_any_element();
+        }
+        let picked = ai.notes.iter().filter(|n| n.picked).count();
+        col = col.child(hstack().child(title).child(spacer()).child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("pulls.ai_found", ai.notes.len()))));
+        if ai.notes.is_empty() {
+            col = col.child(hstack().gap_1p5().text_xs().text_color(theme.green).child(icon(IconName::CircleCheck).xsmall()).child(tr("pulls.ai_nothing")));
+        }
+        for (i, n) in ai.notes.iter().enumerate().filter(|(_, n)| !n.on_line) {
+            col = col.child(
+                h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(Checkbox::new(("pr-ai-general", i)).checked(n.picked).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                        if let Some(n) = this.pulls.ai.notes.get_mut(i) {
+                            n.picked = *v;
+                        }
+                        cx.notify();
+                    })))
+                    .child(div().flex_1().min_w_0().whitespace_normal().text_xs().child(n.finding.problem.clone())),
+            );
+        }
+        if !ai.notes.is_empty() {
+            let number = d.pr.number;
+            col = col.child(
+                v_flex()
+                    .gap_2()
+                    .child(div().min_w_0().whitespace_normal().text_xs().text_color(theme.muted_foreground).child(if ai.posted { tr("pulls.ai_posted_note") } else { tr("pulls.ai_pick_hint") }))
+                    .child(framed_if(Button::new(("pr-ai-post", number as usize)), Tone::Accent, picked > 0 && !ai.posted && !self.pulls.sending, cx).w_full().h(px(30.)).icon(icon(if ai.posted { IconName::Check } else { IconName::Send })).label(if ai.posted { tr("pulls.ai_posted_label") } else { crate::widgets::plural("pulls.ai_post", picked).into() }).on_click(cx.listener(|this, _, window, cx| this.post_ai_review(window, cx)))),
+            );
+        }
+        col.into_any_element()
+    }
+
+    fn render_ai_notes(&mut self, path: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let mine: Vec<(usize, AiNote)> = self.pulls.ai.notes.iter().cloned().enumerate().filter(|(_, n)| n.on_line && n.finding.file == path).collect();
+        if mine.is_empty() {
+            return None;
+        }
+        let mut col = v_flex().id("pr-ai-notes").max_h(px(260.)).overflow_y_scroll().gap_2().p_3().border_b_1().border_color(theme.border);
+        for (i, n) in mine {
+            let color = match n.finding.severity.as_str() {
+                "bug" | "security" => theme.red,
+                "consistency" => theme.yellow,
+                _ => theme.cyan,
+            };
+            col = col.child(
+                h_flex()
+                    .items_start()
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(10.))
+                    .bg(theme.magenta.opacity(0.07))
+                    .border_1()
+                    .border_color(theme.magenta.opacity(if n.picked { 0.5 } else { 0.2 }))
+                    .when(!n.picked, |d| d.opacity(0.6))
+                    .child(icon_tile(IconName::Sparkles, theme.magenta).size(px(22.)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                hstack()
+                                    .gap_2()
+                                    .text_xs()
+                                    .child(crate::widgets::badge(tr(&format!("assist.sev_{}", if n.finding.severity.is_empty() { "minor" } else { n.finding.severity.as_str() })), color))
+                                    .child(div().font_family(theme.mono_font_family.clone()).text_color(theme.link).child(n.finding.line.map(|l| t!("pulls.line_n", n = l).to_string()).unwrap_or_default()))
+                                    .child(spacer())
+                                    .child(Checkbox::new(("pr-ai-pick", i)).checked(n.picked).label(tr("pulls.ai_include")).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                        if let Some(n) = this.pulls.ai.notes.get_mut(i) {
+                                            n.picked = *v;
+                                        }
+                                        cx.notify();
+                                    }))),
+                            )
+                            .children(markdown(("pr-ai-text", i), &n.finding.problem).map(|b| div().text_sm().child(b))),
+                    ),
+            );
+        }
+        Some(col.into_any_element())
     }
 
     fn render_pr_files(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
@@ -1188,7 +1465,7 @@ impl RepoView {
             return empty_state(IconName::FileDiff, tr("pulls.no_files_title"), tr("pulls.no_files_body"), cx).into_any_element();
         }
         let number = d.pr.number;
-        let viewed_n = self.pulls.diffs.iter().filter(|f| self.pulls.viewed.contains(&(number, f.path.clone()))).count();
+        let viewed_n = self.pulls.diffs.iter().filter(|f| self.pr_viewed(number, &f.path)).count();
         let total = self.pulls.diffs.len();
         let biggest = self.pulls.diffs.iter().map(|f| f.stats().0 + f.stats().1).max().unwrap_or(1).max(1);
         let mut tree = v_flex().gap_0p5().p_1p5();
@@ -1203,8 +1480,9 @@ impl RepoView {
             }
             last_dir = dir.clone();
             let on = self.pulls.file.as_deref() == Some(f.path.as_str());
-            let seen = self.pulls.viewed.contains(&(number, f.path.clone()));
+            let seen = self.pr_viewed(number, &f.path);
             let notes = self.pulls.inline.iter().filter(|c| c.path == f.path).count();
+            let ai_notes = self.pulls.ai.notes.iter().filter(|n| n.on_line && n.finding.file == f.path).count();
             let (a, r) = f.stats();
             let share = (a + r) as f32 / biggest as f32;
             let path = f.path.clone();
@@ -1229,15 +1507,12 @@ impl RepoView {
                         hstack()
                             .gap_2()
                             .child(Checkbox::new(("pr-viewed", i)).checked(seen).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                                if *v {
-                                    this.pulls.viewed.insert((number, path2.clone()));
-                                } else {
-                                    this.pulls.viewed.remove(&(number, path2.clone()));
-                                }
+                                this.set_pr_viewed(number, &path2, *v);
                                 cx.notify();
                             })))
                             .child(ext_badge(&f.path, cx))
                             .child(div().flex_1().min_w_0().truncate().text_sm().when(seen, |d| d.text_color(theme.muted_foreground).line_through()).child(name))
+                            .when(ai_notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.magenta).child(icon(IconName::Sparkles).xsmall()).child(ai_notes.to_string())))
                             .when(notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.blue).child(icon(IconName::MessageSquare).xsmall()).child(notes.to_string())))
                             .child(div().text_xs().text_color(theme.green).child(format!("+{a}")))
                             .child(div().text_xs().text_color(theme.red).child(format!("−{r}"))),
@@ -1258,9 +1533,11 @@ impl RepoView {
         let current = self.pulls.file.as_ref().and_then(|f| self.pulls.diffs.iter().find(|d| &d.path == f)).cloned();
         let notes: Vec<ReviewComment> = current.as_ref().map(|d| self.pulls.inline.iter().filter(|c| c.path == d.path).cloned().collect()).unwrap_or_default();
         let next = self.next_unviewed(number);
+        let ai_panel = self.render_ai_panel(d, cx);
+        let ai_notes = current.as_ref().and_then(|f| self.render_ai_notes(&f.path, cx));
         let right = match current {
             Some(f) => {
-                let seen = self.pulls.viewed.contains(&(number, f.path.clone()));
+                let seen = self.pr_viewed(number, &f.path);
                 let (a, r) = f.stats();
                 let path = f.path.clone();
                 v_flex()
@@ -1279,13 +1556,11 @@ impl RepoView {
                             .child(spacer())
                             .child(div().text_xs().text_color(theme.muted_foreground).child(tr("pulls.click_line_hint")))
                             .child(Checkbox::new("pr-file-viewed").checked(seen).label(tr("pulls.viewed")).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                                if *v {
-                                    this.pulls.viewed.insert((number, path.clone()));
-                                    if let Some(n) = this.next_unviewed(number) {
-                                        this.pulls.file = Some(n);
-                                    }
-                                } else {
-                                    this.pulls.viewed.remove(&(number, path.clone()));
+                                this.set_pr_viewed(number, &path, *v);
+                                if *v
+                                    && let Some(n) = this.next_unviewed(number)
+                                {
+                                    this.pulls.file = Some(n);
                                 }
                                 cx.notify();
                             })))
@@ -1296,6 +1571,7 @@ impl RepoView {
                                 }
                             }))),
                     )
+                    .children(ai_notes)
                     .when(!notes.is_empty(), |el| {
                         el.child(
                             v_flex().id("pr-notes").max_h(px(220.)).overflow_y_scroll().gap_2().p_3().border_b_1().border_color(theme.border).children(notes.iter().enumerate().map(|(i, c)| {
@@ -1311,6 +1587,7 @@ impl RepoView {
                                     .child(
                                         v_flex()
                                             .flex_1()
+                                            .min_w_0()
                                             .gap_0p5()
                                             .child(hstack().gap_2().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(c.author.clone())).child(div().font_family(theme.mono_font_family.clone()).text_color(theme.link).child(c.line.map(|l| t!("pulls.line_n", n = l).to_string()).unwrap_or_default())))
                                             .children(markdown(("pr-note", i), &c.body).map(|b| div().text_sm().child(b))),
@@ -1336,6 +1613,7 @@ impl RepoView {
                     .border_r_1()
                     .border_color(theme.border)
                     .child(v_flex().gap_1p5().px_3().py_3().border_b_1().border_color(theme.border).child(hstack().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(t!("pulls.viewed_progress", n = viewed_n, total = total).to_string())).child(spacer()).child(diffstat(d.pr.additions, d.pr.deletions, cx))).child(progress))
+                    .child(ai_panel)
                     .child(div().id("pr-tree").flex_1().min_h_0().overflow_y_scroll().child(tree)),
             )
             .child(div().flex_1().min_w_0().h_full().child(right))
@@ -1348,7 +1626,11 @@ impl RepoView {
             self.load_pulls(cx);
         }
         if self.pulls.loading && !self.pulls.loaded {
-            return div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element();
+            return h_flex()
+                .size_full()
+                .child(div().flex_none().w(px(340.)).h_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(crate::skeleton::pr_list(5, cx)))
+                .child(div().flex_1().min_w_0().h_full().child(crate::skeleton::pr_detail(cx)))
+                .into_any_element();
         }
         if self.pulls.list.is_empty() {
             return v_flex()
@@ -1360,15 +1642,20 @@ impl RepoView {
                 .child(icon_tile(IconName::GitPullRequest, theme.magenta).size(px(44.)).rounded(px(12.)))
                 .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("pulls.empty_title")))
                 .child(div().max_w(px(460.)).text_sm().text_center().text_color(theme.muted_foreground).child(self.pulls.error.clone().unwrap_or_else(|| t!("pulls.empty_body").to_string())))
-                .child(Button::new("pulls-retry").small().ghost().icon(icon(IconName::RefreshCw)).label(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| {
-                    this.pulls.loaded = false;
-                    this.load_pulls(cx);
-                })))
+                .child(
+                    hstack()
+                        .gap_2()
+                        .when(self.pulls.error.is_none(), |d| d.child(framed(Button::new("pulls-new-empty"), Tone::Accent, cx).icon(icon(IconName::GitPullRequestCreate)).label(tr("new_pr.button_long")).on_click(cx.listener(|_, _, window, cx| crate::new_pr::open(cx.entity(), window, cx)))))
+                        .child(Button::new("pulls-retry").small().ghost().icon(icon(IconName::RefreshCw)).label(tr("toolbar.refresh")).on_click(cx.listener(|this, _, _, cx| {
+                            this.pulls.loaded = false;
+                            this.load_pulls(cx);
+                        }))),
+                )
                 .into_any_element();
         }
         let list = self.render_pr_list(cx);
         let right = match self.pulls.details.clone() {
-            None if self.pulls.selected.is_some() => div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element(),
+            None if self.pulls.selected.is_some() => crate::skeleton::pr_detail(cx).into_any_element(),
             None => empty_state(IconName::GitPullRequest, tr("pulls.pick_title"), tr("pulls.pick_body"), cx).into_any_element(),
             Some(d) => {
                 let r = self.readiness(&d, cx);
@@ -1383,10 +1670,16 @@ impl RepoView {
                 v_flex().size_full().child(hero).child(tabs).child(div().flex_1().min_h_0().child(body)).into_any_element()
             }
         };
-        h_flex()
-            .size_full()
-            .child(div().flex_none().w(px(340.)).h_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(list))
-            .child(div().flex_1().min_w_0().h_full().child(right))
+        use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+        let view = cx.entity();
+        h_resizable("pulls-split")
+            .child(resizable_panel().size(px(self.settings.appearance.list_width.clamp(260., 560.) + 40.)).size_range(px(280.)..px(600.)).child(div().size_full().bg(theme.sidebar).border_r_1().border_color(theme.border).child(list)))
+            .child(resizable_panel().child(div().size_full().child(right)))
+            .on_resize(move |state, _, cx| {
+                if let Some(w) = state.read(cx).sizes().first().copied() {
+                    view.update(cx, |v, cx| v.remember_panel(None, Some(f32::from(w) - 40.), cx));
+                }
+            })
             .into_any_element()
     }
 }

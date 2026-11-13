@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest something Cairn should do or do better.
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the situation and what gets in your way today.
+      placeholder: I review pull requests in five repositories and have to open each one to see what waits for me.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you imagine it working in Cairn.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do instead today?
+      description: Workarounds, other tools, or Git commands you use for this.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Cairn?
+      multiple: true
+      options:
+        - History / graph
+        - Changes / committing
+        - Branches, tags, stashes
+        - Pull requests
+        - Merge conflicts
+        - Rebase, absorb, stack
+        - Search, file history, line history
+        - AI features
+        - Settings
+        - Something new
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, mock-ups or links to how other tools do it.

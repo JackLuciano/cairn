@@ -17,6 +17,8 @@ impl RepoView {
         let name = b.name.clone();
         let remote = b.is_remote;
         let tint = if b.is_head { theme.primary } else if remote { theme.cyan } else { theme.muted_foreground };
+        let clash = self.clashes.get(&b.name).cloned();
+        let trunk = self.trunk.clone().unwrap_or_else(|| "main".into());
         h_flex()
             .id(SharedString::from(format!("branch-row-{}", b.full_ref)))
             .items_center()
@@ -39,9 +41,13 @@ impl RepoView {
                             .when(b.is_head, |d| d.child(count_chip(tr("branches.current"), theme.primary.opacity(0.18), theme.primary)))
                             .when(b.ahead > 0, |d| d.child(count_chip(format!("↑{}", b.ahead), theme.blue.opacity(0.16), theme.blue)))
                             .when(b.behind > 0, |d| d.child(count_chip(format!("↓{}", b.behind), theme.cyan.opacity(0.16), theme.cyan)))
-                            .when(b.upstream_gone, |d| d.child(count_chip(tr("branches.gone"), theme.red.opacity(0.16), theme.red))),
+                            .when(b.upstream_gone, |d| d.child(count_chip(tr("branches.gone"), theme.red.opacity(0.16), theme.red)))
+                            .when(!remote && clash.is_some(), |d| d.child(count_chip(t!("conflicts_early.with", base = trunk.clone()).to_string(), theme.red.opacity(0.16), theme.red))),
                     )
-                    .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} · {}", b.subject, relative_time(b.last_commit_time)))),
+                    .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} · {}", b.subject, relative_time(b.last_commit_time))))
+                    .when_some(clash.clone().filter(|_| !remote), |d, files| {
+                        d.child(hstack().gap_1().text_xs().text_color(theme.red).child(icon(IconName::TriangleAlert).xsmall()).child(div().truncate().child(t!("conflicts_early.files_short", files = files.join(", ")).to_string())))
+                    }),
             )
             .when_some(b.upstream.clone(), |d, up| {
                 d.child(
@@ -161,6 +167,10 @@ impl RepoView {
                 .items_start()
                 .child(page_heading(tr("page.branches"), t!("branches.subtitle", local = local.len(), remote = remote.len(), tags = tags.len()).to_string(), cx))
                 .child(spacer())
+                .child({
+                    let view = view.clone();
+                    framed(Button::new("branches-issue"), Tone::Plain, cx).mr_2().icon(icon(IconName::Ticket)).label(tr("issue_branch.button")).on_click(move |_, window, cx| crate::issue_branch::open(view.clone(), window, cx))
+                })
                 .child(
                     framed(Button::new("branches-new"), Tone::Accent, cx)
                         .icon(icon(IconName::GitBranchPlus))

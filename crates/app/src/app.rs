@@ -139,6 +139,25 @@ impl CairnApp {
                     crate::repo_settings::open(tab, window, cx);
                 }
             }
+            Ok("new_pr") => {
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                        let _ = cx.update(|window, cx| crate::new_pr::open(tab, window, cx));
+                    })
+                    .detach();
+                }
+            }
+            Ok("issue_branch") => {
+                if let Some(tab) = self.active_tab() {
+                    crate::issue_branch::open(tab, window, cx);
+                }
+            }
+            Ok("goto_file") => {
+                if let Some(tab) = self.active_tab() {
+                    crate::goto_file::open(tab, window, cx);
+                }
+            }
             Ok("workspace") => {
                 self.active = None;
                 self.open_category = self.library.categories.first().map(|c| Some(c.id));
@@ -210,6 +229,25 @@ impl CairnApp {
                     });
                     task.detach();
                     let _ = this;
+                })
+                .detach();
+                cx.subscribe(&view, |this, _, ev: &crate::repo_view::PanelWidthEvent, cx| {
+                    if let Some(w) = ev.details {
+                        this.settings.appearance.details_width = w;
+                    }
+                    if let Some(w) = ev.list {
+                        this.settings.appearance.list_width = w;
+                    }
+                    let s = this.settings.clone();
+                    for tab in &this.tabs {
+                        tab.update(cx, |v, _| {
+                            v.settings.appearance.details_width = s.appearance.details_width;
+                            v.settings.appearance.list_width = s.appearance.list_width;
+                        });
+                    }
+                    if let Err(e) = this.settings.save() {
+                        crate::repo_view::log_error(&format!("saving settings: {e}"));
+                    }
                 })
                 .detach();
                 cx.subscribe(&view, |this, _, ev: &crate::repo_view::HistoryScopeEvent, _| {
@@ -648,9 +686,10 @@ impl CairnApp {
             let theme = cx.theme().clone();
             let name = b.name.clone();
             let t = tab.clone();
+            let lane = tab.read(cx).branch_color(&b.name, cx);
             row(SharedString::from(format!("side-branch-{}", b.name)), indent, cx)
                 .when(b.is_head, |d| d.bg(theme.list_active))
-                .child(icon(IconName::GitBranch).xsmall().text_color(if b.is_head { theme.magenta } else { theme.muted_foreground }))
+                .child(icon(IconName::GitBranch).xsmall().text_color(lane.unwrap_or(if b.is_head { theme.magenta } else { theme.muted_foreground })))
                 .child(
                     div()
                         .flex_1()
@@ -662,6 +701,7 @@ impl CairnApp {
                         .text_color(if b.is_head { theme.foreground } else { theme.muted_foreground })
                         .child(label),
                 )
+                .when(tab.read(cx).clashes.contains_key(&b.name), |d| d.child(icon(IconName::TriangleAlert).xsmall().text_color(theme.red)))
                 .child(div().flex_none().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(branch_meta(b)))
                 .on_click(move |_, window, cx| {
                     let name = name.clone();
@@ -672,6 +712,9 @@ impl CairnApp {
         let mut col = v_flex().gap(px(10.)).pt_3().pb_2();
         let branches_open = is_open("sec:branches", true);
         let mut branch_list = v_flex().gap(px(1.)).child(header("sec:branches", tr("sidebar.branches"), branches.len(), branches_open, cx));
+        if branches_open && !tab.read(cx).loaded_once {
+            branch_list = branch_list.child(crate::skeleton::sidebar(5, cx));
+        }
         if branches_open {
             if let Some(cur) = branches.iter().find(|b| b.is_head) {
                 branch_list = branch_list.child(branch_row(cur, cur.name.clone(), false, cx));
@@ -1356,6 +1399,19 @@ impl Render for CairnApp {
             if repos.len() >= 2 && stale {
                 let settings = self.settings.clone();
                 let panel = cx.new(|cx| crate::workspace_view::WorkspacePanel::new(repos, settings, window, cx));
+                cx.subscribe_in(&panel, window, |this, _, ev: &crate::workspace_view::OpenPrEvent, window, cx| {
+                    let number = ev.1;
+                    this.open_repo(&ev.0, window, cx);
+                    if let Some(tab) = this.active_tab() {
+                        tab.update(cx, |v, cx| {
+                            v.page = crate::repo_view::Page::PullRequests;
+                            v.pulls.selected = Some(number);
+                            v.pulls.loaded = false;
+                            v.load_pulls(cx);
+                        });
+                    }
+                })
+                .detach();
                 self.workspace = Some((id, panel));
             }
         }
@@ -1383,6 +1439,11 @@ impl Render for CairnApp {
             .on_action(cx.listener(|this, _: &p::NewBranch, window, cx| {
                 if let Some(t) = this.active_tab() {
                     crate::dialogs::new_branch(t, None, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &p::GoToFile, window, cx| {
+                if let Some(t) = this.active_tab() {
+                    crate::goto_file::open(t, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &p::Refresh, window, cx| this.with_tab(window, cx, |v, _, cx| v.reload(cx))))

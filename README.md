@@ -68,7 +68,10 @@ your team in `.cairn/commit-message.md`.
 
 **History that stays readable.** History opens on the branch you are on, so twenty open feature
 branches don't turn the graph into a wall of lines. Switch to "All branches" when you want the
-whole picture; branches that grow from the same commit share a lane instead of fanning out.
+whole picture: every commit is labeled with the branch it was made on, each branch keeps one
+color from its line to its label, and merged branches get their name back from the merge
+message. Commits that are not on your branch fade out; click any branch in the legend to
+highlight it instead. Hover a commit for a quick card, and older commits load as you scroll.
 
 **Drag and drop.** Drag a branch label onto another branch to merge or rebase it, or drag commits
 onto a branch to cherry-pick them. Cairn always asks first and tells you if it needs to switch
@@ -84,6 +87,17 @@ branches.
   nothing points at any more and brings them back as a branch in one click.
 - **Stashes, properly.** Stash only some files, or only the blocks and lines you staged. Look
   inside a stash before applying it and restore single files from it.
+- **Go to file (Ctrl+P).** Type part of any file name to open its history, its line history or
+  the file itself.
+- **Conflicts before they happen.** Cairn checks quietly in the background whether your branches
+  and open pull requests would conflict with `main`, and names the files.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/goto-file.png" alt="Go to file"></td>
+<td width="50%"><img src="docs/screenshots/dark/issue-branch.png" alt="New branch from an issue"></td>
+</tr>
+</table>
 
 ### Pull requests, submodules and large files
 
@@ -91,8 +105,19 @@ branches.
 
 - **Review pull requests in Cairn.** A ring shows what each pull request still needs (reviews,
   checks, conflicts) and what to do next. Read the conversation, commits and checks, tick off
-  files as you review them, comment on a line, approve or request changes, check it out locally
-  and merge it. Uses the GitHub CLI.
+  files as you review them (Cairn remembers, and unticks a file when it changes again), comment
+  on a line, approve or request changes, check it out locally and merge it. Uses the GitHub CLI.
+- **Open pull requests from Cairn.** Pick the base branch, reviewers and labels, and let AI write
+  the title and description from your commits. Branches that were never pushed are published
+  for you.
+- **AI review.** One click and Claude reads the whole pull request and drafts review comments on
+  the exact lines. Untick what you don't want to say and post the rest as one review.
+- **Branches from issues.** Pick an open issue and get a branch named after it, linked to the
+  issue on GitHub.
+
+<img src="docs/screenshots/dark/ai-review.png" alt="AI review of a pull request" width="100%">
+
+<img src="docs/screenshots/dark/new-pr.png" alt="New pull request" width="100%">
 - **Submodules.** See which are missing or on a different commit, download and update them, add
   new ones and open them as their own tab.
 - **Git LFS.** Track file types, download LFS files, and lock and unlock files your team edits.
@@ -138,8 +163,9 @@ amending a lower branch and restacking just works. Submit the whole stack to Git
 <img src="docs/screenshots/dark/home.png" alt="Category workspace" width="100%">
 
 Categories work like folders for your repositories. Open one to fetch, pull or switch every
-repository together. When several repositories are on a branch with the same name, Cairn treats
-them as one **linked change** you commit and push in a single step.
+repository together, and see every pull request **waiting for your review** across them in one
+place. When several repositories are on a branch with the same name, Cairn treats them as one
+**linked change** you commit and push in a single step.
 
 ### Investigate
 
@@ -189,6 +215,17 @@ diff options, identity profiles, signing, AI commit message rules and more.</td>
 </tr>
 </table>
 
+<img src="docs/screenshots/dark/themes.png" alt="Theme gallery" width="100%">
+
+**Make it yours.** Six color themes (Graphite, Midnight, Nord, Solarized, Rosé and High
+contrast), each in dark and light, four accent colors, a glass window on Windows 11 and a
+compact toolbar. Drag the panel edges to resize them; Cairn remembers.
+
+**Fast by design.** Tabs load only when you open them, pages keep what they showed, staging and
+committing update the screen before git has even finished, huge diffs open with their first part
+right away, and skeleton placeholders show the shape of the page while it loads. One **Sync**
+button fetches, pulls and pushes whatever is needed, and the status bar shows where you stand.
+
 Cairn updates itself in the background (or when you press "Check now" in Settings → Updates) and
 shows what changed after each update:
 
@@ -216,6 +253,7 @@ The installer is not code-signed yet, so Windows SmartScreen may ask you to conf
 | Action | Keys |
 | --- | --- |
 | Command palette | <kbd>Ctrl</kbd> <kbd>K</kbd> or <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>P</kbd> |
+| Go to file | <kbd>Ctrl</kbd> <kbd>P</kbd> |
 | Settings | <kbd>Ctrl</kbd> <kbd>,</kbd> |
 | History, Changes, Branches | <kbd>Ctrl</kbd> <kbd>1</kbd> · <kbd>2</kbd> · <kbd>3</kbd> |
 | Commit staged changes | <kbd>Ctrl</kbd> <kbd>Enter</kbd> |
@@ -295,9 +333,11 @@ Settings live in `%APPDATA%\Cairn\settings.toml`, categories and open tabs in
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run clippy and the tests before opening a pull
-request, and add an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for anything users
-will notice. Releases are described in [RELEASING.md](RELEASING.md).
+Issues and pull requests are welcome. Use the bug report, feature request or translation form
+when you [open an issue](https://github.com/JackLuciano/cairn/issues/new/choose). Please run clippy
+and the tests before opening a pull request, and add an entry under `[Unreleased]` in
+[CHANGELOG.md](CHANGELOG.md) for anything users will notice. Releases are described in
+[RELEASING.md](RELEASING.md).
 
 ## License
 

@@ -121,8 +121,8 @@ impl RepoView {
 
     pub(crate) fn render_rebase(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        if self.rebase.loading {
-            return div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element();
+        if self.rebase.loading && self.rebase.items.is_empty() {
+            return crate::skeleton::list(7, cx).into_any_element();
         }
         if let Some(e) = self.rebase.error.clone() {
             return empty_state(IconName::GitPullRequestArrow, tr("rebase.title"), e, cx).into_any_element();

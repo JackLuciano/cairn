@@ -124,8 +124,8 @@ impl RepoView {
 
     pub(crate) fn render_absorb(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let left = if self.absorb.loading {
-            div().size_full().flex().items_center().justify_center().child(gpui_kit::component::spinner::Spinner::new()).into_any_element()
+        let left = if self.absorb.loading && self.absorb.plan.is_none() {
+            crate::skeleton::list(5, cx).into_any_element()
         } else if let Some(e) = self.absorb.error.clone() {
             empty_state(IconName::Combine, tr("absorb.title"), e, cx).into_any_element()
         } else {
