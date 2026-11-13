@@ -90,32 +90,39 @@ impl RepoView {
         }
         let view = cx.entity();
         let count = files.len();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let view = view.clone();
-            let files = files.clone();
-            alert
-                .confirm()
-                .title(crate::widgets::plural("changes.discard_files_title", count))
-                .description(tr("changes.discard_body"))
-                .ok_text(tr("changes.discard"))
-                .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    let tracked: Vec<String> = files.iter().filter(|f| !f.is_untracked()).map(|f| f.path.clone()).collect();
-                    let untracked: Vec<String> = files.iter().filter(|f| f.is_untracked()).map(|f| f.path.clone()).collect();
-                    view.update(cx, |this, cx| {
-                        this.run_op(
-                            tr("op.discard"),
-                            Some(t!("undo.discard").to_string()),
-                            move |git| {
-                                cairn_core::ops::discard_files(git, &tracked, &untracked).map(|_| String::new())
-                            },
-                            window,
-                            cx,
-                        );
-                    });
-                    true
-                })
-        });
+        let new_files = files.iter().filter(|f| f.is_untracked()).count();
+        let mut loses: Vec<String> = files.iter().take(5).map(|f| f.path.clone()).collect();
+        if count > 5 {
+            loses.push(t!("safe.and_more", n = count - 5).to_string());
+        }
+        let mut happens = Vec::new();
+        if count > new_files {
+            happens.push(crate::widgets::plural("safe.discard_happens", count - new_files));
+        }
+        if new_files > 0 {
+            happens.push(crate::widgets::plural("safe.discard_deletes", new_files));
+        }
+        let spec = crate::dialogs::SafeAction {
+            icon: IconName::Trash,
+            title: crate::widgets::plural("changes.discard_files_title", count),
+            happens,
+            loses,
+            recovery: crate::dialogs::Recovery::Never,
+            ok: tr("changes.discard"),
+            danger: true,
+        };
+        crate::dialogs::safe_action(
+            spec,
+            move |window, cx| {
+                let tracked: Vec<String> = files.iter().filter(|f| !f.is_untracked()).map(|f| f.path.clone()).collect();
+                let untracked: Vec<String> = files.iter().filter(|f| f.is_untracked()).map(|f| f.path.clone()).collect();
+                view.update(cx, |this, cx| {
+                    this.run_op(tr("op.discard"), Some(t!("undo.discard").to_string()), move |git| cairn_core::ops::discard_files(git, &tracked, &untracked).map(|_| String::new()), window, cx);
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     /// Adds a pattern to `.gitignore` and tells the user what happened.

@@ -406,6 +406,25 @@ pub struct StashFile {
     pub untracked: bool,
 }
 
+/// How far every local branch is ahead of and behind a base branch, worked out in one git call.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `base` - the branch to measure against, such as `main`
+///
+/// # Returns
+/// Branch name to `(ahead, behind)`; empty when the base does not exist or git is too old.
+pub fn ahead_behind_all(git: &Git, base: &str) -> std::collections::HashMap<String, (u32, u32)> {
+    let out = git.run(["for-each-ref", &format!("--format=%(refname:short)%09%(ahead-behind:{base})"), "refs/heads"]).unwrap_or_default();
+    out.lines()
+        .filter_map(|l| {
+            let (name, counts) = l.split_once('\t')?;
+            let (a, b) = counts.trim().split_once(' ')?;
+            Some((name.to_string(), (a.parse().ok()?, b.parse().ok()?)))
+        })
+        .collect()
+}
+
 /// Lists the files a stash holds, including untracked files saved with it.
 ///
 /// # Arguments

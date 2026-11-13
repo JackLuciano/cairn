@@ -358,8 +358,13 @@ pub(crate) fn toggle_pill(id: impl Into<ElementId>, label: impl Into<SharedStrin
         .cursor_pointer()
         .when(on, |d| d.bg(t.primary.opacity(0.14)).text_color(t.primary).font_weight(FontWeight::MEDIUM))
         .when(!on, |d| d.text_color(t.muted_foreground).hover(move |s| s.bg(hover)))
+        .active(|s| s.opacity(PRESSED))
         .child(label.into())
 }
+
+/// How clickable surfaces look while the mouse button is held on them: slightly dimmed, so
+/// every press visibly lands.
+pub(crate) const PRESSED: f32 = 0.78;
 
 /// The design's uppercase, letter-spaced section heading with an optional count on the right.
 ///

@@ -49,10 +49,25 @@ everyday flow calm, and makes the powerful things safe:
 </tr>
 <tr>
 <td><b>Line-by-line staging.</b> Click lines in a diff to stage, unstage or discard exactly what
-you mean. Word-level highlights show what really changed, image diffs come in side-by-side,
-swipe and onion-skin modes.</td>
-<td><b>Branches, tags, stashes and worktrees</b> in one tidy page. Fetch, pull, push, safe force
-push, cherry-pick, revert, merge and reset are a right-click away.</td>
+you mean. Switch between unified and split view, jump from change to change, and see on the
+change map where a file changed. Image diffs come in side-by-side, swipe and onion-skin modes.</td>
+<td><b>Branches at a glance.</b> Every branch is a card with its last commit, pull request, how
+far ahead or behind <code>main</code> it is and whether it would conflict. Filter to the active
+ones, or to the merged ones you can clean up.</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/branch-picker.png" alt="Branch picker"></td>
+<td width="50%"><img src="docs/screenshots/dark/stashes.png" alt="Stash shelf"></td>
+</tr>
+<tr>
+<td><b>Find any branch in a second.</b> Type a few letters to filter hundreds of branches. Recent
+ones come first, and each shows its last commit, pull request and what is waiting to pull.
+Switch, compare, highlight it in History or open a pull request from the same window.</td>
+<td><b>Stashes you can recognise.</b> Each stash shows the files inside, the branch it came from
+and how old it is. Apply, pop or drop it from the card.</td>
 </tr>
 </table>
 
@@ -115,9 +130,13 @@ branches.
 - **Branches from issues.** Pick an open issue and get a branch named after it, linked to the
   issue on GitHub.
 
+- **One commit at a time.** Click any commit of a pull request to see only what it changed, and
+  step through them in order.
+
 <img src="docs/screenshots/dark/ai-review.png" alt="AI review of a pull request" width="100%">
 
 <img src="docs/screenshots/dark/new-pr.png" alt="New pull request" width="100%">
+
 - **Submodules.** See which are missing or on a different commit, download and update them, add
   new ones and open them as their own tab.
 - **Git LFS.** Track file types, download LFS files, and lock and unlock files your team edits.
@@ -162,6 +181,10 @@ amending a lower branch and restacking just works. Submit the whole stack to Git
 
 <img src="docs/screenshots/dark/home.png" alt="Category workspace" width="100%">
 
+**Home shows where you stand.** What needs you right now, every pull request waiting for your
+review across all repositories, and activity charts: a contribution calendar, commits per week
+and who contributed how much.
+
 Categories work like folders for your repositories. Open one to fetch, pull or switch every
 repository together, and see every pull request **waiting for your review** across them in one
 place. When several repositories are on a branch with the same name, Cairn treats them as one
@@ -197,6 +220,9 @@ commit message or a pull request description, or get a suggestion for a tricky c
 ### Safety net
 
 - **Undo history** for every operation, with uncommitted work stashed safely before going back.
+- **No surprises.** Reset, force push, discard and delete say what will happen, what you would
+  lose and whether you can get it back, before you confirm.
+- **Live progress.** Push, pull and fetch show how far along they are in a corner toast.
 - **Checks before commit and push** from a `.cairn/checks.toml` file in your repository.
 - **Secret scan** that stops API keys, tokens and private keys from leaving your computer.
 - **Protected main**: Cairn asks before rewriting history on `main` or `master`.
@@ -297,7 +323,8 @@ Settings → General → Language.
 
 ## Build from source
 
-You need a recent stable [Rust](https://rustup.rs) toolchain and Git.
+You need [Rust](https://rustup.rs) 1.100 or newer and Git. `rust-toolchain.toml` makes rustup
+install the right version for you.
 
 ```bash
 cargo run -p cairn

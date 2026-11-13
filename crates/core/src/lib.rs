@@ -10,6 +10,7 @@ pub mod error;
 pub mod git;
 pub mod graph;
 pub mod ignore;
+pub mod insights;
 pub mod lfs;
 pub mod library;
 pub mod log;

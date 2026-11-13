@@ -18,6 +18,7 @@ use crate::widgets::{Tone, avatar, framed, framed_if, hstack, icon, spacer, togg
 pub(crate) struct NewPrPanel {
     repo: Entity<RepoView>,
     head: String,
+    head_rev: String,
     base: String,
     bases: Vec<String>,
     title: Entity<InputState>,
@@ -41,7 +42,7 @@ impl NewPrPanel {
             let v = self.repo.read(cx);
             (v.git(), v.pulls.mock)
         };
-        let head = self.head.clone();
+        let head = self.head_rev.clone();
         let base = self.base.clone();
         self.loading = true;
         cx.spawn(async move |this, cx| {
@@ -74,7 +75,7 @@ impl NewPrPanel {
             let v = self.repo.read(cx);
             (v.git(), v.settings.clone())
         };
-        let range = format!("{}...{}", remote_base(&git, &self.base), self.head);
+        let range = format!("{}...{}", remote_base(&git, &self.base), self.head_rev);
         self.writing = true;
         self.error = None;
         cx.notify();
@@ -286,13 +287,22 @@ impl Render for NewPrPanel {
 /// # Arguments
 /// * `repo` - the repository view, possibly mid-update
 pub(crate) fn open(repo: Entity<RepoView>, window: &mut Window, cx: &mut App) {
-    window.defer(cx, move |window, cx| open_now(repo, window, cx));
+    window.defer(cx, move |window, cx| open_now(repo, None, window, cx));
 }
 
-fn open_now(repo: Entity<RepoView>, window: &mut Window, cx: &mut App) {
+/// Opens the "New pull request" dialog for any branch, such as one picked in History.
+///
+/// # Arguments
+/// * `repo` - the repository view, possibly mid-update
+/// * `head` - the branch the pull request comes from
+pub(crate) fn open_for(repo: Entity<RepoView>, head: String, window: &mut Window, cx: &mut App) {
+    window.defer(cx, move |window, cx| open_now(repo, Some(head), window, cx));
+}
+
+fn open_now(repo: Entity<RepoView>, chosen: Option<String>, window: &mut Window, cx: &mut App) {
     let (head, base, bases, draft, mock) = {
         let v = repo.read(cx);
-        let head = v.current_branch().map(str::to_string);
+        let head = chosen.or_else(|| v.current_branch().map(str::to_string));
         let trunk = cairn_core::conflicts::default_trunk(&v.git()).map(|t| t.split_once('/').map(|(_, b)| b.to_string()).unwrap_or(t)).unwrap_or_else(|| "main".into());
         let mut bases: Vec<String> = v.branches.iter().filter(|b| !b.is_remote).map(|b| b.name.clone()).collect();
         for b in v.branches.iter().filter(|b| b.is_remote) {
@@ -305,9 +315,14 @@ fn open_now(repo: Entity<RepoView>, window: &mut Window, cx: &mut App) {
         bases.sort_by_key(|b| (b != &trunk, b.to_lowercase()));
         (head, trunk, bases, v.settings.remotes.draft_prs, v.pulls.mock)
     };
-    let Some(head) = head else {
+    let Some(head_rev) = head else {
         window.push_notification(Notification::info(tr("new_pr.detached")), cx);
         return;
+    };
+    let head = {
+        let v = repo.read(cx);
+        let local = v.branches.iter().any(|b| !b.is_remote && b.name == head_rev);
+        v.remotes.iter().find_map(|r| head_rev.strip_prefix(&format!("{}/", r.name)).map(str::to_string)).filter(|_| !local).unwrap_or_else(|| head_rev.clone())
     };
     if !mock && repo.read(cx).remotes.is_empty() {
         window.push_notification(Notification::info(tr("stack.no_remote")), cx);
@@ -320,6 +335,7 @@ fn open_now(repo: Entity<RepoView>, window: &mut Window, cx: &mut App) {
         let mut p = NewPrPanel {
             repo,
             head,
+            head_rev,
             base,
             bases,
             title: title.clone(),

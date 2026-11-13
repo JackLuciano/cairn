@@ -73,6 +73,28 @@ fn history_names_the_branch_of_every_commit() {
 }
 
 #[test]
+fn fetch_reports_progress_while_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin_dir = dir.path().join("origin");
+    let origin = repo(&origin_dir);
+    write(&origin_dir, "a.txt", "1\n");
+    commit(&origin, "base");
+    let clone_dir = dir.path().join("clone");
+    Git::new(dir.path()).run(["clone", "-q", origin_dir.to_str().unwrap(), clone_dir.to_str().unwrap()]).unwrap();
+    for i in 0..40 {
+        write(&origin_dir, &format!("f{i}.txt"), &"line\n".repeat(200 + i));
+        commit(&origin, &format!("change {i}"));
+    }
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, f32)>::new()));
+    let sink = seen.clone();
+    let git = Git::new(&clone_dir).with_progress(move |phase, done| sink.lock().unwrap().push((phase.to_string(), done)));
+    git.run(["fetch", "origin"]).unwrap();
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "git reported no progress");
+    assert!(seen.iter().any(|(_, d)| (*d - 1.).abs() < f32::EPSILON), "a phase reached 100%: {seen:?}");
+}
+
+#[test]
 fn viewed_files_reset_when_the_file_changes_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("viewed.json");

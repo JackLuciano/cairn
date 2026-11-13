@@ -53,6 +53,10 @@ pub(crate) struct PullsState {
     pub mock: bool,
     pub sending: bool,
     pub reply: Entity<TextareaState>,
+    pub commit: Option<String>,
+    pub commit_loading: bool,
+    pub commit_error: Option<String>,
+    pub full_diffs: Option<Vec<FileDiff>>,
     _sub: Subscription,
 }
 
@@ -87,6 +91,10 @@ impl PullsState {
             mock,
             sending: false,
             reply,
+            commit: None,
+            commit_loading: false,
+            commit_error: None,
+            full_diffs: None,
             _sub: sub,
         }
     }
@@ -426,12 +434,74 @@ impl RepoView {
         self.pulls.fingerprints = self.pulls.diffs.iter().map(|d| (d.path.clone(), cairn_core::viewed::fingerprint(d))).collect();
     }
 
+    /// Shows Files changed narrowed to one commit of the open pull request.
+    ///
+    /// # Arguments
+    /// * `oid` - the commit's hash
+    pub(crate) fn open_pr_commit(&mut self, oid: String, cx: &mut Context<Self>) {
+        self.pulls.tab = PrTab::Files;
+        if self.pulls.commit.as_deref() == Some(oid.as_str()) {
+            cx.notify();
+            return;
+        }
+        if let Some(full) = self.pulls.full_diffs.take() {
+            self.pulls.diffs = full;
+        }
+        self.pulls.commit = Some(oid.clone());
+        self.pulls.commit_loading = true;
+        self.pulls.commit_error = None;
+        let git = self.git();
+        let mock = self.pulls.mock.then(|| self.pulls.diffs.clone());
+        let wanted = oid.clone();
+        self.spawn_bg(
+            move || match mock {
+                Some(all) => Ok(all.into_iter().enumerate().filter(|(i, _)| (i + oid.len()).is_multiple_of(2)).map(|(_, d)| d).collect()),
+                None => stack::pr_commit_diff(&git, &oid),
+            },
+            move |this, diffs, cx| {
+                if this.pulls.commit.as_deref() != Some(wanted.as_str()) {
+                    return;
+                }
+                this.pulls.commit_loading = false;
+                match diffs {
+                    Ok(diffs) => {
+                        let full = std::mem::replace(&mut this.pulls.diffs, diffs);
+                        this.pulls.full_diffs = Some(full);
+                        this.pulls.file = this.pulls.diffs.first().map(|d| d.path.clone());
+                    }
+                    Err(e) => this.pulls.commit_error = Some(crate::repo_view::friendly_error(&e)),
+                }
+                cx.notify();
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Goes back from one commit's changes to the whole pull request.
+    pub(crate) fn close_pr_commit(&mut self, cx: &mut Context<Self>) {
+        if let Some(full) = self.pulls.full_diffs.take() {
+            self.pulls.diffs = full;
+        }
+        self.pulls.commit = None;
+        self.pulls.commit_loading = false;
+        self.pulls.commit_error = None;
+        if !self.pulls.file.as_ref().is_some_and(|f| self.pulls.diffs.iter().any(|d| &d.path == f)) {
+            self.pulls.file = self.pulls.diffs.first().map(|d| d.path.clone());
+        }
+        cx.notify();
+    }
+
     pub(crate) fn select_pull(&mut self, number: u64, cx: &mut Context<Self>) {
         if self.pulls.selected != Some(number) {
             self.pulls.ai = PrAiReview::default();
         }
         self.pulls.selected = Some(number);
         self.pulls.details = None;
+        self.pulls.commit = None;
+        self.pulls.commit_loading = false;
+        self.pulls.commit_error = None;
+        self.pulls.full_diffs = None;
         self.pulls.diffs.clear();
         self.pulls.inline.clear();
         self.pulls.file = None;
@@ -450,17 +520,21 @@ impl RepoView {
         let git = self.git();
         self.spawn_bg(
             move || (stack::pr_details(&git, number), stack::pr_diff(&git, number).unwrap_or_default(), stack::review_comments(&git, number).unwrap_or_default()),
-            move |this, (details, diffs, inline), _| {
+            move |this, (details, diffs, inline), cx| {
                 if this.pulls.selected != Some(number) {
                     return;
                 }
                 match details {
                     Ok(d) => {
+                        let debug_commit = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_PR_COMMIT").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| d.commits.get(i)).map(|c| c.oid.clone()) } else { None };
                         this.pulls.details = Some(d);
                         this.pulls.file = diffs.first().map(|d| d.path.clone());
                         this.pulls.diffs = diffs;
                         this.pulls.inline = inline;
                         this.refresh_fingerprints();
+                        if let Some(oid) = debug_commit {
+                            this.open_pr_commit(oid, cx);
+                        }
                     }
                     Err(e) => this.pulls.error = Some(crate::repo_view::friendly_error(&e)),
                 }
@@ -1133,15 +1207,35 @@ impl RepoView {
                 }
                 Item::Commits(list) => {
                     let who = list.first().map(|c| c.author.clone()).unwrap_or_default();
+                    let mut rows = v_flex().w_full().max_w(px(620.)).py_1().rounded(px(12.)).border_1().border_color(theme.border).bg(theme.sidebar);
+                    for c in &list {
+                        let oid = c.oid.clone();
+                        let k = SharedString::from(format!("pr-tl-commit-{}", c.oid));
+                        rows = rows.child(
+                            hstack()
+                                .id(k)
+                                .group("pr-tl-commit")
+                                .gap_2p5()
+                                .mx_1()
+                                .px_2p5()
+                                .h(px(30.))
+                                .rounded(px(8.))
+                                .cursor_pointer()
+                                .text_xs()
+                                .hover(|s| s.bg(theme.list_hover))
+                                .child(div().flex_none().size(px(7.)).rounded_full().border_1().border_color(theme.primary).bg(theme.background))
+                                .child(div().flex_none().px_1p5().rounded(px(5.)).bg(theme.muted).font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(c.oid.chars().take(7).collect::<String>()))
+                                .child(div().flex_1().min_w_0().truncate().text_sm().text_color(theme.foreground).child(c.headline.clone()))
+                                .child(div().flex_none().invisible().group_hover("pr-tl-commit", |s| s.visible()).text_color(theme.primary).child(hstack().gap_1().child(tr("pulls.commit_view")).child(icon(IconName::ChevronRight).xsmall())))
+                                .on_click(cx.listener(move |this, _, _, cx| this.open_pr_commit(oid.clone(), cx))),
+                        );
+                    }
                     chat = chat.child(
                         v_flex()
                             .items_center()
-                            .gap_1()
+                            .gap_2()
                             .child(self.event_pill(IconName::GitCommitHorizontal, theme.muted_foreground, crate::widgets::plural_with("pulls.pushed_commits", list.len(), &who), cx))
-                            .children(list.iter().take(4).map(|c| {
-                                hstack().gap_2().text_xs().text_color(theme.muted_foreground).child(div().font_family(theme.mono_font_family.clone()).child(c.oid.chars().take(7).collect::<String>())).child(div().max_w(px(420.)).truncate().child(c.headline.clone()))
-                            }))
-                            .when(list.len() > 4, |d| d.child(div().text_xs().text_color(theme.muted_foreground).child(format!("+{}", list.len() - 4)))),
+                            .child(rows),
                     );
                 }
                 Item::Inline(c, i) => {
@@ -1248,22 +1342,32 @@ impl RepoView {
             }
             let oid = c.oid.clone();
             let local = self.commits.iter().any(|x| x.id.starts_with(&c.oid));
+            let open = oid.clone();
             let row = hstack()
                 .id(("pr-commit", i))
+                .group("pr-commit-row")
                 .gap_3()
                 .px_4()
                 .py(px(10.))
                 .border_t_1()
                 .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.list_hover))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_pr_commit(open.clone(), cx)))
                 .child(avatar(&c.author, px(26.), cx))
                 .child(v_flex().flex_1().min_w_0().child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(c.headline.clone())).child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} · {}", c.author, relative_time(ts)))))
+                .child(div().flex_none().invisible().group_hover("pr-commit-row", |s| s.visible()).text_xs().text_color(theme.primary).child(hstack().gap_1().child(tr("pulls.commit_view")).child(icon(IconName::ChevronRight).xsmall())))
                 .child(div().px_2().py_0p5().rounded(px(6.)).border_1().border_color(theme.border).text_xs().font_family(theme.mono_font_family.clone()).child(c.oid.chars().take(7).collect::<String>()))
                 .child(Button::new(("pr-commit-copy", i)).xsmall().ghost().icon(icon(IconName::Copy)).tooltip(tr("history.copy_hash")).on_click({
                     let oid = oid.clone();
-                    move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(oid.clone()))
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.write_to_clipboard(ClipboardItem::new_string(oid.clone()))
+                    }
                 }))
                 .when(local, |d| {
                     d.child(Button::new(("pr-commit-open", i)).xsmall().ghost().icon(icon(IconName::ExternalLink)).tooltip(tr("file_history.show_commit")).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
                         if let Some(full) = this.commits.iter().find(|x| x.id.starts_with(&oid)).map(|x| x.id.clone()) {
                             this.page = crate::repo_view::Page::History;
                             this.select_commit(full, cx);
@@ -1459,10 +1563,68 @@ impl RepoView {
         Some(col.into_any_element())
     }
 
+    /// The bar shown above Files changed while it is narrowed to one commit: which commit, how far
+    /// along the pull request it is, and buttons to step through commits or go back to all changes.
+    ///
+    /// # Arguments
+    /// * `d` - the pull request
+    /// * `oid` - the commit being shown
+    ///
+    /// # Returns
+    /// The bar.
+    fn render_commit_banner(&self, d: &PrDetails, oid: &str, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let pos = d.commits.iter().position(|c| c.oid == oid);
+        let commit = pos.map(|i| &d.commits[i]);
+        let prev = pos.and_then(|i| i.checked_sub(1)).map(|i| d.commits[i].oid.clone());
+        let next = pos.and_then(|i| d.commits.get(i + 1)).map(|c| c.oid.clone());
+        let (added, removed) = if self.pulls.full_diffs.is_some() { self.pulls.diffs.iter().fold((0, 0), |(a, r), f| (a + f.stats().0, r + f.stats().1)) } else { (0, 0) };
+        let step = |id: &'static str, ic: IconName, tip: SharedString, target: Option<String>, cx: &mut Context<Self>| {
+            framed_if(Button::new(id), Tone::Plain, target.is_some(), cx).h(px(28.)).icon(icon(ic)).tooltip(tip).on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(t) = target.clone() {
+                    this.open_pr_commit(t, cx);
+                }
+            }))
+        };
+        hstack()
+            .gap_3()
+            .px_4()
+            .py_2p5()
+            .border_t_1()
+            .border_b_1()
+            .border_color(theme.primary.opacity(0.35))
+            .bg(linear_gradient(90., linear_color_stop(theme.primary.opacity(0.16), 0.), linear_color_stop(theme.primary.opacity(0.02), 1.)))
+            .child(div().flex_none().size(px(32.)).rounded_full().flex().items_center().justify_center().bg(theme.primary.opacity(0.18)).border_1().border_color(theme.primary.opacity(0.5)).child(icon(IconName::GitCommitHorizontal).small().text_color(theme.primary)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        hstack()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(pos.map(|i| t!("pulls.commit_n_of", n = i + 1, total = d.commits.len()).to_string()).unwrap_or_default())
+                            .when_some(commit, |h, c| h.child(div().child("·")).child(c.author.clone()).child(div().child("·")).child(relative_time(iso_time(&c.date))))
+                            .when(self.pulls.full_diffs.is_some(), |h| h.child(div().child("·")).child(crate::widgets::plural("pulls.commit_files", self.pulls.diffs.len())).child(diffstat(added, removed, cx))),
+                    )
+                    .child(div().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(commit.map(|c| c.headline.clone()).unwrap_or_else(|| oid.to_string()))),
+            )
+            .when(self.pulls.commit_loading, |h| h.child(framed(Button::new("pr-commit-loading"), Tone::Plain, cx).h(px(28.)).loading(true).label(tr("pulls.commit_loading"))))
+            .when_some(self.pulls.commit_error.clone(), |h, e| h.child(div().max_w(px(260.)).truncate().text_xs().text_color(theme.red).child(e)))
+            .child(div().flex_none().px_2().py_0p5().rounded(px(6.)).border_1().border_color(theme.border).bg(theme.background).text_xs().font_family(theme.mono_font_family.clone()).child(oid.chars().take(7).collect::<String>()))
+            .child(step("pr-commit-prev", IconName::ChevronLeft, tr("pulls.commit_prev"), prev, cx))
+            .child(step("pr-commit-next", IconName::ChevronRight, tr("pulls.commit_next"), next, cx))
+            .child(framed(Button::new("pr-commit-all"), Tone::Accent, cx).h(px(28.)).icon(icon(IconName::Files)).label(tr("pulls.commit_all")).on_click(cx.listener(|this, _, _, cx| this.close_pr_commit(cx))))
+    }
+
     fn render_pr_files(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.pulls.diffs.is_empty() {
-            return empty_state(IconName::FileDiff, tr("pulls.no_files_title"), tr("pulls.no_files_body"), cx).into_any_element();
+        let in_commit = self.pulls.commit.is_some();
+        let banner = self.pulls.commit.clone().map(|oid| self.render_commit_banner(d, &oid, cx));
+        if self.pulls.diffs.is_empty() || (in_commit && self.pulls.full_diffs.is_none()) {
+            let body = if self.pulls.commit_loading { crate::skeleton::diff(cx).into_any_element() } else { empty_state(IconName::FileDiff, tr("pulls.no_files_title"), tr("pulls.no_files_body"), cx).into_any_element() };
+            return v_flex().size_full().children(banner).child(div().flex_1().min_h_0().child(body)).into_any_element();
         }
         let number = d.pr.number;
         let viewed_n = self.pulls.diffs.iter().filter(|f| self.pr_viewed(number, &f.path)).count();
@@ -1506,10 +1668,12 @@ impl RepoView {
                     .child(
                         hstack()
                             .gap_2()
-                            .child(Checkbox::new(("pr-viewed", i)).checked(seen).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                                this.set_pr_viewed(number, &path2, *v);
-                                cx.notify();
-                            })))
+                            .when(!in_commit, |h| {
+                                h.child(Checkbox::new(("pr-viewed", i)).checked(seen).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                    this.set_pr_viewed(number, &path2, *v);
+                                    cx.notify();
+                                })))
+                            })
                             .child(ext_badge(&f.path, cx))
                             .child(div().flex_1().min_w_0().truncate().text_sm().when(seen, |d| d.text_color(theme.muted_foreground).line_through()).child(name))
                             .when(ai_notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.magenta).child(icon(IconName::Sparkles).xsmall()).child(ai_notes.to_string())))
@@ -1554,22 +1718,24 @@ impl RepoView {
                             .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).font_family(theme.mono_font_family.clone()).child(f.path.clone()))
                             .child(diffstat(a, r, cx))
                             .child(spacer())
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("pulls.click_line_hint")))
-                            .child(Checkbox::new("pr-file-viewed").checked(seen).label(tr("pulls.viewed")).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                                this.set_pr_viewed(number, &path, *v);
-                                if *v
-                                    && let Some(n) = this.next_unviewed(number)
-                                {
-                                    this.pulls.file = Some(n);
-                                }
-                                cx.notify();
-                            })))
-                            .child(framed_if(Button::new("pr-next-file"), Tone::Plain, next.is_some(), cx).h(px(28.)).label(tr("pulls.next_file")).icon(icon(IconName::ChevronRight)).on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(n) = this.next_unviewed(number) {
-                                    this.pulls.file = Some(n);
-                                    cx.notify();
-                                }
-                            }))),
+                            .when(!in_commit, |h| {
+                                h.child(div().text_xs().text_color(theme.muted_foreground).child(tr("pulls.click_line_hint")))
+                                    .child(Checkbox::new("pr-file-viewed").checked(seen).label(tr("pulls.viewed")).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                        this.set_pr_viewed(number, &path, *v);
+                                        if *v
+                                            && let Some(n) = this.next_unviewed(number)
+                                        {
+                                            this.pulls.file = Some(n);
+                                        }
+                                        cx.notify();
+                                    })))
+                                    .child(framed_if(Button::new("pr-next-file"), Tone::Plain, next.is_some(), cx).h(px(28.)).label(tr("pulls.next_file")).icon(icon(IconName::ChevronRight)).on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(n) = this.next_unviewed(number) {
+                                            this.pulls.file = Some(n);
+                                            cx.notify();
+                                        }
+                                    })))
+                            }),
                     )
                     .children(ai_notes)
                     .when(!notes.is_empty(), |el| {
@@ -1600,10 +1766,11 @@ impl RepoView {
             }
             None => empty_state(IconName::FileDiff, tr("changes.pick_title"), tr("compare.pick_file"), cx).into_any_element(),
         };
-        h_flex()
-            .size_full()
-            .border_t_1()
-            .border_color(theme.border)
+        let body = h_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .when(banner.is_none(), |d| d.border_t_1().border_color(theme.border))
             .child(
                 v_flex()
                     .flex_none()
@@ -1612,12 +1779,14 @@ impl RepoView {
                     .bg(theme.sidebar)
                     .border_r_1()
                     .border_color(theme.border)
-                    .child(v_flex().gap_1p5().px_3().py_3().border_b_1().border_color(theme.border).child(hstack().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(t!("pulls.viewed_progress", n = viewed_n, total = total).to_string())).child(spacer()).child(diffstat(d.pr.additions, d.pr.deletions, cx))).child(progress))
-                    .child(ai_panel)
+                    .when(!in_commit, |el| {
+                        el.child(v_flex().gap_1p5().px_3().py_3().border_b_1().border_color(theme.border).child(hstack().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(t!("pulls.viewed_progress", n = viewed_n, total = total).to_string())).child(spacer()).child(diffstat(d.pr.additions, d.pr.deletions, cx))).child(progress))
+                            .child(ai_panel)
+                    })
                     .child(div().id("pr-tree").flex_1().min_h_0().overflow_y_scroll().child(tree)),
             )
-            .child(div().flex_1().min_w_0().h_full().child(right))
-            .into_any_element()
+            .child(div().flex_1().min_w_0().h_full().child(right));
+        v_flex().size_full().children(banner).child(body).into_any_element()
     }
 
     pub(crate) fn render_pulls(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

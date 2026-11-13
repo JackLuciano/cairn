@@ -378,6 +378,25 @@ pub fn pr_diff(git: &Git, number: u64) -> Result<Vec<crate::diff::FileDiff>> {
     Ok(crate::diff::parse_diff(&out))
 }
 
+/// Loads the changes of one commit of a pull request against its first parent. Uses the local
+/// repository when it has the commit, and GitHub otherwise, so commits that were never fetched
+/// still open.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `sha` - the commit's hash
+///
+/// # Returns
+/// One diff per changed file.
+pub fn pr_commit_diff(git: &Git, sha: &str) -> Result<Vec<crate::diff::FileDiff>> {
+    if git.succeeds(["cat-file", "-e", &format!("{sha}^{{commit}}")]) {
+        let out = git.run(["show", "--format=", "-M", "--no-ext-diff", "--diff-merges=first-parent", sha])?;
+        return Ok(crate::diff::parse_diff(&out));
+    }
+    let out = gh(git.dir(), &["api", "-H", "Accept: application/vnd.github.diff", &format!("repos/{{owner}}/{{repo}}/commits/{sha}")])?;
+    Ok(crate::diff::parse_diff(&out))
+}
+
 /// Checks out a pull request's branch locally.
 ///
 /// # Arguments
@@ -691,9 +710,10 @@ pub struct NewPr {
 /// The new pull request's number and URL.
 pub fn open_pr(git: &Git, remote: &str, pr: &NewPr) -> Result<(u64, String)> {
     let upstream = format!("{}@{{upstream}}", pr.head);
-    if !git.succeeds(["rev-parse", "--verify", "-q", &upstream]) {
+    let local = git.succeeds(["rev-parse", "--verify", "-q", &format!("refs/heads/{}", pr.head)]);
+    if local && !git.succeeds(["rev-parse", "--verify", "-q", &upstream]) {
         git.run(["push", "-u", remote, &format!("refs/heads/{0}:refs/heads/{0}", pr.head)])?;
-    } else if git.run(["rev-list", "--count", &format!("{upstream}..{}", pr.head)]).map(|n| n.trim() != "0").unwrap_or(false) {
+    } else if local && git.run(["rev-list", "--count", &format!("{upstream}..{}", pr.head)]).map(|n| n.trim() != "0").unwrap_or(false) {
         git.run(["push", remote, &format!("refs/heads/{0}:refs/heads/{0}", pr.head)])?;
     }
     let reviewers = pr.reviewers.join(",");

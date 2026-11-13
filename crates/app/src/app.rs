@@ -27,6 +27,7 @@ pub(crate) struct CairnApp {
     workspace: Option<(Uuid, Entity<crate::workspace_view::WorkspacePanel>)>,
     side_toggled: std::collections::HashSet<String>,
     focus: FocusHandle,
+    pub(crate) home: crate::home::HomeData,
 }
 
 fn read_branch(path: &Path) -> Option<String> {
@@ -55,6 +56,7 @@ impl CairnApp {
             workspace: None,
             side_toggled: if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SIDE").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default() } else { Default::default() },
             focus: cx.focus_handle(),
+            home: Default::default(),
         };
         cairn_core::git::set_command_logging(app.settings.advanced.log_git_commands);
         let weak = cx.entity().downgrade();
@@ -115,6 +117,17 @@ impl CairnApp {
         if let Ok(path) = std::env::var("CAIRN_DEBUG_OPEN") {
             self.open_repo(Path::new(&path), window, cx);
         }
+        if std::env::var("CAIRN_DEBUG_HOME").is_ok() {
+            self.go_home(None, cx);
+        }
+        if let Ok(done) = std::env::var("CAIRN_DEBUG_LIVE")
+            && let Some(tab) = self.active_tab()
+        {
+            tab.update(cx, |v, cx| {
+                v.live_op = Some(crate::live_op::LiveOp { label: tr("op.push"), phase: "Writing objects".into(), done: done.parse().unwrap_or(0.62), finished: None });
+                cx.notify();
+            });
+        }
         if let Ok(page) = std::env::var("CAIRN_DEBUG_PAGE")
             && let Some(tab) = self.active.and_then(|i| self.tabs.get(i)).cloned()
         {
@@ -151,6 +164,32 @@ impl CairnApp {
             Ok("issue_branch") => {
                 if let Some(tab) = self.active_tab() {
                     crate::issue_branch::open(tab, window, cx);
+                }
+            }
+            Ok(kind @ ("force_push" | "reset_hard")) => {
+                let kind = kind.to_string();
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                        let _ = cx.update(|window, cx| {
+                            if kind == "force_push" {
+                                crate::dialogs::confirm_force_push(tab, window, cx);
+                            } else if let Some(id) = tab.read(cx).commits.get(3).map(|c| c.id.clone()) {
+                                crate::dialogs::confirm_reset(tab, id, cairn_core::ops::ResetMode::Hard, window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Ok("branch_picker") => {
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                        let mode = if std::env::var("CAIRN_DEBUG_PICKER_HIGHLIGHT").is_ok() { crate::branch_picker::Mode::Highlight } else { crate::branch_picker::Mode::Switch };
+                        let _ = cx.update(|window, cx| crate::branch_picker::open(tab, mode, window, cx));
+                    })
+                    .detach();
                 }
             }
             Ok("goto_file") => {
@@ -257,6 +296,20 @@ impl CairnApp {
                     }
                 })
                 .detach();
+                cx.subscribe(&view, |this, _, ev: &crate::repo_view::DiffPrefsEvent, cx| {
+                    this.settings.diffs = ev.0.clone();
+                    if let Err(e) = this.settings.save() {
+                        crate::repo_view::log_error(&format!("saving settings: {e}"));
+                    }
+                    let diffs = ev.0.clone();
+                    for tab in this.tabs.clone() {
+                        tab.update(cx, |v, cx| {
+                            v.settings.diffs = diffs.clone();
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
                 self.tabs.push(view);
                 self.active = Some(self.tabs.len() - 1);
                 true
@@ -304,6 +357,23 @@ impl CairnApp {
         self.active = None;
         self.open_category = category;
         cx.notify();
+    }
+
+    /// Opens a repository on one of its pull requests.
+    ///
+    /// # Arguments
+    /// * `path` - the repository
+    /// * `number` - the pull request
+    pub(crate) fn open_pr_in(&mut self, path: &Path, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_repo(path, window, cx);
+        if let Some(tab) = self.active_tab() {
+            tab.update(cx, |v, cx| {
+                v.page = crate::repo_view::Page::PullRequests;
+                v.pulls.selected = Some(number);
+                v.pulls.loaded = false;
+                v.load_pulls(cx);
+            });
+        }
     }
 
     pub(crate) fn add_repositories(&mut self, category: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1125,7 +1195,7 @@ impl CairnApp {
                 (name.into(), self.library.repos_in(Some(id)).into_iter().cloned().collect(), Some(id))
             }
             Some(None) => (tr("sidebar.other_repos"), self.library.repos_in(None).into_iter().cloned().collect(), None),
-            None => (tr("home.title"), Vec::new(), None),
+            None => (SharedString::default(), Vec::new(), None),
         };
 
         let header = hstack()
@@ -1235,8 +1305,11 @@ impl CairnApp {
                 r.truncate(6);
                 r
             };
+            let dashboard = self.render_dashboard(cx);
             v_flex()
                 .gap_5()
+                .child(dashboard)
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(tr("home.categories")))
                 .child(grid)
                 .when(!recent.is_empty(), |d| {
                     d.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(tr("home.recent")))
@@ -1301,6 +1374,7 @@ impl CairnApp {
                             .child(if missing { t!("repo.missing").to_string() } else { branch }),
                     )
                     .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(crate::widgets::display_path(&r.path)))
+                    .children(self.repo_status_chips(&r.path, cx).map(|c| c.pt_1()))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_repo(&path, window, cx)))
                     .context_menu(move |menu, _, cx| v.read(cx).repo_menu(menu, &entry, v.clone())),
             );
@@ -1399,18 +1473,7 @@ impl Render for CairnApp {
             if repos.len() >= 2 && stale {
                 let settings = self.settings.clone();
                 let panel = cx.new(|cx| crate::workspace_view::WorkspacePanel::new(repos, settings, window, cx));
-                cx.subscribe_in(&panel, window, |this, _, ev: &crate::workspace_view::OpenPrEvent, window, cx| {
-                    let number = ev.1;
-                    this.open_repo(&ev.0, window, cx);
-                    if let Some(tab) = this.active_tab() {
-                        tab.update(cx, |v, cx| {
-                            v.page = crate::repo_view::Page::PullRequests;
-                            v.pulls.selected = Some(number);
-                            v.pulls.loaded = false;
-                            v.load_pulls(cx);
-                        });
-                    }
-                })
+                cx.subscribe_in(&panel, window, |this, _, ev: &crate::workspace_view::OpenPrEvent, window, cx| this.open_pr_in(&ev.0.clone(), ev.1, window, cx))
                 .detach();
                 self.workspace = Some((id, panel));
             }

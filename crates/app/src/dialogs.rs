@@ -30,6 +30,86 @@ pub(crate) fn footer(ok_label: SharedString, danger: bool, on_ok: impl Fn(&mut W
         .child(if danger { ok.danger() } else { ok.primary() })
 }
 
+/// Whether a risky action can be taken back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recovery {
+    /// Cairn's Undo brings it back.
+    Undo,
+    /// Recover (lost & found) may bring it back for a while.
+    Recover,
+    /// Nothing brings it back.
+    Never,
+}
+
+/// Everything the safe-action dialog says about a risky action, in plain words.
+pub(crate) struct SafeAction {
+    pub icon: IconName,
+    pub title: String,
+    pub happens: Vec<String>,
+    pub loses: Vec<String>,
+    pub recovery: Recovery,
+    pub ok: SharedString,
+    pub danger: bool,
+}
+
+/// Asks before a risky action with a clear picture of it: what will happen, what is lost, and
+/// whether it can be taken back.
+///
+/// # Arguments
+/// * `spec` - the action described in plain words
+/// * `on_ok` - runs the action
+pub(crate) fn safe_action(spec: SafeAction, on_ok: impl Fn(&mut Window, &mut App) + 'static, window: &mut Window, cx: &mut App) {
+    let on_ok = Rc::new(on_ok);
+    let spec = Rc::new(spec);
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let theme = cx.theme().clone();
+        let tint = if spec.danger { theme.red } else { theme.yellow };
+        let (rec_icon, rec_color, rec_text) = match spec.recovery {
+            Recovery::Undo => (IconName::Undo2, theme.green, tr("safe.undo")),
+            Recovery::Recover => (IconName::LifeBuoy, theme.yellow, tr("safe.recover")),
+            Recovery::Never => (IconName::TriangleAlert, theme.red, tr("safe.never")),
+        };
+        let bullets = |items: &[String], ic: IconName, color: Hsla| {
+            v_flex().gap_1p5().children(items.iter().map(move |t| hstack().items_start().gap_2().text_sm().child(div().pt(px(2.)).child(icon(ic).xsmall().text_color(color))).child(div().flex_1().whitespace_normal().child(t.clone()))))
+        };
+        let on_ok = on_ok.clone();
+        dialog
+            .w(px(500.))
+            .bg(theme.popover.opacity(1.))
+            .child(
+                v_flex()
+                    .gap_4()
+                    .child(
+                        hstack()
+                            .gap_3()
+                            .child(div().flex_none().size(px(44.)).rounded(px(12.)).flex().items_center().justify_center().bg(tint.opacity(0.14)).border_1().border_color(tint.opacity(0.45)).shadow(crate::widgets::glow(tint, 10.)).child(icon(spec.icon).text_color(tint)))
+                            .child(div().flex_1().text_lg().font_weight(FontWeight::BOLD).whitespace_normal().child(spec.title.clone())),
+                    )
+                    .when(!spec.happens.is_empty(), |d| {
+                        d.child(v_flex().gap_2().child(div().text_xs().font_weight(FontWeight::BOLD).text_color(theme.muted_foreground).child(tr("safe.happens").to_uppercase())).child(bullets(&spec.happens, IconName::ChevronRight, theme.primary)))
+                    })
+                    .when(!spec.loses.is_empty(), |d| {
+                        d.child(
+                            v_flex()
+                                .gap_2()
+                                .p_3()
+                                .rounded(px(10.))
+                                .bg(theme.red.opacity(0.08))
+                                .border_1()
+                                .border_color(theme.red.opacity(0.3))
+                                .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(theme.red).child(tr("safe.loses").to_uppercase()))
+                                .child(bullets(&spec.loses, IconName::Minus, theme.red)),
+                        )
+                    })
+                    .child(hstack().gap_2().p_2p5().rounded(px(10.)).bg(rec_color.opacity(0.1)).text_sm().text_color(rec_color).child(icon(rec_icon).small()).child(div().flex_1().whitespace_normal().child(rec_text))),
+            )
+            .footer(footer(spec.ok.clone(), spec.danger, move |window, cx| {
+                on_ok(window, cx);
+                window.close_dialog(cx);
+            }))
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn text_prompt(
     title: SharedString,
@@ -267,25 +347,40 @@ pub(crate) fn new_tag(view: Entity<RepoView>, target: String, window: &mut Windo
 pub(crate) fn confirm_reset(view: Entity<RepoView>, target: String, mode: ResetMode, window: &mut Window, cx: &mut App) {
     let hard = mode == ResetMode::Hard;
     let short: String = target.chars().take(7).collect();
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        let view = view.clone();
-        let target = target.clone();
-        alert
-            .confirm()
-            .title(t!("reset.title", hash = short.clone()).to_string())
-            .description(if hard { tr("reset.hard_body") } else { tr("reset.soft_body") })
-            .ok_text(tr("reset.ok"))
-            .ok_variant(if hard { ButtonVariant::Danger } else { ButtonVariant::Primary })
-            .on_ok(move |_, window, cx| {
-                let target = target.clone();
-                view.update(cx, |v, cx| {
-                    v.run_op(tr("op.reset"), Some(t!("undo.reset").to_string()), move |git| {
-                        cairn_core::ops::reset(git, &target, mode).map(|_| String::new())
-                    }, window, cx);
-                });
-                true
-            })
-    });
+    let (branch, dirty) = {
+        let v = view.read(cx);
+        (v.current_branch().unwrap_or("HEAD").to_string(), v.status.files.len())
+    };
+    let mut loses = Vec::new();
+    if hard && dirty > 0 {
+        loses.push(crate::widgets::plural("safe.reset_loses_changes", dirty));
+    }
+    if hard {
+        loses.push(t!("safe.reset_loses_commits", hash = short.clone()).to_string());
+    }
+    let spec = SafeAction {
+        icon: if hard { IconName::TriangleAlert } else { IconName::RotateCcw },
+        title: t!("reset.title", hash = short.clone()).to_string(),
+        happens: vec![
+            t!("safe.reset_moves", branch = branch, hash = short.clone()).to_string(),
+            if hard { t!("safe.reset_hard_files").to_string() } else { t!("safe.reset_soft_files").to_string() },
+        ],
+        loses,
+        recovery: if hard && dirty > 0 { Recovery::Never } else { Recovery::Undo },
+        ok: tr("reset.ok"),
+        danger: hard,
+    };
+    safe_action(
+        spec,
+        move |window, cx| {
+            let target = target.clone();
+            view.update(cx, |v, cx| {
+                v.run_op(tr("op.reset"), Some(t!("undo.reset").to_string()), move |git| cairn_core::ops::reset(git, &target, mode).map(|_| String::new()), window, cx);
+            });
+        },
+        window,
+        cx,
+    );
 }
 
 impl RepoView {
@@ -339,20 +434,24 @@ pub(crate) fn confirm_force_push(view: Entity<RepoView>, window: &mut Window, cx
 }
 
 fn confirm_force_push_now(view: Entity<RepoView>, window: &mut Window, cx: &mut App) {
-    let branch = view.read(cx).current_branch().unwrap_or_default().to_string();
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        let view = view.clone();
-        alert
-            .confirm()
-            .title(t!("force.title", branch = branch.clone()).to_string())
-            .description(tr("force.body"))
-            .ok_text(tr("force.ok"))
-            .ok_variant(ButtonVariant::Danger)
-            .on_ok(move |_, window, cx| {
-                view.update(cx, |v, cx| v.push(true, window, cx));
-                true
-            })
-    });
+    let (branch, upstream, behind) = {
+        let v = view.read(cx);
+        (v.current_branch().unwrap_or_default().to_string(), v.status.branch.upstream.clone().unwrap_or_else(|| "origin".into()), v.status.branch.behind)
+    };
+    let mut loses = vec![t!("safe.force_loses", upstream = upstream.clone()).to_string()];
+    if behind > 0 {
+        loses.insert(0, crate::widgets::plural_with("safe.force_loses_n", behind as usize, &upstream));
+    }
+    let spec = SafeAction {
+        icon: IconName::ArrowUpToLine,
+        title: t!("force.title", branch = branch.clone()).to_string(),
+        happens: vec![t!("safe.force_happens", upstream = upstream.clone(), branch = branch).to_string(), t!("safe.force_others").to_string()],
+        loses,
+        recovery: Recovery::Never,
+        ok: tr("force.ok"),
+        danger: true,
+    };
+    safe_action(spec, move |window, cx| view.update(cx, |v, cx| v.push(true, window, cx)), window, cx);
 }
 
 /// Opens the undo history once the caller's update of `view` has finished.

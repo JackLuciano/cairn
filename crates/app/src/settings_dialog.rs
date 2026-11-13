@@ -949,6 +949,9 @@ impl Render for SettingsPanel {
                             .child(div().text_sm().text_color(theme.muted_foreground).child(tr(cat.desc))),
                     ),
             );
+            if matches!(cat.id, "appearance" | "graph" | "diffs") {
+                content = content.child(render_preview(&self.draft, cx));
+            }
             for g in &cat.groups {
                 let rows: Vec<RowDef> = g.rows.iter().copied().filter(|r| visible(r)).collect();
                 if rows.is_empty() {
@@ -1104,7 +1107,76 @@ impl Render for SettingsPanel {
     }
 }
 
+/// A small live sample of History and a diff, drawn with the settings being edited, so every
+/// change to colors, fonts, avatars or diff options shows at once.
+///
+/// # Arguments
+/// * `s` - the settings being edited
+///
+/// # Returns
+/// The preview card.
+fn render_preview(s: &Settings, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let lanes = [crate::widgets::lane_color(0, cx), crate::widgets::lane_color(1, cx), crate::widgets::lane_color(2, cx)];
+    let rows: [(usize, &str, &str, &str, Option<&str>); 4] = [
+        (1, "feat(ui): city search box", "Alex Morgan", "2h", Some("feat/search")),
+        (0, "fix(api): drop stale cache entries", "Kai Tanaka", "5h", Some("main")),
+        (2, "docs: explain the forecast cache", "Noor Haddad", "1d", None),
+        (0, "chore: scaffold project", "Sam Rivera", "3d", None),
+    ];
+    let mut history = v_flex().rounded(px(10.)).border_1().border_color(theme.border).overflow_hidden().bg(theme.background);
+    for (i, (lane, msg, who, when, chip)) in rows.into_iter().enumerate() {
+        let color = lanes[lane];
+        let mut graph = h_flex().relative().w(px(56.)).h_full().pl_2();
+        for (l, c) in lanes.iter().enumerate() {
+            graph = graph.child(
+                div().relative().w(px(14.)).h_full().child(div().absolute().left(px(6.)).top_0().bottom_0().w(px(2.)).bg(c.opacity(if l == lane { 0.9 } else { 0.35 }))).when(l == lane, |d| d.child(div().absolute().left(px(2.)).top(px(11.)).size(px(10.)).rounded_full().border_2().border_color(*c).bg(theme.background))),
+            );
+        }
+        history = history.child(
+            h_flex()
+                .h(px(32.))
+                .gap_2()
+                .pr_3()
+                .when(i > 0, |d| d.border_t_1().border_color(theme.border.opacity(0.5)))
+                .when(i == 0, |d| d.bg(theme.primary.opacity(0.12)))
+                .child(graph)
+                .when_some(chip, |d, c| d.child(div().px(px(6.)).h(px(18.)).flex().items_center().rounded(px(4.)).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).bg(color.opacity(0.14)).border_1().border_color(color.opacity(0.45)).child(c.to_string())))
+                .child(div().flex_1().min_w_0().truncate().text_sm().child(msg.to_string()))
+                .when(s.appearance.show_avatars, |d| d.child(crate::widgets::avatar(who, px(20.), cx)))
+                .child(div().w(px(84.)).truncate().text_xs().text_color(theme.muted_foreground).child(who.to_string()))
+                .child(div().w(px(24.)).text_xs().text_color(theme.muted_foreground).child(when.to_string())),
+        );
+    }
+    let mono = theme.mono_font_family.clone();
+    let code = |sign: &'static str, text: &'static str, bg: Hsla, fg: Hsla, n: &'static str| {
+        h_flex().h(px(22.)).px_2().gap_3().bg(bg).font_family(mono.clone()).text_size(theme.mono_font_size).child(div().w(px(22.)).text_color(theme.muted_foreground).when(s.diffs.line_numbers, |d| d.child(n))).child(div().w(px(10.)).text_color(fg).child(sign)).child(div().text_color(theme.foreground).child(text))
+    };
+    let diff = v_flex()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
+        .bg(theme.background)
+        .child(code(" ", "fn forecast(city: &str) -> Report {", theme.transparent, theme.muted_foreground, "12"))
+        .child(code("-", "    let cache = Cache::new();", theme.red.opacity(0.12), theme.red, "13"))
+        .child(code("+", "    let cache = Cache::with_ttl(10 * 60);", theme.green.opacity(0.12), theme.green, "13"))
+        .child(code(" ", "    cache.get_or_fetch(city)", theme.transparent, theme.muted_foreground, "14"));
+    v_flex()
+        .gap_2()
+        .mt_3()
+        .p_3()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(theme.primary.opacity(0.35))
+        .bg(linear_gradient(180., linear_color_stop(theme.primary.opacity(0.08), 0.), linear_color_stop(theme.sidebar, 0.6)))
+        .child(hstack().gap_1p5().child(icon(IconName::Eye).small().text_color(theme.primary)).child(div().text_xs().font_weight(FontWeight::BOLD).text_color(theme.muted_foreground).child(tr("settings.preview").to_uppercase())).child(spacer()).child(div().text_xs().text_color(theme.muted_foreground).child(tr("settings.preview_hint"))))
+        .child(history)
+        .child(diff)
+        .into_any_element()
+}
+
 pub(crate) fn open(app: Entity<CairnApp>, settings: Settings, window: &mut Window, cx: &mut App) {
     let panel = cx.new(|cx| SettingsPanel::new(app, settings, window, cx));
-    window.open_dialog(cx, move |dialog, _, _| dialog.w(px(1040.)).close_button(true).child(panel.clone()));
+    window.open_dialog(cx, move |dialog, _, cx| dialog.w(px(1040.)).bg(cx.theme().popover.opacity(1.)).close_button(true).child(panel.clone()));
 }

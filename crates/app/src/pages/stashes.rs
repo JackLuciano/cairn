@@ -1,8 +1,8 @@
 use cairn_core::diff::FileDiff;
 use cairn_core::refs::StashFile;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -11,12 +11,17 @@ use crate::diff_view::DiffSource;
 use crate::repo_view::RepoView;
 use crate::widgets::{Tone, caps_heading, empty_state, framed, hstack, icon, icon_tile, relative_time, spacer, status_letter, tr};
 
+const OLD_STASH_DAYS: i64 = 30;
+const CARD_FILES: usize = 3;
+
 #[derive(Default)]
 pub(crate) struct StashPageState {
     pub selected: Option<String>,
     pub files: Vec<StashFile>,
     pub file: Option<StashFile>,
     pub diff: Option<FileDiff>,
+    pub summaries: std::collections::HashMap<String, Vec<StashFile>>,
+    pub summaries_loading: bool,
 }
 
 impl RepoView {
@@ -27,10 +32,33 @@ impl RepoView {
             Some(_) => {}
             None => self.stash_page = StashPageState::default(),
         }
+        self.load_stash_summaries(cx);
+    }
+
+    /// Loads the file list of every stash in the background, for the previews on the shelf.
+    fn load_stash_summaries(&mut self, cx: &mut Context<Self>) {
+        let missing: Vec<String> = self.stashes.iter().map(|s| s.id.clone()).filter(|id| !self.stash_page.summaries.contains_key(id)).collect();
+        if missing.is_empty() || self.stash_page.summaries_loading {
+            return;
+        }
+        self.stash_page.summaries_loading = true;
+        let git = self.git();
+        self.spawn_bg(
+            move || missing.into_iter().map(|id| {
+                let files = cairn_core::refs::stash_files(&git, &id).unwrap_or_default();
+                (id, files)
+            }).collect::<Vec<_>>(),
+            |this, loaded, _| {
+                this.stash_page.summaries_loading = false;
+                this.stash_page.summaries.extend(loaded);
+            },
+            cx,
+        );
     }
 
     fn select_stash(&mut self, id: String, cx: &mut Context<Self>) {
-        self.stash_page = StashPageState { selected: Some(id.clone()), ..Default::default() };
+        let summaries = std::mem::take(&mut self.stash_page.summaries);
+        self.stash_page = StashPageState { selected: Some(id.clone()), summaries, ..Default::default() };
         let git = self.git();
         let want = id.clone();
         self.spawn_bg(move || cairn_core::refs::stash_files(&git, &id).unwrap_or_default(), move |this, files, cx| {
@@ -70,24 +98,35 @@ impl RepoView {
         self.stashes.iter().find(|s| s.id == id).map(|s| s.index)
     }
 
-    fn confirm_drop_stash(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_drop_stash(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let view = view.clone();
-            alert
-                .confirm()
-                .title(tr("stashes.drop_title"))
-                .description(tr("stashes.drop_body"))
-                .ok_text(tr("branches.stash_drop"))
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    view.update(cx, |v, cx| {
-                        v.run_op(tr("op.stash_drop"), None, move |git| cairn_core::refs::stash_drop(git, index).map(|_| String::new()), window, cx);
-                        v.after_op(|v, cx| v.load_stash_page(cx), cx);
-                    });
-                    true
-                })
-        });
+        let (title, files) = {
+            let s = self.stashes.iter().find(|s| s.index == index);
+            (s.map(|s| cairn_core::refs::stash_title(&s.message).0).unwrap_or_default(), s.and_then(|s| self.stash_page.summaries.get(&s.id)).map(Vec::len))
+        };
+        let spec = crate::dialogs::SafeAction {
+            icon: IconName::Archive,
+            title: tr("stashes.drop_title").to_string(),
+            happens: vec![t!("safe.stash_happens", name = title).to_string()],
+            loses: vec![match files {
+                Some(n) => crate::widgets::plural("safe.stash_loses", n),
+                None => t!("safe.stash_loses_some").to_string(),
+            }],
+            recovery: crate::dialogs::Recovery::Recover,
+            ok: tr("branches.stash_drop"),
+            danger: true,
+        };
+        crate::dialogs::safe_action(
+            spec,
+            move |window, cx| {
+                view.update(cx, |v, cx| {
+                    v.run_op(tr("op.stash_drop"), None, move |git| cairn_core::refs::stash_drop(git, index).map(|_| String::new()), window, cx);
+                    v.after_op(|v, cx| v.load_stash_page(cx), cx);
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn render_stash_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -109,27 +148,94 @@ impl RepoView {
         if self.stash_page.selected.as_ref().is_none_or(|id| !self.stashes.iter().any(|s| &s.id == id)) {
             self.load_stash_page(cx);
         }
-        let mut list = v_flex().gap_0p5().p_1();
+        let now = chrono::Utc::now().timestamp();
+        let mut list = v_flex().gap_2().p_2();
         for s in &self.stashes {
             let on = self.stash_page.selected.as_deref() == Some(s.id.as_str());
             let id = s.id.clone();
+            let idx = s.index;
             let (title, branch) = cairn_core::refs::stash_title(&s.message);
-            let sub = match branch {
-                Some(b) => format!("{b} · {}", relative_time(s.time)),
-                None => relative_time(s.time).to_string(),
-            };
-            list = list.child(
-                hstack()
-                    .id(SharedString::from(format!("stash-{}", s.id)))
-                    .gap_2()
-                    .px_2()
-                    .py(px(8.))
-                    .rounded(px(8.))
+            let days = (now - s.time) / 86_400;
+            let accent = if days >= OLD_STASH_DAYS { theme.yellow } else { theme.magenta };
+            let summary = self.stash_page.summaries.get(&s.id);
+            let group_name = SharedString::from(format!("stash-card-{}", s.id));
+            let action = |key: String, ic: IconName, tip: SharedString, danger: bool, cx: &mut Context<Self>| {
+                let theme = cx.theme().clone();
+                div()
+                    .id(SharedString::from(key))
+                    .size(px(26.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .cursor_pointer()
-                    .when(on, |d| d.bg(theme.list_active))
-                    .when(!on, |d| d.hover(|st| st.bg(theme.list_hover)))
-                    .child(icon_tile(IconName::Archive, theme.magenta))
-                    .child(v_flex().flex_1().min_w_0().child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(title)).child(div().truncate().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(sub)))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .hover(move |st| st.border_color(if danger { theme.red } else { theme.primary }).text_color(if danger { theme.red } else { theme.primary }))
+                    .child(icon(ic).xsmall())
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+            };
+            let actions = hstack()
+                .gap_1()
+                .invisible()
+                .group_hover(group_name.clone(), |st| st.visible())
+                .child(action(format!("stash-apply-{}", s.id), IconName::Copy, tr("branches.stash_apply"), false, cx).on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.run_op(tr("op.stash_apply"), None, move |git| cairn_core::refs::stash_apply(git, idx, false).map(|_| String::new()), window, cx);
+                })))
+                .child(action(format!("stash-pop-{}", s.id), IconName::RotateCcw, tr("branches.stash_pop"), false, cx).on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.run_op(tr("op.stash_pop"), None, move |git| cairn_core::refs::stash_apply(git, idx, true).map(|_| String::new()), window, cx);
+                    this.after_op(|v, cx| v.load_stash_page(cx), cx);
+                })))
+                .child(action(format!("stash-drop-{}", s.id), IconName::Trash, tr("branches.stash_drop"), true, cx).on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.confirm_drop_stash(idx, window, cx);
+                })));
+            let mut preview = v_flex().gap_1();
+            match summary {
+                None => preview = preview.child(div().h(px(14.)).w(relative(0.6)).rounded(px(4.)).bg(theme.foreground.opacity(0.08))),
+                Some(files) => {
+                    for f in files.iter().take(CARD_FILES) {
+                        let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+                        preview = preview.child(hstack().gap_1p5().text_xs().child(status_letter(if f.untracked { '?' } else { f.status }, cx).size(px(15.))).child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(name)));
+                    }
+                    if files.len() > CARD_FILES {
+                        preview = preview.child(div().pl(px(21.)).text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(t!("stashes.more_files", n = files.len() - CARD_FILES).to_string()));
+                    }
+                }
+            }
+            list = list.child(
+                v_flex()
+                    .id(SharedString::from(format!("stash-{}", s.id)))
+                    .group(group_name)
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(12.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if on { accent.opacity(0.6) } else { theme.border.opacity(0.7) })
+                    .bg(if on { accent.opacity(0.08) } else { theme.background })
+                    .when(on, |d| d.shadow(crate::widgets::glow(accent, 10.)))
+                    .when(!on, |d| d.hover(|st| st.border_color(accent.opacity(0.4))))
+                    .active(|st| st.opacity(crate::widgets::PRESSED))
+                    .child(
+                        hstack()
+                            .gap_2()
+                            .child(div().flex_none().size(px(30.)).rounded(px(9.)).flex().items_center().justify_center().bg(linear_gradient(135., linear_color_stop(accent.opacity(0.35), 0.), linear_color_stop(accent.opacity(0.1), 1.))).child(icon(IconName::Archive).small().text_color(accent)))
+                            .child(v_flex().flex_1().min_w_0().child(div().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(s.time))))
+                            .child(actions),
+                    )
+                    .child(preview)
+                    .child(
+                        hstack()
+                            .gap_1p5()
+                            .flex_wrap()
+                            .when_some(branch, |d, b| d.child(hstack().gap_1().px_1p5().h(px(18.)).rounded(px(9.)).bg(theme.muted).text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(icon(IconName::GitBranch).xsmall()).child(b)))
+                            .when_some(summary, |d, files| d.child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("stashes.files", files.len()))))
+                            .when(days >= OLD_STASH_DAYS, |d| d.child(crate::widgets::badge(t!("stashes.old", n = days).to_string(), theme.yellow))),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.select_stash(id.clone(), cx))),
             );
         }
@@ -179,12 +285,20 @@ impl RepoView {
             .child(
                 v_flex()
                     .flex_none()
-                    .w(px(280.))
+                    .w(px(340.))
                     .h_full()
                     .bg(theme.sidebar)
                     .border_r_1()
                     .border_color(theme.border)
-                    .child(hstack().px_3().py_2().gap_2().child(caps_heading(tr("page.stashes"), None, cx).px_0().pb_0()).child(spacer()).child(new_button))
+                    .child(
+                        hstack()
+                            .px_3()
+                            .pt_3()
+                            .pb_1()
+                            .gap_2()
+                            .child(v_flex().flex_1().min_w_0().child(div().text_base().font_weight(FontWeight::BOLD).child(tr("stashes.shelf_title"))).child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(tr("stashes.shelf_sub"))))
+                            .child(new_button),
+                    )
                     .child(div().id("stash-list").flex_1().min_h_0().overflow_y_scroll().child(list)),
             )
             .child(

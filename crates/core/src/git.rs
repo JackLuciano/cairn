@@ -37,11 +37,41 @@ fn log_command(dir: &Path, args: &[String], ok: bool) {
     }
 }
 
+/// Receives git's progress while a network command runs: the phase git reports, such as
+/// `Receiving objects`, and how far along it is, from 0 to 1.
+#[derive(Clone)]
+pub struct ProgressSink(std::sync::Arc<ProgressFn>);
+
+type ProgressFn = dyn Fn(&str, f32) + Send + Sync;
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
+}
+
+const PROGRESS_COMMANDS: [&str; 4] = ["push", "fetch", "pull", "clone"];
+
+/// Reads one progress line git prints, such as `Receiving objects:  45% (450/1000)`.
+///
+/// # Arguments
+/// * `line` - one line of git's stderr
+///
+/// # Returns
+/// The phase and the fraction done, or `None` for other lines.
+pub fn parse_progress(line: &str) -> Option<(String, f32)> {
+    let line = line.trim().trim_start_matches("remote:").trim();
+    let (phase, rest) = line.split_once(':')?;
+    let pct: f32 = rest.trim().split('%').next()?.trim().parse().ok()?;
+    Some((phase.trim().to_string(), (pct / 100.).clamp(0., 1.)))
+}
+
 /// Runs `git` commands inside one working directory.
 #[derive(Clone, Debug)]
 pub struct Git {
     dir: PathBuf,
     env: Vec<(String, String)>,
+    progress: Option<ProgressSink>,
 }
 
 impl Git {
@@ -53,7 +83,52 @@ impl Git {
     /// # Returns
     /// A runner with no extra environment variables.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), env: Vec::new() }
+        Self { dir: dir.into(), env: Vec::new(), progress: None }
+    }
+
+    /// Reports the progress of push, fetch, pull and clone while they run.
+    ///
+    /// # Arguments
+    /// * `sink` - called with the phase and the fraction done, from a background thread
+    ///
+    /// # Returns
+    /// The runner, for chaining.
+    pub fn with_progress(mut self, sink: impl Fn(&str, f32) + Send + Sync + 'static) -> Self {
+        self.progress = Some(ProgressSink(std::sync::Arc::new(sink)));
+        self
+    }
+
+    fn run_streaming(&self, args: &[String], sink: &ProgressSink) -> Result<Output> {
+        let mut child = self.command(args).spawn().map_err(map_spawn_error)?;
+        let stderr = child.stderr.take();
+        let sink = sink.clone();
+        let reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut all = Vec::new();
+            let Some(mut stderr) = stderr else { return all };
+            let mut line = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = stderr.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                for &b in &buf[..n] {
+                    all.push(b);
+                    if b == b'\r' || b == b'\n' {
+                        if let Some((phase, done)) = parse_progress(&String::from_utf8_lossy(&line)) {
+                            (sink.0)(&phase, done);
+                        }
+                        line.clear();
+                    } else {
+                        line.push(b);
+                    }
+                }
+            }
+            all
+        });
+        let mut output = child.wait_with_output().map_err(map_spawn_error)?;
+        output.stderr = reader.join().unwrap_or_default();
+        Ok(output)
     }
 
     /// Adds an environment variable to every command this runner starts.
@@ -126,11 +201,17 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let args: Vec<String> = args
+        let mut args: Vec<String> = args
             .into_iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
             .collect();
-        let output = self.command(&args).output().map_err(map_spawn_error)?;
+        let output = match &self.progress {
+            Some(sink) if args.first().is_some_and(|a| PROGRESS_COMMANDS.contains(&a.as_str())) => {
+                args.insert(1, "--progress".into());
+                self.run_streaming(&args, sink)?
+            }
+            _ => self.command(&args).output().map_err(map_spawn_error)?,
+        };
         log_command(&self.dir, &args, output.status.success());
         Self::finish(&args, output)
     }
@@ -236,4 +317,17 @@ pub fn git_version() -> Option<String> {
         .run(["--version"])
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_progress_lines() {
+        assert_eq!(parse_progress("Receiving objects:  45% (450/1000), 1.2 MiB | 3 MiB/s"), Some(("Receiving objects".into(), 0.45)));
+        assert_eq!(parse_progress("remote: Counting objects: 100% (12/12), done."), Some(("Counting objects".into(), 1.)));
+        assert_eq!(parse_progress("To github.com:a/b.git"), None);
+        assert_eq!(parse_progress("Everything up-to-date"), None);
+    }
 }

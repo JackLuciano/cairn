@@ -1,8 +1,8 @@
 use cairn_core::refs::Branch;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -10,72 +10,143 @@ use rust_i18n::t;
 use crate::repo_view::RepoView;
 use crate::widgets::{Tone, card, card_header, count_chip, empty_state, framed, hstack, icon, icon_tile, page_heading, relative_time, spacer, tr};
 
+/// Which of your branches the Branches page shows.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum BranchFilter {
+    #[default]
+    All,
+    Active,
+    Merged,
+}
+
 impl RepoView {
-    fn branch_row(&mut self, b: &Branch, first: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// Works out how far each local branch is from the main branch, once per change of branches.
+    fn load_branch_stats(&mut self, cx: &mut Context<Self>) {
+        let trunk = self.trunk.clone().unwrap_or_else(|| "main".into());
+        let sig = self.branches.iter().filter(|b| !b.is_remote).fold(trunk.clone(), |acc, b| format!("{acc}|{}{}", b.name, b.target));
+        if self.branch_stats.0 == sig || self.branch_stats_loading {
+            return;
+        }
+        self.branch_stats_loading = true;
+        let git = self.git();
+        self.spawn_bg(
+            move || cairn_core::refs::ahead_behind_all(&git, &trunk),
+            move |this, stats, _| {
+                this.branch_stats_loading = false;
+                this.branch_stats = (sig, stats);
+            },
+            cx,
+        );
+    }
+
+    fn branch_card(&mut self, b: &Branch, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let view = cx.entity();
         let name = b.name.clone();
         let remote = b.is_remote;
-        let tint = if b.is_head { theme.primary } else if remote { theme.cyan } else { theme.muted_foreground };
+        let short = if remote { self.remotes.iter().find_map(|r| b.name.strip_prefix(&format!("{}/", r.name))).unwrap_or(&b.name).to_string() } else { b.name.clone() };
+        let color = self.branch_color(&b.name, cx).unwrap_or(if remote { theme.cyan } else { theme.muted_foreground });
         let clash = self.clashes.get(&b.name).cloned();
         let trunk = self.trunk.clone().unwrap_or_else(|| "main".into());
-        h_flex()
-            .id(SharedString::from(format!("branch-row-{}", b.full_ref)))
-            .items_center()
-            .gap_3()
-            .px(px(14.))
-            .py(px(10.))
-            .when(!first, |d| d.border_t_1().border_color(theme.border))
-            .when(b.is_head, |d| d.bg(theme.primary.opacity(0.08)))
-            .when(!b.is_head, |d| d.hover(|s| s.bg(theme.list_hover)))
-            .child(icon_tile(if remote { IconName::Cloud } else { IconName::GitBranch }, tint))
+        let trunk_short = trunk.rsplit_once('/').map(|(_, t)| t.to_string()).unwrap_or(trunk.clone());
+        let is_trunk = short == trunk_short;
+        let vs_main = (!remote && !is_trunk).then(|| self.branch_stats.1.get(&b.name).copied()).flatten();
+        let pr = self.prs.iter().find(|p| p.head == short).map(|p| p.number);
+        let (folder, leaf) = match short.rsplit_once('/') {
+            Some((d, n)) => (format!("{d}/"), n.to_string()),
+            None => (String::new(), short.clone()),
+        };
+        let chip = |text: String, c: Hsla| div().flex_none().px(px(7.)).h(px(20.)).flex().items_center().rounded(px(10.)).bg(c.opacity(0.14)).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(c).child(text);
+        v_flex()
+            .id(SharedString::from(format!("branch-card-{}", b.full_ref)))
+            .w(px(330.))
+            .flex_none()
+            .gap_2p5()
+            .p_3p5()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(if b.is_head { color.opacity(0.6) } else { theme.border.opacity(0.8) })
+            .bg(if b.is_head { color.opacity(0.07) } else { theme.background })
+            .when(b.is_head, |d| d.shadow(crate::widgets::glow(color, 10.)))
+            .when(!b.is_head, |d| d.hover(|s| s.border_color(color.opacity(0.45))))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
+                hstack()
+                    .gap_2p5()
+                    .child(div().flex_none().size(px(34.)).rounded(px(10.)).flex().items_center().justify_center().bg(color.opacity(if remote { 0.1 } else { 0.18 })).border_1().border_color(color.opacity(0.5)).child(icon(if remote { IconName::Cloud } else { IconName::GitBranch }).small().text_color(color)))
                     .child(
-                        hstack()
-                            .gap_2()
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).font_family(theme.mono_font_family.clone()).text_color(if b.is_head { theme.primary } else { theme.foreground }).child(b.name.clone()))
-                            .when(b.is_head, |d| d.child(count_chip(tr("branches.current"), theme.primary.opacity(0.18), theme.primary)))
-                            .when(b.ahead > 0, |d| d.child(count_chip(format!("↑{}", b.ahead), theme.blue.opacity(0.16), theme.blue)))
-                            .when(b.behind > 0, |d| d.child(count_chip(format!("↓{}", b.behind), theme.cyan.opacity(0.16), theme.cyan)))
-                            .when(b.upstream_gone, |d| d.child(count_chip(tr("branches.gone"), theme.red.opacity(0.16), theme.red)))
-                            .when(!remote && clash.is_some(), |d| d.child(count_chip(t!("conflicts_early.with", base = trunk.clone()).to_string(), theme.red.opacity(0.16), theme.red))),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(h_flex().min_w_0().text_sm().child(div().flex_shrink(1.).min_w_0().truncate().text_color(theme.muted_foreground).child(folder)).child(div().flex_none().font_weight(FontWeight::BOLD).child(leaf)))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(b.last_commit_time))),
                     )
-                    .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} · {}", b.subject, relative_time(b.last_commit_time))))
-                    .when_some(clash.clone().filter(|_| !remote), |d, files| {
-                        d.child(hstack().gap_1().text_xs().text_color(theme.red).child(icon(IconName::TriangleAlert).xsmall()).child(div().truncate().child(t!("conflicts_early.files_short", files = files.join(", ")).to_string())))
+                    .child(self.branch_menu_button(b, &name, remote, view.clone(), cx)),
+            )
+            .child(div().text_sm().text_color(theme.muted_foreground).line_height(rems(1.3)).h(px(36.)).overflow_hidden().whitespace_normal().child(b.subject.clone()))
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .when(b.is_head, |d| d.child(chip(tr("branches.current").to_string(), theme.green)))
+                    .when_some(pr, |d, n| d.child(chip(format!("PR #{n}"), theme.magenta)))
+                    .when(b.behind > 0, |d| d.child(chip(t!("branch_picker.to_pull", n = b.behind).to_string(), theme.yellow)))
+                    .when(b.ahead > 0, |d| d.child(chip(t!("branch_picker.to_push", n = b.ahead).to_string(), theme.blue)))
+                    .when(b.upstream_gone, |d| d.child(chip(tr("branch_picker.gone").to_string(), theme.red)))
+                    .when(!remote && clash.is_some(), |d| d.child(chip(t!("conflicts_early.with", base = trunk_short.clone()).to_string(), theme.red)))
+                    .when(remote, |d| d.child(chip(tr("branch_picker.not_downloaded").to_string(), theme.muted_foreground))),
+            )
+            .when_some(vs_main, |d, (ahead, behind)| {
+                let total = (ahead + behind).max(1) as f32;
+                d.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            hstack()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(if ahead == 0 { t!("branches.merged_into", base = trunk_short.clone()).to_string() } else { t!("branches.vs_main", ahead = ahead, behind = behind, base = trunk_short.clone()).to_string() })
+                                .child(spacer())
+                                .when(ahead == 0, |h| h.child(icon(IconName::CircleCheck).xsmall().text_color(theme.green))),
+                        )
+                        .child(
+                            h_flex()
+                                .h(px(5.))
+                                .w_full()
+                                .rounded(px(3.))
+                                .overflow_hidden()
+                                .bg(theme.border.opacity(0.6))
+                                .when(ahead == 0, |h| h.child(div().h_full().w_full().bg(theme.green.opacity(0.7))))
+                                .when(ahead > 0, |h| h.child(div().h_full().w(relative(ahead as f32 / total)).bg(color)).child(div().h_full().w(relative(behind as f32 / total)).bg(theme.muted_foreground.opacity(0.4)))),
+                        ),
+                )
+            })
+            .when_some(clash.clone().filter(|_| !remote), |d, files| {
+                d.child(hstack().gap_1().text_xs().text_color(theme.red).child(icon(IconName::TriangleAlert).xsmall()).child(div().truncate().child(t!("conflicts_early.files_short", files = files.join(", ")).to_string())))
+            })
+            .child(div().flex_1())
+            .child(
+                hstack()
+                    .gap_1p5()
+                    .pt_1()
+                    .when_some(b.upstream.clone(), |d, up| d.child(hstack().min_w_0().gap_1().text_xs().text_color(theme.muted_foreground).child(icon(IconName::Cloud).xsmall()).child(div().truncate().font_family(theme.mono_font_family.clone()).child(up))))
+                    .child(spacer())
+                    .when(!b.is_head, |d| {
+                        let n = name.clone();
+                        d.child(
+                            framed(Button::new(SharedString::from(format!("co-{}", b.full_ref))), Tone::Plain, cx)
+                                .h(px(28.))
+                                .icon(icon(IconName::LogIn))
+                                .label(tr("branches.checkout"))
+                                .on_click(cx.listener(move |this, _, window, cx| this.checkout(n.clone(), remote, window, cx))),
+                        )
                     }),
             )
-            .when_some(b.upstream.clone(), |d, up| {
-                d.child(
-                    hstack()
-                        .flex_none()
-                        .gap_1()
-                        .h(px(24.))
-                        .px_2()
-                        .rounded(px(6.))
-                        .bg(theme.secondary)
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(icon(IconName::Cloud).xsmall())
-                        .child(div().font_family(theme.mono_font_family.clone()).child(up)),
-                )
-            })
-            .when(!b.is_head, |d| {
-                let n = name.clone();
-                d.child(
-                    framed(Button::new(SharedString::from(format!("co-{}", b.full_ref))), Tone::Plain, cx)
-                        .h(px(28.))
-                        .icon(icon(IconName::LogIn))
-                        .label(tr("branches.checkout"))
-                        .on_click(cx.listener(move |this, _, window, cx| this.checkout(n.clone(), remote, window, cx))),
-                )
-            })
-            .child(
-                Button::new(SharedString::from(format!("more-{}", b.full_ref)))
+            .into_any_element()
+    }
+
+    fn branch_menu_button(&self, b: &Branch, name: &str, remote: bool, view: Entity<RepoView>, _cx: &mut Context<Self>) -> impl IntoElement {
+        let name = name.to_string();
+        Button::new(SharedString::from(format!("more-{}", b.full_ref)))
                     .small()
                     .ghost()
                     .icon(icon(IconName::Ellipsis))
@@ -121,34 +192,50 @@ impl RepoView {
                         .item(PopupMenuItem::new(t!("branches.delete").to_string()).icon(icon(IconName::Trash)).on_click(move |_, window, cx| {
                             let n = n5.clone();
                             let v = v5.clone();
-                            window.open_alert_dialog(cx, move |alert, _, _| {
-                                let n = n.clone();
-                                let v = v.clone();
-                                alert
-                                    .confirm()
-                                    .title(t!("branches.delete_title", name = n.clone()).to_string())
-                                    .description(if remote { tr("branches.delete_remote_body") } else { tr("branches.delete_body") })
-                                    .ok_text(tr("branches.delete"))
-                                    .ok_variant(ButtonVariant::Danger)
-                                    .on_ok(move |_, window, cx| {
-                                        let n = n.clone();
-                                        v.update(cx, |v, cx| {
-                                            v.run_op(tr("op.delete_branch"), Some(t!("undo.delete_branch", name = n.clone()).to_string()), move |git| {
-                                                if remote {
-                                                    let (r, b) = n.split_once('/').unwrap_or(("origin", n.as_str()));
-                                                    cairn_core::refs::delete_remote_branch(git, r, b).map(|_| String::new())
-                                                } else {
-                                                    cairn_core::refs::delete_branch(git, &n, true).map(|_| String::new())
-                                                }
-                                            }, window, cx)
-                                        });
-                                        true
-                                    })
-                            });
+                            let (ahead, pr) = {
+                                let view = v.read(cx);
+                                let short = n.split_once('/').filter(|_| remote).map(|(_, b)| b.to_string()).unwrap_or_else(|| n.clone());
+                                (view.branch_stats.1.get(&n).map(|(a, _)| *a), view.prs.iter().find(|p| p.head == short).map(|p| p.number))
+                            };
+                            let mut loses = Vec::new();
+                            match ahead {
+                                Some(0) => {}
+                                Some(a) => loses.push(crate::widgets::plural("safe.branch_unmerged", a as usize)),
+                                None if !remote => loses.push(t!("safe.branch_maybe_unmerged").to_string()),
+                                None => {}
+                            }
+                            if let Some(num) = pr {
+                                loses.push(t!("safe.branch_pr", n = num).to_string());
+                            }
+                            let spec = crate::dialogs::SafeAction {
+                                icon: IconName::Trash,
+                                title: t!("branches.delete_title", name = n.clone()).to_string(),
+                                happens: vec![if remote { t!("safe.branch_remote_happens", name = n.clone()).to_string() } else { t!("safe.branch_happens", name = n.clone()).to_string() }],
+                                loses,
+                                recovery: if remote { crate::dialogs::Recovery::Never } else { crate::dialogs::Recovery::Undo },
+                                ok: tr("branches.delete"),
+                                danger: true,
+                            };
+                            crate::dialogs::safe_action(
+                                spec,
+                                move |window, cx| {
+                                    let n = n.clone();
+                                    v.update(cx, |v, cx| {
+                                        v.run_op(tr("op.delete_branch"), Some(t!("undo.delete_branch", name = n.clone()).to_string()), move |git| {
+                                            if remote {
+                                                let (r, b) = n.split_once('/').unwrap_or(("origin", n.as_str()));
+                                                cairn_core::refs::delete_remote_branch(git, r, b).map(|_| String::new())
+                                            } else {
+                                                cairn_core::refs::delete_branch(git, &n, true).map(|_| String::new())
+                                            }
+                                        }, window, cx)
+                                    });
+                                },
+                                window,
+                                cx,
+                            );
                         }))
-                    }),
-            )
-            .into_any_element()
+                    })
     }
 
     pub(crate) fn render_branches(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -178,17 +265,82 @@ impl RepoView {
                         .on_click(move |_, window, cx| crate::dialogs::new_branch(view.clone(), None, window, cx)),
                 ),
         );
-        let mut local_card = card(cx).child(card_header(IconName::GitBranch, tr("branches.local"), Some(local.len()), cx));
-        for (i, b) in local.iter().enumerate() {
-            local_card = local_card.child(self.branch_row(b, i == 0, cx));
+        self.load_branch_stats(cx);
+        let mut local = local;
+        local.sort_by_key(|b| (!b.is_head, std::cmp::Reverse(b.last_commit_time)));
+        let merged = |b: &Branch, this: &Self| this.branch_stats.1.get(&b.name).is_some_and(|(a, _)| *a == 0) && !b.is_head;
+        let merged_n = local.iter().filter(|b| merged(b, self)).count();
+        let shown: Vec<Branch> = local
+            .iter()
+            .filter(|b| match self.branch_filter {
+                BranchFilter::All => true,
+                BranchFilter::Active => !merged(b, self),
+                BranchFilter::Merged => merged(b, self),
+            })
+            .cloned()
+            .collect();
+        let theme = cx.theme().clone();
+        let filter_pill = |id: &'static str, label: SharedString, f: BranchFilter, n: usize, this: &Self, cx: &mut Context<Self>| {
+            let on = this.branch_filter == f;
+            let theme = cx.theme().clone();
+            hstack()
+                .id(id)
+                .gap_1p5()
+                .h(px(26.))
+                .px_2p5()
+                .rounded(px(13.))
+                .cursor_pointer()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .border_1()
+                .when(on, |d| d.bg(theme.primary.opacity(0.18)).text_color(theme.primary).border_color(theme.primary.opacity(0.5)))
+                .when(!on, |d| d.text_color(theme.muted_foreground).border_color(theme.border).hover(|s| s.text_color(theme.foreground)))
+                .child(label)
+                .child(div().px_1p5().rounded(px(8.)).bg(theme.muted).text_color(theme.muted_foreground).child(n.to_string()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.branch_filter = f;
+                    cx.notify();
+                }))
+        };
+        let section = |ic: IconName, title: SharedString, sub: SharedString, cx: &App| {
+            let theme = cx.theme();
+            hstack().gap_2().child(icon(ic).small().text_color(theme.muted_foreground)).child(div().text_base().font_weight(FontWeight::BOLD).child(title)).child(div().text_xs().text_color(theme.muted_foreground).child(sub))
+        };
+        col = col.child(
+            hstack()
+                .gap_2()
+                .child(section(IconName::GitBranch, tr("branch_picker.sec_yours"), crate::widgets::plural("branches.count", local.len()).into(), cx))
+                .child(spacer())
+                .child(filter_pill("bf-all", tr("branches.filter_all"), BranchFilter::All, local.len(), self, cx))
+                .child(filter_pill("bf-active", tr("branches.filter_active"), BranchFilter::Active, local.len() - merged_n, self, cx))
+                .child(filter_pill("bf-merged", tr("branches.filter_merged"), BranchFilter::Merged, merged_n, self, cx)),
+        );
+        let mut grid = h_flex().flex_wrap().items_stretch().gap_3();
+        for b in &shown {
+            grid = grid.child(self.branch_card(b, cx));
         }
-        col = col.child(local_card);
-        if !remote.is_empty() {
-            let mut remote_card = card(cx).child(card_header(IconName::Cloud, tr("branches.remote"), Some(remote.len()), cx));
-            for (i, b) in remote.iter().enumerate() {
-                remote_card = remote_card.child(self.branch_row(b, i == 0, cx));
+        if shown.is_empty() {
+            grid = grid.child(div().py_4().text_sm().text_color(theme.muted_foreground).child(tr("branches.filter_empty")));
+        }
+        col = col.child(grid);
+        let remote_only: Vec<Branch> = remote
+            .iter()
+            .filter(|b| !b.name.ends_with("/HEAD"))
+            .filter(|b| {
+                let short = self.remotes.iter().find_map(|r| b.name.strip_prefix(&format!("{}/", r.name))).unwrap_or(&b.name);
+                !local.iter().any(|l| l.name == short)
+            })
+            .cloned()
+            .collect();
+        if !remote_only.is_empty() {
+            col = col.child(section(IconName::Cloud, tr("branch_picker.sec_server_only"), tr("branch_picker.sec_server_only_hint"), cx).pt_2());
+            let mut grid = h_flex().flex_wrap().items_stretch().gap_3();
+            let mut sorted = remote_only;
+            sorted.sort_by_key(|b| std::cmp::Reverse(b.last_commit_time));
+            for b in &sorted {
+                grid = grid.child(self.branch_card(b, cx));
             }
-            col = col.child(remote_card);
+            col = col.child(grid);
         }
         if !tags.is_empty() {
             let theme = cx.theme().clone();
@@ -307,7 +459,7 @@ impl RepoView {
                         })))
                         .child(Button::new(("stash-drop", idx)).small().ghost().icon(icon(IconName::Trash)).tooltip(tr("branches.stash_drop")).on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.run_op(tr("op.stash_drop"), None, move |git| cairn_core::refs::stash_drop(git, idx).map(|_| String::new()), window, cx);
+                            this.confirm_drop_stash(idx, window, cx);
                         }))),
                 );
             }

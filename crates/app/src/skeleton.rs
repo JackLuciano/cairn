@@ -157,6 +157,19 @@ pub(crate) fn history(avatars: bool, cx: &App) -> AnimationElement<Div> {
     )
 }
 
+/// Placeholder for the message and changed files of a commit's hover card.
+///
+/// # Returns
+/// The animated placeholder.
+pub(crate) fn card_files(cx: &App) -> AnimationElement<Div> {
+    let k = Ink::new(cx);
+    let mut col = v_flex().gap_2().child(k.bar(relative(0.8), 9.)).child(k.bar(relative(0.55), 9.)).child(div().h(px(2.)));
+    for w in WIDTHS.iter().take(3) {
+        col = col.child(h_flex().gap_2().child(k.bar(px(18.), 18.)).child(k.bar(relative(w * 0.8), 10.)));
+    }
+    pulse("skeleton-card", col)
+}
+
 /// Placeholder for a commit's details panel.
 ///
 /// # Returns
