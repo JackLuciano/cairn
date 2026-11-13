@@ -63,7 +63,7 @@ impl AssistPanel {
                             ai::explain(&settings, Question::WhatCouldBreak, &format!("{log}\n\n{}", range_diff())).map(Outcome::Text)
                         }
                         Tab::Today => {
-                            let log = git.run(["log", "--all", "--since=24.hours", "--format=%h %an: %s"]).unwrap_or_default();
+                            let log = git.run(["log", "--exclude=refs/cairn/*", "--all", "--since=24.hours", "--format=%h %an: %s"]).unwrap_or_default();
                             if log.trim().is_empty() {
                                 return Err(t!("assist.nothing_today").to_string());
                             }

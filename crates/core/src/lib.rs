@@ -6,6 +6,7 @@ pub mod checks;
 pub mod compare;
 pub mod conflicts;
 pub mod diff;
+pub mod discarded;
 pub mod error;
 pub mod git;
 pub mod graph;

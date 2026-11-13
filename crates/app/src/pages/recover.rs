@@ -1,4 +1,5 @@
 use cairn_core::diff::FileDiff;
+use cairn_core::discarded::Discarded;
 use cairn_core::log::CommitDetails;
 use cairn_core::recover::{LostCommit, LostKind};
 use gpui_kit::assets::IconName;
@@ -18,6 +19,7 @@ pub(crate) struct RecoverState {
     pub loaded: bool,
     pub lost: Vec<LostCommit>,
     pub moves: Vec<LostCommit>,
+    pub discarded: Vec<Discarded>,
     pub selected: Option<String>,
     pub details: Option<CommitDetails>,
     pub file: Option<String>,
@@ -33,12 +35,13 @@ impl RepoView {
         self.recover.loading = true;
         let git = self.git();
         self.spawn_bg(
-            move || (cairn_core::recover::lost_commits(&git).unwrap_or_default(), cairn_core::recover::head_history(&git, 300).unwrap_or_default()),
-            |this, (lost, moves), _| {
+            move || (cairn_core::recover::lost_commits(&git).unwrap_or_default(), cairn_core::recover::head_history(&git, 300).unwrap_or_default(), cairn_core::discarded::list(&git)),
+            |this, (lost, moves, discarded), _| {
                 this.recover.loading = false;
                 this.recover.loaded = true;
                 this.recover.lost = lost;
                 this.recover.moves = moves;
+                this.recover.discarded = discarded;
             },
             cx,
         );
@@ -96,6 +99,64 @@ impl RepoView {
                 }, cx);
             });
         });
+    }
+
+    /// One saved backup of discarded changes, with buttons to bring it back or forget it.
+    ///
+    /// # Arguments
+    /// * `item` - the backup
+    /// * `first` - whether it is the first row of its card
+    ///
+    /// # Returns
+    /// The row.
+    fn discarded_row(&mut self, item: &Discarded, first: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let selected = self.recover.selected.as_deref() == Some(item.commit.as_str());
+        let id = item.commit.clone();
+        let (restore, forget) = (item.clone(), item.clone());
+        let names: Vec<&str> = item.files.iter().map(|f| f.rsplit('/').next().unwrap_or(f)).collect();
+        let title = match names.len() {
+            0 => tr("recover.discarded_empty").to_string(),
+            1..=3 => names.join(", "),
+            n => format!("{}, {}", names[..2].join(", "), t!("safe.and_more", n = n - 2)),
+        };
+        h_flex()
+            .id(SharedString::from(format!("discarded-{}", item.refname)))
+            .items_center()
+            .gap_3()
+            .px(px(14.))
+            .py(px(10.))
+            .cursor_pointer()
+            .when(!first, |d| d.border_t_1().border_color(theme.border))
+            .when(selected, |d| d.bg(theme.primary.opacity(0.08)))
+            .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
+            .on_click(cx.listener(move |this, _, _, cx| this.select_lost(id.clone(), cx)))
+            .child(icon_tile(IconName::Trash, theme.red))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(div().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(div().truncate().text_xs().text_color(theme.muted_foreground).child(format!("{} · {}", crate::widgets::plural("recover.discarded_files", item.files.len()), relative_time(item.time)))),
+            )
+            .child(framed(Button::new(SharedString::from(format!("discarded-restore-{}", item.refname))), Tone::Accent, cx).h(px(28.)).icon(icon(IconName::Undo2)).label(tr("recover.bring_back")).on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                let item = restore.clone();
+                this.run_op(tr("op.restore_discarded"), None, move |git| cairn_core::discarded::restore(git, &item).map(|_| String::new()), window, cx);
+                this.after_op(|v, cx| {
+                    v.recover.loaded = false;
+                    v.load_recover(cx);
+                }, cx);
+            })))
+            .child(Button::new(SharedString::from(format!("discarded-forget-{}", item.refname))).small().ghost().icon(icon(IconName::X)).tooltip(tr("recover.forget")).on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                let item = forget.clone();
+                this.run_op_quiet(tr("recover.forget"), move |git| cairn_core::discarded::delete(git, &item).map(|_| String::new()), window, cx);
+                this.recover.discarded.retain(|d| d.refname != forget.refname);
+                cx.notify();
+            })))
+            .into_any_element()
     }
 
     fn lost_row(&mut self, c: &LostCommit, first: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -187,6 +248,14 @@ impl RepoView {
                     this.load_recover(cx);
                 }))),
         );
+        let discarded = self.recover.discarded.clone();
+        if !discarded.is_empty() {
+            let mut discarded_card = card(cx).child(card_header(IconName::Trash, tr("recover.discarded_title"), Some(discarded.len()), cx));
+            for (i, d) in discarded.iter().enumerate() {
+                discarded_card = discarded_card.child(self.discarded_row(d, i == 0, cx));
+            }
+            col = col.child(discarded_card);
+        }
         let mut lost_card = card(cx).child(card_header(IconName::LifeBuoy, tr("recover.lost_title"), Some(lost.len()), cx));
         if lost.is_empty() {
             lost_card = lost_card.child(div().px(px(14.)).py_4().text_sm().text_color(theme.muted_foreground).child(tr("recover.nothing_lost")));

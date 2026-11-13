@@ -1,6 +1,7 @@
 use cairn_core::diff::FileDiff;
 use cairn_core::ops::CommitOptions;
 use cairn_core::patch::{self, LineSelection};
+use cairn_core::settings::{AfterCommit, SmartCommit};
 use cairn_core::status::FileStatus;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -15,6 +16,15 @@ use rust_i18n::t;
 use crate::diff_view::DiffSource;
 use crate::repo_view::{RepoView, SelectedChange};
 use crate::widgets::{Tone, empty_state, hstack, icon, section_label, spacer, status_letter, tr};
+
+/// What a commit should do, filled in by the questions asked before it.
+#[derive(Clone, Default)]
+pub(crate) struct CommitPlan {
+    pub after: AfterCommit,
+    pub stage_all: bool,
+    pub branch: Option<String>,
+    pub main_ok: bool,
+}
 
 impl RepoView {
     pub(crate) fn apply_selection(&mut self, diff: FileDiff, sel: LineSelection, staged: bool, discard: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -107,7 +117,7 @@ impl RepoView {
             title: crate::widgets::plural("changes.discard_files_title", count),
             happens,
             loses,
-            recovery: crate::dialogs::Recovery::Never,
+            recovery: crate::dialogs::Recovery::Discarded,
             ok: tr("changes.discard"),
             danger: true,
         };
@@ -159,9 +169,60 @@ impl RepoView {
         }, window, cx);
     }
 
-    pub(crate) fn commit(&mut self, push_after: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Commits the staged changes, then pushes or syncs if asked to.
+    ///
+    /// # Arguments
+    /// * `after` - what to run once the commit worked
+    pub(crate) fn commit(&mut self, after: AfterCommit, window: &mut Window, cx: &mut Context<Self>) {
         if self.summary.read(cx).value().trim().is_empty() {
             window.push_notification(gpui_kit::component::notification::Notification::warning(tr("changes.need_summary")), cx);
+            return;
+        }
+        self.commit_flow(CommitPlan { after, ..Default::default() }, window, cx);
+    }
+
+    /// The files a smart commit would take when nothing is staged.
+    ///
+    /// # Returns
+    /// How many changed files are not in conflict.
+    pub(crate) fn committable_files(&self) -> usize {
+        self.status.files.iter().filter(|f| !f.is_conflicted()).count()
+    }
+
+    /// Whether the current branch is the trunk: `main`, `master` or the default branch name
+    /// from Settings.
+    ///
+    /// # Returns
+    /// `true` on the trunk.
+    pub(crate) fn on_trunk(&self) -> bool {
+        self.current_branch().is_some_and(|b| b == "main" || b == "master" || b == self.settings.git.default_branch)
+    }
+
+    /// Walks a commit through the questions it may need first, then commits.
+    ///
+    /// # Arguments
+    /// * `plan` - what the commit should do, filled in further by each answer
+    pub(crate) fn commit_flow(&mut self, mut plan: CommitPlan, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.amend && !plan.stage_all && self.status.staged().count() == 0 {
+            let changed = self.committable_files();
+            if changed == 0 {
+                window.push_notification(gpui_kit::component::notification::Notification::warning(tr("changes.nothing_staged")), cx);
+                return;
+            }
+            match self.settings.commits.smart_commit {
+                SmartCommit::Never => {
+                    window.push_notification(gpui_kit::component::notification::Notification::warning(tr("changes.nothing_staged")), cx);
+                    return;
+                }
+                SmartCommit::Always => plan.stage_all = true,
+                SmartCommit::Ask => {
+                    crate::commit_guard::ask_commit_all(cx.entity(), plan, changed, window, cx);
+                    return;
+                }
+            }
+        }
+        if !self.amend && !plan.main_ok && plan.branch.is_none() && self.settings.commits.ask_on_main && self.on_trunk() {
+            crate::commit_guard::ask_on_trunk(cx.entity(), plan, window, cx);
             return;
         }
         let amends_pushed = self.amend && self.status.branch.upstream.is_some() && self.status.branch.ahead == 0;
@@ -169,9 +230,10 @@ impl RepoView {
             cairn_core::checks::Stage::Commit,
             move |v, window, cx| {
                 if amends_pushed {
-                    v.protected(move |v, window, cx| v.commit_now(push_after, window, cx), window, cx);
+                    let plan = plan.clone();
+                    v.protected(move |v, window, cx| v.commit_now(plan.clone(), window, cx), window, cx);
                 } else {
-                    v.commit_now(push_after, window, cx);
+                    v.commit_now(plan.clone(), window, cx);
                 }
             },
             window,
@@ -221,14 +283,15 @@ impl RepoView {
         task.detach();
     }
 
-    fn commit_now(&mut self, push_after: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn commit_now(&mut self, plan: CommitPlan, window: &mut Window, cx: &mut Context<Self>) {
+        let after = plan.after;
         let summary = self.summary.read(cx).value().trim().to_string();
         let body = self.body.read(cx).value().trim().to_string();
         if summary.is_empty() {
             window.push_notification(gpui_kit::component::notification::Notification::warning(tr("changes.need_summary")), cx);
             return;
         }
-        if self.status.staged().count() == 0 && !self.amend {
+        if self.status.staged().count() == 0 && !self.amend && !plan.stage_all {
             window.push_notification(gpui_kit::component::notification::Notification::warning(tr("changes.nothing_staged")), cx);
             return;
         }
@@ -250,21 +313,24 @@ impl RepoView {
         }
         self.amend = false;
         cx.notify();
-        self.run_op(label, Some(undo), move |git| cairn_core::ops::commit(git, &message, &opts), window, cx);
-        if push_after {
-            let view = cx.entity();
-            let task = cx.spawn_in(window, async move |_, cx| {
-                loop {
-                    cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
-                    let busy = view.read_with(cx, |v, _| v.busy.is_some());
-                    if !busy {
-                        break;
-                    }
+        let then: Option<crate::repo_view::NextStep> = (after != AfterCommit::Nothing).then(|| Box::new(move |v: &mut RepoView, window: &mut Window, cx: &mut Context<RepoView>| v.after_commit(after, window, cx)) as crate::repo_view::NextStep);
+        let CommitPlan { stage_all, branch, .. } = plan;
+        self.run_op_then(
+            label,
+            Some(undo),
+            move |git| {
+                if let Some(b) = &branch {
+                    git.run(["switch", "-c", b.as_str()])?;
                 }
-                let _ = view.update_in(cx, |v, window, cx| v.push(false, window, cx));
-            });
-            task.detach();
-        }
+                if stage_all {
+                    cairn_core::ops::stage_all(git)?;
+                }
+                cairn_core::ops::commit(git, &message, &opts)
+            },
+            then,
+            window,
+            cx,
+        );
     }
 
     fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -507,8 +573,10 @@ impl RepoView {
         let summary_len = self.summary.read(cx).value().chars().count();
         let limit = self.settings.commits.summary_limit;
         let too_long = self.settings.commits.warn_long_summary && summary_len > limit;
-        let can_commit = (staged > 0 || self.amend) && summary_len > 0 && self.busy.is_none();
+        let commit_all = if staged == 0 && !self.amend && self.settings.commits.smart_commit != SmartCommit::Never { self.committable_files() } else { 0 };
+        let can_commit = (staged > 0 || self.amend || commit_all > 0) && summary_len > 0 && self.busy.is_none();
         let amend = self.amend;
+        let after = if amend { AfterCommit::Nothing } else { self.settings.commits.after_commit };
         let sign = self.settings.commits.sign;
         let field_label = |text: SharedString, cx: &App| div().text_xs().text_color(cx.theme().muted_foreground).child(text);
         v_flex()
@@ -579,20 +647,30 @@ impl RepoView {
                             .flex_1()
                             .h(px(36.))
                             .icon(icon(IconName::Check))
-                            .label(if amend {
-                                tr("changes.amend_button")
-                            } else if staged == 0 {
-                                tr("changes.commit_title")
-                            } else {
-                                crate::widgets::plural("changes.commit_button", staged).into()
+                            .label({
+                                let base: String = if amend {
+                                    tr("changes.amend_button").to_string()
+                                } else if commit_all > 0 {
+                                    crate::widgets::plural("changes.commit_all", commit_all)
+                                } else if staged == 0 {
+                                    tr("changes.commit_title").to_string()
+                                } else {
+                                    crate::widgets::plural("changes.commit_button", staged)
+                                };
+                                match after {
+                                    AfterCommit::Nothing => base,
+                                    AfterCommit::Push => t!("changes.and_push", what = base).to_string(),
+                                    AfterCommit::Sync => t!("changes.and_sync", what = base).to_string(),
+                                }
                             })
-                            .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
+                            .when(after != AfterCommit::Nothing, |b| b.tooltip(if after == AfterCommit::Push { tr("changes.after_push_tip") } else { tr("changes.after_sync_tip") }))
+                            .on_click(cx.listener(move |this, _, window, cx| this.commit(after, window, cx))),
                     )
                     .child(
                         crate::widgets::framed_if(Button::new("commit-push"), Tone::Plain, can_commit, cx)
                             .h(px(36.))
-                            .label(tr("changes.commit_push"))
-                            .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
+                            .label(if after == AfterCommit::Nothing { tr("changes.commit_push") } else { tr("changes.commit_only") })
+                            .on_click(cx.listener(move |this, _, window, cx| this.commit(if after == AfterCommit::Nothing { AfterCommit::Push } else { AfterCommit::Nothing }, window, cx))),
                     ),
             )
     }

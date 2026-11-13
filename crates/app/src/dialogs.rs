@@ -37,6 +37,8 @@ pub(crate) enum Recovery {
     Undo,
     /// Recover (lost & found) may bring it back for a while.
     Recover,
+    /// Cairn keeps a copy of the files under Lost & found → Discarded changes.
+    Discarded,
     /// Nothing brings it back.
     Never,
 }
@@ -67,6 +69,7 @@ pub(crate) fn safe_action(spec: SafeAction, on_ok: impl Fn(&mut Window, &mut App
         let (rec_icon, rec_color, rec_text) = match spec.recovery {
             Recovery::Undo => (IconName::Undo2, theme.green, tr("safe.undo")),
             Recovery::Recover => (IconName::LifeBuoy, theme.yellow, tr("safe.recover")),
+            Recovery::Discarded => (IconName::LifeBuoy, theme.green, tr("safe.discarded")),
             Recovery::Never => (IconName::TriangleAlert, theme.red, tr("safe.never")),
         };
         let bullets = |items: &[String], ic: IconName, color: Hsla| {
@@ -160,7 +163,14 @@ pub(crate) fn new_branch(view: Entity<RepoView>, start: Option<String>, window: 
 }
 
 fn new_branch_now(view: Entity<RepoView>, start: Option<String>, window: &mut Window, cx: &mut App) {
-    let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("branch.name_placeholder")));
+    let prefix = view.read(cx).settings.git.branch_prefix.clone();
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("branch.name_placeholder")).default_value(prefix));
+    cx.subscribe(&input, |_, ev: &gpui_kit::component::input::InputEvent, cx| {
+        if matches!(ev, gpui_kit::component::input::InputEvent::Change) {
+            cx.refresh_windows();
+        }
+    })
+    .detach();
     let checkout = Rc::new(Cell::new(true));
     let first = Cell::new(true);
     let start_label: SharedString = start
@@ -171,6 +181,11 @@ fn new_branch_now(view: Entity<RepoView>, start: Option<String>, window: &mut Wi
     window.open_dialog(cx, move |dialog, window, cx| {
         if first.replace(false) {
             input.focus_handle(cx).focus(window, cx);
+        }
+        let typed = input.read(cx).value().to_string();
+        let tidy = cairn_core::stack::tidy_branch_name(&typed);
+        if tidy != typed {
+            input.update(cx, |s, cx| s.set_value(tidy, window, cx));
         }
         let input_ok = input.clone();
         let view = view.clone();
@@ -196,7 +211,7 @@ fn new_branch_now(view: Entity<RepoView>, start: Option<String>, window: &mut Wi
                     ),
             )
             .footer(footer(tr("branch.create"), false, move |window, cx| {
-                let name = input_ok.read(cx).value().trim().to_string();
+                let name = input_ok.read(cx).value().trim().trim_matches('-').to_string();
                 if name.is_empty() {
                     return;
                 }
@@ -366,7 +381,7 @@ pub(crate) fn confirm_reset(view: Entity<RepoView>, target: String, mode: ResetM
             if hard { t!("safe.reset_hard_files").to_string() } else { t!("safe.reset_soft_files").to_string() },
         ],
         loses,
-        recovery: if hard && dirty > 0 { Recovery::Never } else { Recovery::Undo },
+        recovery: if hard && dirty > 0 { Recovery::Discarded } else { Recovery::Undo },
         ok: tr("reset.ok"),
         danger: hard,
     };

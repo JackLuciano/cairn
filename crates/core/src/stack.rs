@@ -850,7 +850,18 @@ pub fn list_issues(git: &Git) -> Result<Vec<Issue>> {
 /// # Returns
 /// A branch name of at most about 50 characters.
 pub fn issue_branch_name(number: u64, title: &str) -> String {
-    let plain: String = title
+    join_words(number.to_string(), slug_words(title), 50)
+}
+
+/// Splits text into lowercase ASCII words for a branch name, dropping accents.
+///
+/// # Arguments
+/// * `text` - any text, such as a title
+///
+/// # Returns
+/// The words, without punctuation.
+fn slug_words(text: &str) -> Vec<String> {
+    let plain: String = text
         .to_lowercase()
         .chars()
         .map(|c| match c {
@@ -864,20 +875,62 @@ pub fn issue_branch_name(number: u64, title: &str) -> String {
             other => other,
         })
         .collect();
-    let slug: Vec<String> = plain
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_string)
-        .collect();
-    let mut name = number.to_string();
-    for w in slug {
-        if name.len() + w.len() + 1 > 50 {
+    plain.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
+fn join_words(mut name: String, words: Vec<String>, max: usize) -> String {
+    for w in words {
+        if name.len() + w.len() + 1 > max {
             break;
         }
-        name.push('-');
+        if !name.is_empty() && !name.ends_with('/') {
+            name.push('-');
+        }
         name.push_str(&w);
     }
     name
+}
+
+/// Suggests a branch name for a commit message, such as `feat/city-search-box` for
+/// `feat(ui): city search box`.
+///
+/// # Arguments
+/// * `summary` - the commit summary
+/// * `prefix` - put in front, such as `jack/`; may be empty
+///
+/// # Returns
+/// A branch name of at most about 50 characters after the prefix.
+pub fn commit_branch_name(summary: &str, prefix: &str) -> String {
+    let (kind, text) = match summary.split_once(':') {
+        Some((head, rest)) if !head.contains(' ') && !head.is_empty() => (head.split('(').next().unwrap_or(head).trim_end_matches('!').to_lowercase(), rest),
+        _ => (String::new(), summary),
+    };
+    let start = if kind.chars().all(|c| c.is_ascii_alphanumeric()) && !kind.is_empty() { format!("{kind}/") } else { String::new() };
+    let name = join_words(start, slug_words(text), 50);
+    let name = if name.is_empty() || name.ends_with('/') { format!("{name}work") } else { name };
+    format!("{prefix}{name}")
+}
+
+/// Cleans up a branch name as it is typed: spaces become dashes, so typing on after a space
+/// keeps going naturally.
+///
+/// # Arguments
+/// * `name` - what was typed
+///
+/// # Returns
+/// The name with every run of whitespace turned into one dash, none at the start.
+pub fn tidy_branch_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_whitespace() {
+            if !out.is_empty() && !out.ends_with('-') {
+                out.push('-');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Creates a branch for an issue and checks it out. The branch is linked to the issue on
@@ -989,6 +1042,16 @@ mod tests {
         assert_eq!(issue_branch_name(42, "Fix: login crashes when the token expires!"), "42-fix-login-crashes-when-the-token-expires");
         assert!(issue_branch_name(7, &"word ".repeat(40)).len() <= 50);
         assert_eq!(issue_branch_name(9, "Ékezetes cím"), "9-ekezetes-cim");
+    }
+
+    #[test]
+    fn commit_messages_suggest_branch_names() {
+        assert_eq!(commit_branch_name("feat(ui): city search box", ""), "feat/city-search-box");
+        assert_eq!(commit_branch_name("fix!: Drop the old cache", "jack/"), "jack/fix/drop-the-old-cache");
+        assert_eq!(commit_branch_name("Update the README file", ""), "update-the-readme-file");
+        assert_eq!(commit_branch_name("chore:", ""), "chore/work");
+        assert_eq!(tidy_branch_name("  my new  branch "), "my-new-branch-");
+        assert_eq!(tidy_branch_name("my-new-branch-"), "my-new-branch-");
     }
 
     #[test]

@@ -95,6 +95,26 @@ pub(crate) struct DiffPrefsEvent(pub cairn_core::settings::Diffs);
 
 impl EventEmitter<DiffPrefsEvent> for RepoView {}
 
+/// Sent when a dialog's "don't ask again" changes a setting, so the change is saved and every
+/// tab gets it.
+pub(crate) struct PrefsEvent(pub std::rc::Rc<dyn Fn(&mut Settings)>);
+
+impl EventEmitter<PrefsEvent> for RepoView {}
+
+impl RepoView {
+    /// Changes a setting from inside a repository tab and saves it for every tab.
+    ///
+    /// # Arguments
+    /// * `change` - edits the settings
+    pub(crate) fn change_setting(&mut self, change: impl Fn(&mut Settings) + 'static, cx: &mut Context<Self>) {
+        change(&mut self.settings);
+        cx.emit(PrefsEvent(std::rc::Rc::new(change)));
+    }
+}
+
+/// The next step of a chain of git operations, run only when the step before it succeeded.
+pub(crate) type NextStep = Box<dyn FnOnce(&mut RepoView, &mut Window, &mut Context<RepoView>)>;
+
 /// Sent when a side panel was resized, so the width is saved: the commit details panel, the file
 /// list on the Changes and Pull requests pages.
 pub(crate) struct PanelWidthEvent {
@@ -192,6 +212,7 @@ pub(crate) struct RepoView {
     pub branch_stats_loading: bool,
     pub branch_filter: crate::pages::branches::BranchFilter,
     pub live_op: Option<crate::live_op::LiveOp>,
+    pub live_cancel: Option<cairn_core::git::CancelHandle>,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
     pub selected_commit: Option<String>,
@@ -299,6 +320,7 @@ impl RepoView {
             branch_stats_loading: false,
             branch_filter: Default::default(),
             live_op: None,
+            live_cancel: None,
             multi_select: Vec::new(),
             last_clicked: None,
             selected_commit: None,
@@ -950,6 +972,28 @@ impl RepoView {
     ) where
         F: FnOnce(&Git) -> cairn_core::Result<String> + Send + 'static,
     {
+        self.run_op_then(label, undo_label, op, None, window, cx);
+    }
+
+    /// Runs a git operation in the background like `run_op`, then runs `then` only if it
+    /// succeeded, so steps of a chain such as sync stop at the first failure.
+    ///
+    /// # Arguments
+    /// * `label` - what is running, shown while busy and in messages
+    /// * `undo_label` - records an undo point under this name first
+    /// * `op` - the operation
+    /// * `then` - the next step, run on success
+    pub(crate) fn run_op_then<F>(
+        &mut self,
+        label: SharedString,
+        undo_label: Option<String>,
+        op: F,
+        then: Option<NextStep>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce(&Git) -> cairn_core::Result<String> + Send + 'static,
+    {
         if self.busy.is_some() {
             window.push_notification(Notification::warning(tr("op.busy")), cx);
             return;
@@ -959,11 +1003,16 @@ impl RepoView {
         cx.notify();
         let progress: crate::live_op::SharedProgress = Default::default();
         let sink = progress.clone();
-        let git = self.git().with_progress(move |phase, done| {
-            if let Ok(mut p) = sink.lock() {
-                *p = Some((phase.to_string(), done));
-            }
-        });
+        let cancel = cairn_core::git::CancelHandle::default();
+        self.live_cancel = Some(cancel.clone());
+        let git = self
+            .git()
+            .with_progress(move |phase, done| {
+                if let Ok(mut p) = sink.lock() {
+                    *p = Some((phase.to_string(), done));
+                }
+            })
+            .with_cancel(cancel);
         self.watch_progress(label.clone(), progress, cx);
         let snapshots = self.settings.checks.snapshots;
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -979,9 +1028,19 @@ impl RepoView {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
-                let shown = this.finish_live_op(result.is_ok(), cx);
+                this.live_cancel = None;
+                let ok = result.is_ok();
+                let cancelled = matches!(result, Err(cairn_core::Error::Cancelled));
+                let shown = if cancelled {
+                    this.live_op = None;
+                    false
+                } else {
+                    this.finish_live_op(ok, cx)
+                };
                 match result {
+                    Err(cairn_core::Error::Cancelled) => window.push_notification(Notification::info(t!("op.cancelled", what = label.to_string()).to_string()), cx),
                     Ok(_) if shown => {}
+                    Ok(_) if then.is_some() => {}
                     Ok(_) => window.push_notification(
                         Notification::success(t!("op.done", what = label.to_string()).to_string()),
                         cx,
@@ -992,6 +1051,9 @@ impl RepoView {
                     ),
                 }
                 this.reload(cx);
+                if let (true, Some(then)) = (ok, then) {
+                    then(this, window, cx);
+                }
                 cx.notify();
             });
         });
@@ -1181,62 +1243,23 @@ impl RepoView {
         self.run_op(tr("op.fetch"), None, move |git| cairn_core::ops::fetch(git, None, prune), window, cx);
     }
 
-    /// One button for staying in step with the remote: fetches, pulls when the remote has new
-    /// commits and pushes when this branch has commits the remote lacks. Publishes a branch that
-    /// was never pushed.
-    pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.remotes.is_empty() {
-            window.push_notification(Notification::info(tr("op.no_remote")), cx);
-            return;
-        }
-        if self.status.branch.upstream.is_none() && self.current_branch().is_some() {
-            self.push(false, window, cx);
-            return;
-        }
-        self.fetch(window, cx);
-        let git = self.git();
-        cx.spawn_in(window, async move |this, cx| {
-            let idle = async |this: &WeakEntity<Self>, cx: &mut AsyncWindowContext| loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
-                match this.read_with(cx, |v, _| v.busy.is_some()) {
-                    Ok(true) => continue,
-                    Ok(false) => return true,
-                    Err(_) => return false,
-                }
-            };
-            if !idle(&this, cx).await {
-                return;
-            }
-            let g = git.clone();
-            let count = |range: &'static str| {
-                let g = g.clone();
-                move || g.run(["rev-list", "--count", range]).ok().and_then(|n| n.trim().parse::<u32>().ok()).unwrap_or(0)
-            };
-            let behind_of = count("HEAD..@{upstream}");
-            let behind = cx.background_executor().spawn(async move { behind_of() }).await;
-            if behind > 0 {
-                let _ = this.update_in(cx, |v, window, cx| v.pull(window, cx));
-                if !idle(&this, cx).await {
-                    return;
-                }
-            }
-            let ahead_of = count("@{upstream}..HEAD");
-            let ahead = cx.background_executor().spawn(async move { ahead_of() }).await;
-            if ahead > 0 {
-                let _ = this.update_in(cx, |v, window, cx| v.push(false, window, cx));
-            }
-        })
-        .detach();
+    fn pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull_then(None, None, window, cx);
     }
 
-    fn pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Pulls the current branch from its upstream, then runs `then` if the pull worked.
+    ///
+    /// # Arguments
+    /// * `mode` - a pull mode for this pull only, or `None` for the one in Settings
+    /// * `then` - the next step, such as a push during sync
+    pub(crate) fn pull_then(&mut self, mode: Option<cairn_core::ops::PullMode>, then: Option<NextStep>, window: &mut Window, cx: &mut Context<Self>) {
         if self.status.branch.upstream.is_none() {
             window.push_notification(Notification::info(tr("op.no_upstream_pull")), cx);
             return;
         }
-        let mode = self.settings.git.pull_mode;
+        let mode = mode.unwrap_or(self.settings.git.pull_mode);
         let autostash = self.settings.git.autostash;
-        self.run_op(tr("op.pull"), Some(t!("undo.pull").to_string()), move |git| cairn_core::ops::pull(git, mode, autostash), window, cx);
+        self.run_op_then(tr("op.pull"), Some(t!("undo.pull").to_string()), move |git| cairn_core::ops::pull(git, mode, autostash), then, window, cx);
     }
 
     pub(crate) fn push(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1311,16 +1334,31 @@ impl RepoView {
             }
             cx.notify();
         }
-        self.run_op(
+        let update = !remote && self.settings.git.update_on_switch && !self.remotes.is_empty();
+        let moved = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let moved_op = moved.clone();
+        let name = target.clone();
+        let done = label.clone();
+        let then: NextStep = Box::new(move |_, window, cx| {
+            let n = moved.load(std::sync::atomic::Ordering::Relaxed);
+            let text = if n > 0 { crate::widgets::plural_with("op.switched_updated", n as usize, &name) } else { t!("op.done", what = done.clone()).to_string() };
+            window.push_notification(Notification::success(text), cx);
+        });
+        self.run_op_then(
             label.into(),
             Some(t!("undo.checkout", name = target.clone()).to_string()),
             move |git| {
                 if remote {
                     cairn_core::refs::checkout_remote(git, &target)
                 } else {
+                    if update {
+                        let n = cairn_core::refs::fast_forward_branch(git, &target, true).unwrap_or(0);
+                        moved_op.store(n, std::sync::atomic::Ordering::Relaxed);
+                    }
                     cairn_core::refs::checkout(git, &target).map(|_| String::new())
                 }
             },
+            Some(then),
             window,
             cx,
         );
@@ -1495,6 +1533,11 @@ impl RepoView {
                                         .item(PopupMenuItem::new(t!("toolbar.push").to_string()).icon(icon(IconName::ArrowUpToLine)).on_click(move |_, window, cx| c.update(cx, |v, cx| v.push(false, window, cx))))
                                         .separator()
                                         .item(PopupMenuItem::new(t!("toolbar.force_push").to_string()).icon(icon(IconName::TriangleAlert)).on_click(move |_, window, cx| crate::dialogs::confirm_force_push(d.clone(), window, cx)))
+                                        .separator()
+                                        .item(PopupMenuItem::new(t!("toolbar.sync_settings").to_string()).icon(icon(IconName::Settings)).on_click(|_, window, cx| {
+                                            crate::settings_dialog::request_category("git");
+                                            window.dispatch_action(Box::new(crate::palette::OpenSettings), cx);
+                                        }))
                                 }
                             });
                         h_flex().child(sync).child(caret)

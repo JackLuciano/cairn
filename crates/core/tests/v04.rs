@@ -95,6 +95,105 @@ fn fetch_reports_progress_while_it_runs() {
 }
 
 #[test]
+fn switching_brings_a_stale_branch_up_to_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin_dir = dir.path().join("origin");
+    let origin = repo(&origin_dir);
+    write(&origin_dir, "a.txt", "1\n");
+    commit(&origin, "base");
+    let clone_dir = dir.path().join("clone");
+    Git::new(dir.path()).run(["clone", "-q", origin_dir.to_str().unwrap(), clone_dir.to_str().unwrap()]).unwrap();
+    let git = Git::new(&clone_dir);
+    git.run(["config", "user.name", "Test"]).unwrap();
+    git.run(["config", "user.email", "test@example.com"]).unwrap();
+    git.run(["switch", "-q", "-c", "feature"]).unwrap();
+    write(&origin_dir, "b.txt", "2\n");
+    commit(&origin, "new on main");
+    write(&origin_dir, "c.txt", "3\n");
+    commit(&origin, "more on main");
+
+    assert_eq!(cairn_core::refs::fast_forward_branch(&git, "main", true).unwrap(), 2);
+    assert_eq!(git.run(["rev-parse", "main"]).unwrap(), origin.run(["rev-parse", "main"]).unwrap());
+    assert_eq!(cairn_core::refs::fast_forward_branch(&git, "main", true).unwrap(), 0, "already up to date");
+    assert_eq!(cairn_core::refs::fast_forward_branch(&git, "feature", true).unwrap(), 0, "no upstream");
+
+    git.run(["switch", "-q", "main"]).unwrap();
+    write(&clone_dir, "mine.txt", "x\n");
+    commit(&git, "local work");
+    git.run(["switch", "-q", "feature"]).unwrap();
+    write(&origin_dir, "d.txt", "4\n");
+    commit(&origin, "even more");
+    let before = git.run(["rev-parse", "main"]).unwrap();
+    assert_eq!(cairn_core::refs::fast_forward_branch(&git, "main", true).unwrap(), 0, "a branch with its own commits is left alone");
+    assert_eq!(git.run(["rev-parse", "main"]).unwrap(), before);
+}
+
+#[test]
+fn a_cancelled_fetch_stops_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin_dir = dir.path().join("origin");
+    let origin = repo(&origin_dir);
+    write(&origin_dir, "a.txt", "1\n");
+    commit(&origin, "base");
+    let clone_dir = dir.path().join("clone");
+    Git::new(dir.path()).run(["clone", "-q", origin_dir.to_str().unwrap(), clone_dir.to_str().unwrap()]).unwrap();
+    let handle = cairn_core::git::CancelHandle::default();
+    handle.cancel();
+    let git = Git::new(&clone_dir).with_progress(|_, _| {}).with_cancel(handle.clone());
+    match git.run(["fetch", "origin"]) {
+        Err(cairn_core::Error::Cancelled) => {}
+        Ok(_) => {}
+        Err(e) => panic!("expected a cancelled fetch, got {e}"),
+    }
+    assert!(handle.is_cancelled());
+    let fresh = Git::new(&clone_dir).with_progress(|_, _| {}).with_cancel(cairn_core::git::CancelHandle::default());
+    fresh.run(["fetch", "origin"]).unwrap();
+}
+
+#[test]
+fn sync_plan_spots_a_rewritten_server_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin_dir = dir.path().join("origin");
+    let origin = repo(&origin_dir);
+    write(&origin_dir, "a.txt", "1\n");
+    commit(&origin, "base");
+    origin.run(["config", "receive.denyCurrentBranch", "ignore"]).unwrap();
+    let mine_dir = dir.path().join("mine");
+    let theirs_dir = dir.path().join("theirs");
+    for d in [&mine_dir, &theirs_dir] {
+        Git::new(dir.path()).run(["clone", "-q", origin_dir.to_str().unwrap(), d.to_str().unwrap()]).unwrap();
+        let g = Git::new(d);
+        g.run(["config", "user.name", "Test"]).unwrap();
+        g.run(["config", "user.email", "test@example.com"]).unwrap();
+    }
+    let mine = Git::new(&mine_dir);
+    let theirs = Git::new(&theirs_dir);
+    write(&theirs_dir, "b.txt", "b\n");
+    commit(&theirs, "shared work");
+    theirs.run(["push", "-q", "origin", "main"]).unwrap();
+    mine.run(["pull", "-q", "--ff-only"]).unwrap();
+    assert_eq!(cairn_core::ops::sync_plan(&mine), cairn_core::ops::SyncPlan::default());
+
+    write(&mine_dir, "c.txt", "c\n");
+    commit(&mine, "my work");
+    let plan = cairn_core::ops::sync_plan(&mine);
+    assert_eq!((plan.ahead, plan.behind, plan.rewritten), (1, 0, 0));
+
+    write(&theirs_dir, "z.txt", "z\n");
+    commit(&theirs, "first on server");
+    theirs.run(["reset", "-q", "--hard", "HEAD~2"]).unwrap();
+    write(&theirs_dir, "z.txt", "z\n");
+    commit(&theirs, "first on server");
+    write(&theirs_dir, "b.txt", "b\n");
+    commit(&theirs, "shared work");
+    theirs.run(["push", "-q", "--force", "origin", "main"]).unwrap();
+    mine.run(["fetch", "-q"]).unwrap();
+    let plan = cairn_core::ops::sync_plan(&mine);
+    assert_eq!((plan.ahead, plan.behind), (2, 2));
+    assert_eq!(plan.rewritten, 1, "the shared commit came back with a new id");
+}
+
+#[test]
 fn viewed_files_reset_when_the_file_changes_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("viewed.json");

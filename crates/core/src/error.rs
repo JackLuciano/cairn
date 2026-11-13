@@ -8,6 +8,8 @@ pub enum Error {
     GitCommand { command: String, message: String },
     #[error("git is not installed or not on PATH")]
     GitMissing,
+    #[error("cancelled")]
+    Cancelled,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

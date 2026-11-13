@@ -393,7 +393,12 @@ impl RepoView {
                                 };
                                 let dest = base_dir.join(branch.replace('/', "-"));
                                 let d2 = dest.clone();
-                                this.run_op(tr("op.add_worktree"), None, move |git| cairn_core::refs::add_worktree(git, &d2, &branch), window, cx);
+                                let patterns = cairn_core::refs::worktree_patterns(&this.settings.git.worktree_copy);
+                                this.run_op(tr("op.add_worktree"), None, move |git| {
+                                    let out = cairn_core::refs::add_worktree(git, &d2, &branch)?;
+                                    let _ = cairn_core::refs::copy_ignored_files(git, &d2, &patterns);
+                                    Ok(out)
+                                }, window, cx);
                                 cx.emit(crate::repo_view::OpenRepoEvent(dest));
                             });
                         });

@@ -204,6 +204,47 @@ pub fn checkout(git: &Git, target: &str) -> Result<()> {
     Ok(())
 }
 
+/// Brings a branch that is not checked out up to date with its upstream, when it only lacks
+/// commits from there and has none of its own, so switching to it never starts out of date.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `branch` - local branch name
+/// * `fetch` - fetch that branch from its remote first; failures (such as being offline) are
+///   ignored and the last fetched state is used
+///
+/// # Returns
+/// How many commits the branch moved forward; 0 when it was up to date, has its own commits,
+/// or has no upstream.
+pub fn fast_forward_branch(git: &Git, branch: &str, fetch: bool) -> Result<u32> {
+    let current = git.run(["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    if current.trim() == branch {
+        return Ok(0);
+    }
+    let Ok(upstream) = git.run(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")]) else {
+        return Ok(0);
+    };
+    let upstream = upstream.trim().to_string();
+    if fetch {
+        let remote = git.run(["config", &format!("branch.{branch}.remote")]).unwrap_or_default();
+        let merge = git.run(["config", &format!("branch.{branch}.merge")]).unwrap_or_default();
+        let (remote, merge) = (remote.trim(), merge.trim().trim_start_matches("refs/heads/"));
+        if !remote.is_empty() && remote != "." && !merge.is_empty() {
+            let _ = git.run(["fetch", "-q", remote, merge]);
+        }
+    }
+    let counts = git.run(["rev-list", "--left-right", "--count", &format!("{branch}...{upstream}")])?;
+    let mut parts = counts.split_whitespace().map(|n| n.parse::<u32>().unwrap_or(0));
+    let (ahead, behind) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if ahead > 0 || behind == 0 {
+        return Ok(0);
+    }
+    let old = git.run(["rev-parse", &format!("refs/heads/{branch}")])?.trim().to_string();
+    let new = git.run(["rev-parse", &upstream])?.trim().to_string();
+    git.run(["update-ref", "-m", &format!("cairn: fast-forward {branch} to {upstream}"), &format!("refs/heads/{branch}"), &new, &old])?;
+    Ok(behind)
+}
+
 /// Checks out a remote branch as a new local tracking branch.
 ///
 /// # Arguments
@@ -542,6 +583,52 @@ pub fn add_worktree(git: &Git, path: &std::path::Path, branch: &str) -> Result<S
     } else {
         git.run(["worktree", "add", "-b", branch, &p])
     }
+}
+
+/// Copies ignored files that a fresh checkout lacks, such as `.env`, from this working tree
+/// into another one, so a new worktree runs straight away. Files already there are kept.
+///
+/// # Arguments
+/// * `git` - runner for this repository's working tree
+/// * `dest` - the other worktree's folder
+/// * `patterns` - names or globs, matched in any folder, such as `.env` or `*.local.json`
+///
+/// # Returns
+/// The paths that were copied.
+pub fn copy_ignored_files(git: &Git, dest: &std::path::Path, patterns: &[String]) -> Result<Vec<String>> {
+    let mut args = vec!["ls-files".to_string(), "--others".into(), "--ignored".into(), "--exclude-standard".into(), "-z".into(), "--".into()];
+    for p in patterns.iter().map(|p| p.trim().trim_start_matches('/')).filter(|p| !p.is_empty()) {
+        args.push(format!(":(glob){p}"));
+        args.push(format!(":(glob)**/{p}"));
+    }
+    if args.len() == 6 {
+        return Ok(Vec::new());
+    }
+    let mut copied = Vec::new();
+    for rel in git.run(args)?.split('\0').filter(|s| !s.is_empty()) {
+        let from = git.dir().join(rel);
+        let to = dest.join(rel);
+        if to.exists() || !from.is_file() {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&from, &to)?;
+        copied.push(rel.to_string());
+    }
+    Ok(copied)
+}
+
+/// Splits the "copy into new worktrees" setting into patterns.
+///
+/// # Arguments
+/// * `setting` - patterns separated by commas or new lines
+///
+/// # Returns
+/// The patterns, trimmed, without empty ones.
+pub fn worktree_patterns(setting: &str) -> Vec<String> {
+    setting.split([',', '\n']).map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
 /// Removes a linked worktree.

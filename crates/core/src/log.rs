@@ -126,6 +126,7 @@ pub fn load_log(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
                 args.push("--exclude=refs/stash".into());
             }
             if opts.include_remotes {
+                args.push("--exclude=refs/cairn/*".into());
                 args.push("--all".into());
             } else {
                 args.push("--branches".into());

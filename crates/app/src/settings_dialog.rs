@@ -172,6 +172,9 @@ fn schema() -> Vec<Category> {
                     row("warn_long", "settings.warn_long", None, Control::Toggle(|s| s.commits.warn_long_summary, |s, v| s.commits.warn_long_summary = v)),
                     row("sign", "settings.sign", Some("settings.sign_desc"), Control::Toggle(|s| s.commits.sign, |s, v| s.commits.sign = v)),
                     row("checks_commit", "settings.checks_on_commit", None, Control::Toggle(|s| s.commits.run_checks, |s, v| s.commits.run_checks = v)),
+                    row("after_commit", "settings.after_commit", Some("settings.after_commit_desc"), Control::Choice(&["opt.do_nothing", "opt.push", "opt.sync"], |s| s.commits.after_commit as usize, |s, i| s.commits.after_commit = [AfterCommit::Nothing, AfterCommit::Push, AfterCommit::Sync][i])),
+                    row("smart_commit", "settings.smart_commit", Some("settings.smart_commit_desc"), Control::Choice(&["opt.ask", "opt.always", "opt.never"], |s| s.commits.smart_commit as usize, |s, i| s.commits.smart_commit = [SmartCommit::Ask, SmartCommit::Always, SmartCommit::Never][i])),
+                    row("ask_on_main", "settings.ask_on_main", Some("settings.ask_on_main_desc"), Control::Toggle(|s| s.commits.ask_on_main, |s, v| s.commits.ask_on_main = v)),
                     row("ai_messages", "settings.ai_messages", None, Control::Choice(&["opt.on_request", "opt.always", "opt.never"], |s| s.commits.ai_messages as usize, |s, i| s.commits.ai_messages = [AiSuggest::OnRequest, AiSuggest::Always, AiSuggest::Never][i])),
                     row("ai_instructions", "settings.ai_instructions", Some("settings.ai_instructions_desc"), Control::LongText(|s| s.commits.ai_instructions.clone(), |s, v| s.commits.ai_instructions = v)),
                 ],
@@ -192,6 +195,14 @@ fn schema() -> Vec<Category> {
                     ],
                 },
                 Group {
+                    label: "settings.group.sync",
+                    rows: vec![
+                        row("confirm_sync", "settings.confirm_sync", Some("settings.confirm_sync_desc"), Control::Toggle(|s| s.git.confirm_sync, |s, v| s.git.confirm_sync = v)),
+                        row("warn_rewritten", "settings.warn_rewritten", Some("settings.warn_rewritten_desc"), Control::Toggle(|s| s.git.warn_rewritten_upstream, |s, v| s.git.warn_rewritten_upstream = v)),
+                        row("after_commit_git", "settings.after_commit", Some("settings.after_commit_desc"), Control::Choice(&["opt.do_nothing", "opt.push", "opt.sync"], |s| s.commits.after_commit as usize, |s, i| s.commits.after_commit = [AfterCommit::Nothing, AfterCommit::Push, AfterCommit::Sync][i])),
+                    ],
+                },
+                Group {
                     label: "settings.group.rebase",
                     rows: vec![
                         row("autosquash", "settings.autosquash", None, Control::Toggle(|s| s.git.autosquash, |s, v| s.git.autosquash = v)),
@@ -205,6 +216,14 @@ fn schema() -> Vec<Category> {
                         row("force", "settings.force_mode", None, Control::Choice(&["opt.with_lease", "opt.never"], |s| (s.git.force_mode == ForceMode::None) as usize, |s, i| s.git.force_mode = if i == 1 { ForceMode::None } else { ForceMode::WithLease })),
                         row("push_tags", "settings.push_tags", None, Control::Toggle(|s| s.git.push_tags, |s, v| s.git.push_tags = v)),
                         row("default_branch", "settings.default_branch", None, Control::Text(|s| s.git.default_branch.clone(), |s, v| s.git.default_branch = v)),
+                    ],
+                },
+                Group {
+                    label: "settings.group.branches",
+                    rows: vec![
+                        row("branch_prefix", "settings.branch_prefix", Some("settings.branch_prefix_desc"), Control::Text(|s| s.git.branch_prefix.clone(), |s, v| s.git.branch_prefix = v)),
+                        row("update_on_switch", "settings.update_on_switch", Some("settings.update_on_switch_desc"), Control::Toggle(|s| s.git.update_on_switch, |s, v| s.git.update_on_switch = v)),
+                        row("worktree_copy", "settings.worktree_copy", Some("settings.worktree_copy_desc"), Control::Text(|s| s.git.worktree_copy.clone(), |s, v| s.git.worktree_copy = v)),
                     ],
                 },
             ],
