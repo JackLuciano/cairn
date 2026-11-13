@@ -5,6 +5,43 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13
+
+Sync the way VS Code does it, discards you can take back, and fewer accidental commits to main.
+
+### Added
+
+- Choose what happens after a commit in Settings → Commits: nothing, push, or sync (pull what's
+  new, then push). The commit button says what it will do, and the second button commits only.
+- "Ask before syncing" shows how many commits Sync will pull and push before it starts.
+- Sync warns when someone rebased or force pushed the branch on the server, since merging it
+  would keep two copies of the same commits, and offers a rebase instead.
+- "Sync settings…" in the Sync button's menu.
+- Discarded changes can be brought back: Cairn keeps a copy of every file before discarding
+  it, discarding lines from it, or a hard reset, and lists them in Lost & found → Discarded
+  changes with a "Bring back" button.
+- Committing straight to `main` offers to put the commit on a new branch named after its
+  message instead, with "Don't ask again".
+- With nothing staged, the commit button offers to commit every changed file (Settings →
+  Commits → When nothing is staged).
+- Switching to a branch that is only behind the server fetches it and brings it up to date
+  first, so you never start on an old `main`.
+- Stop a running push, pull or fetch from its progress toast.
+- A prefix for new branch names (such as `jack/`), and spaces typed in branch names become
+  dashes.
+- Ignored files such as `.env` are copied into new worktrees, so they run straight away
+  (Settings → Git behavior → Branches).
+
+- Pick a repository for the activity charts on Home, or see all of them together.
+
+### Changed
+
+- The activity charts on Home count a commit once even when several clones or worktrees of
+  the same project contain it.
+- Sync stops at the first step that fails instead of pulling or pushing after a failed fetch,
+  and says so when there is nothing to pull or push. Commit and push no longer pushes when the
+  commit failed.
+
 ## [0.5.0] - 2026-11-13
 
 A home that tells you where you stand, a branch picker you can search, and clearer, safer

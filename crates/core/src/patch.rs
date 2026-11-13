@@ -165,7 +165,8 @@ pub fn unstage_lines(git: &Git, diff: &FileDiff, selection: &LineSelection) -> R
     Ok(())
 }
 
-/// Throws away the selected lines from the working tree.
+/// Throws away the selected lines from the working tree, after saving the whole file so Lost &
+/// found can bring it back.
 ///
 /// # Arguments
 /// * `git` - runner for the repository
@@ -176,6 +177,7 @@ pub fn unstage_lines(git: &Git, diff: &FileDiff, selection: &LineSelection) -> R
 /// `Ok(())` once the file on disk is updated.
 pub fn discard_lines(git: &Git, diff: &FileDiff, selection: &LineSelection) -> Result<()> {
     if let Some(patch) = build_patch(diff, selection, true) {
+        crate::discarded::backup(git, std::slice::from_ref(&diff.path))?;
         git.run_with_input(["apply", "-R", "--recount", "--unidiff-zero", "--whitespace=nowarn", "-"], patch.as_bytes())?;
     }
     Ok(())

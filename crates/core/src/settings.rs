@@ -144,6 +144,26 @@ pub enum ChecksWhen {
     Never,
 }
 
+/// What happens right after a successful commit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterCommit {
+    #[default]
+    Nothing,
+    Push,
+    Sync,
+}
+
+/// What the commit button does when nothing is staged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmartCommit {
+    #[default]
+    Ask,
+    Always,
+    Never,
+}
+
 /// General behavior.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -298,6 +318,9 @@ pub struct Commits {
     pub sign: bool,
     pub run_checks: bool,
     pub confirm_amend_pushed: bool,
+    pub after_commit: AfterCommit,
+    pub smart_commit: SmartCommit,
+    pub ask_on_main: bool,
 }
 
 impl Default for Commits {
@@ -311,6 +334,9 @@ impl Default for Commits {
             sign: false,
             run_checks: true,
             confirm_amend_pushed: true,
+            after_commit: AfterCommit::Nothing,
+            smart_commit: SmartCommit::Ask,
+            ask_on_main: true,
         }
     }
 }
@@ -329,6 +355,11 @@ pub struct GitBehavior {
     pub force_mode: ForceMode,
     pub push_tags: bool,
     pub default_branch: String,
+    pub confirm_sync: bool,
+    pub warn_rewritten_upstream: bool,
+    pub branch_prefix: String,
+    pub update_on_switch: bool,
+    pub worktree_copy: String,
 }
 
 impl Default for GitBehavior {
@@ -344,6 +375,11 @@ impl Default for GitBehavior {
             force_mode: ForceMode::WithLease,
             push_tags: false,
             default_branch: "main".into(),
+            confirm_sync: false,
+            warn_rewritten_upstream: true,
+            branch_prefix: String::new(),
+            update_on_switch: true,
+            worktree_copy: ".env, .env.local".into(),
         }
     }
 }

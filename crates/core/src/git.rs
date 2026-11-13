@@ -52,6 +52,63 @@ impl std::fmt::Debug for ProgressSink {
 
 const PROGRESS_COMMANDS: [&str; 4] = ["push", "fetch", "pull", "clone"];
 
+/// Stops a running push, fetch, pull or clone from another thread.
+#[derive(Clone, Debug, Default)]
+pub struct CancelHandle(std::sync::Arc<std::sync::Mutex<CancelState>>);
+
+#[derive(Debug, Default)]
+struct CancelState {
+    cancelled: bool,
+    pid: Option<u32>,
+}
+
+impl CancelHandle {
+    /// Stops the git process, and anything it started, if one is running; one started later
+    /// stops at once.
+    pub fn cancel(&self) {
+        let pid = {
+            let Ok(mut s) = self.0.lock() else { return };
+            s.cancelled = true;
+            s.pid
+        };
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+    }
+
+    /// Whether `cancel` was called.
+    ///
+    /// # Returns
+    /// `true` once cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.lock().map(|s| s.cancelled).unwrap_or(false)
+    }
+
+    fn started(&self, pid: u32) -> bool {
+        let Ok(mut s) = self.0.lock() else { return false };
+        s.pid = Some(pid);
+        s.cancelled
+    }
+
+    fn finished(&self) {
+        if let Ok(mut s) = self.0.lock() {
+            s.pid = None;
+        }
+    }
+}
+
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+}
+
 /// Reads one progress line git prints, such as `Receiving objects:  45% (450/1000)`.
 ///
 /// # Arguments
@@ -72,6 +129,7 @@ pub struct Git {
     dir: PathBuf,
     env: Vec<(String, String)>,
     progress: Option<ProgressSink>,
+    cancel: Option<CancelHandle>,
 }
 
 impl Git {
@@ -83,7 +141,19 @@ impl Git {
     /// # Returns
     /// A runner with no extra environment variables.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), env: Vec::new(), progress: None }
+        Self { dir: dir.into(), env: Vec::new(), progress: None, cancel: None }
+    }
+
+    /// Lets `handle` stop the push, fetch, pull or clone this runner starts.
+    ///
+    /// # Arguments
+    /// * `handle` - shared with whoever may cancel
+    ///
+    /// # Returns
+    /// The runner, for chaining.
+    pub fn with_cancel(mut self, handle: CancelHandle) -> Self {
+        self.cancel = Some(handle);
+        self
     }
 
     /// Reports the progress of push, fetch, pull and clone while they run.
@@ -100,6 +170,11 @@ impl Git {
 
     fn run_streaming(&self, args: &[String], sink: &ProgressSink) -> Result<Output> {
         let mut child = self.command(args).spawn().map_err(map_spawn_error)?;
+        if let Some(c) = &self.cancel
+            && c.started(child.id())
+        {
+            kill_tree(child.id());
+        }
         let stderr = child.stderr.take();
         let sink = sink.clone();
         let reader = std::thread::spawn(move || {
@@ -128,6 +203,12 @@ impl Git {
         });
         let mut output = child.wait_with_output().map_err(map_spawn_error)?;
         output.stderr = reader.join().unwrap_or_default();
+        if let Some(c) = &self.cancel {
+            c.finished();
+            if c.is_cancelled() && !output.status.success() {
+                return Err(Error::Cancelled);
+            }
+        }
         Ok(output)
     }
 

@@ -50,7 +50,8 @@ impl IssueBranch {
 
     fn pick(&mut self, issue: &Issue, window: &mut Window, cx: &mut Context<Self>) {
         self.picked = Some(issue.number);
-        let name = stack::issue_branch_name(issue.number, &issue.title);
+        let prefix = self.repo.read(cx).settings.git.branch_prefix.clone();
+        let name = format!("{prefix}{}", stack::issue_branch_name(issue.number, &issue.title));
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
         cx.notify();
     }

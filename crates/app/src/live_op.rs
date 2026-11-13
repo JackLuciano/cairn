@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -34,7 +35,9 @@ pub(crate) struct LiveOp {
 /// Such as "Downloading".
 fn friendly_phase(phase: &str) -> SharedString {
     let p = phase.to_lowercase();
-    if p.contains("receiving") || p.contains("unpacking") {
+    if p == "cancelling" {
+        tr("live.cancelling")
+    } else if p.contains("receiving") || p.contains("unpacking") {
         tr("live.downloading")
     } else if p.contains("writing") {
         tr("live.uploading")
@@ -149,7 +152,25 @@ impl RepoView {
                                 )
                                 .child(v_flex().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(live.label.clone())).child(div().text_xs().text_color(theme.muted_foreground).child(line)))
                                 .child(spacer())
-                                .when(live.finished.is_none(), |d| d.child(div().text_sm().font_weight(FontWeight::BOLD).text_color(theme.foreground).child(format!("{pct}%")))),
+                                .when(live.finished.is_none(), |d| d.child(div().text_sm().font_weight(FontWeight::BOLD).text_color(theme.foreground).child(format!("{pct}%"))))
+                                .when(live.finished.is_none() && self.live_cancel.is_some(), |d| {
+                                    d.child(
+                                        Button::new("live-cancel")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(icon(IconName::X))
+                                            .tooltip(tr("live.cancel"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(c) = &this.live_cancel {
+                                                    c.cancel();
+                                                }
+                                                if let Some(l) = this.live_op.as_mut() {
+                                                    l.phase = "cancelling".into();
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
                         )
                         .child(
                             h_flex()

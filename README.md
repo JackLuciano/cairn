@@ -222,7 +222,15 @@ commit message or a pull request description, or get a suggestion for a tricky c
 - **Undo history** for every operation, with uncommitted work stashed safely before going back.
 - **No surprises.** Reset, force push, discard and delete say what will happen, what you would
   lose and whether you can get it back, before you confirm.
-- **Live progress.** Push, pull and fetch show how far along they are in a corner toast.
+- **Discards you can take back.** Cairn keeps a copy before discarding changes or a hard reset;
+  Lost & found → Discarded changes brings them back.
+- **Main stays clean.** Committing straight to `main` offers to put the commit on a new branch
+  named after its message.
+- **Live progress.** Push, pull and fetch show how far along they are in a corner toast, with a
+  button to stop them.
+- **Sync your way.** Push or sync right after each commit, confirm before syncing, and get a
+  warning when someone rewrote the branch on the server. Switching to a branch brings it up to
+  date first.
 - **Checks before commit and push** from a `.cairn/checks.toml` file in your repository.
 - **Secret scan** that stops API keys, tokens and private keys from leaving your computer.
 - **Protected main**: Cairn asks before rewriting history on `main` or `master`.

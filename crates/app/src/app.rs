@@ -125,6 +125,7 @@ impl CairnApp {
         {
             tab.update(cx, |v, cx| {
                 v.live_op = Some(crate::live_op::LiveOp { label: tr("op.push"), phase: "Writing objects".into(), done: done.parse().unwrap_or(0.62), finished: None });
+                v.live_cancel = Some(cairn_core::git::CancelHandle::default());
                 cx.notify();
             });
         }
@@ -176,6 +177,41 @@ impl CairnApp {
                                 crate::dialogs::confirm_force_push(tab, window, cx);
                             } else if let Some(id) = tab.read(cx).commits.get(3).map(|c| c.id.clone()) {
                                 crate::dialogs::confirm_reset(tab, id, cairn_core::ops::ResetMode::Hard, window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Ok(kind @ ("commit_all" | "commit_trunk")) => {
+                let kind = kind.to_string();
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                        let _ = cx.update(|window, cx| {
+                            tab.update(cx, |v, cx| v.summary.update(cx, |s, cx| s.set_value("feat(ui): city search box", window, cx)));
+                            let plan = crate::changes::CommitPlan::default();
+                            if kind == "commit_all" {
+                                crate::commit_guard::ask_commit_all(tab, plan, 3, window, cx);
+                            } else {
+                                crate::commit_guard::ask_on_trunk(tab, plan, window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Ok(kind @ ("sync_confirm" | "sync_rewritten")) => {
+                let kind = kind.to_string();
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                        let plan = cairn_core::ops::SyncPlan { ahead: 2, behind: 3, rewritten: 2 };
+                        let _ = cx.update(|window, cx| {
+                            if kind == "sync_confirm" {
+                                crate::sync::confirm_sync(tab, plan, window, cx);
+                            } else {
+                                crate::sync::warn_rewritten(tab, plan, window, cx);
                             }
                         });
                     })
@@ -305,6 +341,20 @@ impl CairnApp {
                     for tab in this.tabs.clone() {
                         tab.update(cx, |v, cx| {
                             v.settings.diffs = diffs.clone();
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+                cx.subscribe(&view, |this, _, ev: &crate::repo_view::PrefsEvent, cx| {
+                    (ev.0)(&mut this.settings);
+                    if let Err(e) = this.settings.save() {
+                        crate::repo_view::log_error(&format!("saving settings: {e}"));
+                    }
+                    for tab in this.tabs.clone() {
+                        let change = ev.0.clone();
+                        tab.update(cx, |v, cx| {
+                            change(&mut v.settings);
                             cx.notify();
                         });
                     }
@@ -1533,7 +1583,8 @@ impl Render for CairnApp {
             .on_action(cx.listener(|this, _: &p::GoBranches, window, cx| this.with_tab(window, cx, |v, w, cx| v.open_page(crate::repo_view::Page::Branches, w, cx))))
             .on_action(cx.listener(|this, _: &p::CommitStaged, window, cx| this.with_tab(window, cx, |v, w, cx| {
                 if v.page == crate::repo_view::Page::Changes {
-                    v.commit(false, w, cx);
+                    let after = if v.amend { cairn_core::settings::AfterCommit::Nothing } else { v.settings.commits.after_commit };
+                    v.commit(after, w, cx);
                 }
             })))
             .bg(theme.background)

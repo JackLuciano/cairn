@@ -21,9 +21,10 @@ const REFRESH_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) struct HomeData {
     pub summaries: HashMap<PathBuf, RepoSummary>,
     pub queue: Option<Result<Vec<(PathBuf, QueuedPr)>, String>>,
-    pub activity: Vec<CommitStat>,
-    pub lines: Option<HashMap<String, (u64, u64)>>,
+    pub activity: Vec<(PathBuf, Vec<CommitStat>)>,
+    pub lines: Option<Vec<(PathBuf, Vec<CommitStat>)>>,
     pub lines_loading: bool,
+    pub activity_repo: Option<PathBuf>,
     pub me: Option<String>,
     pub loading: bool,
     pub loaded: Option<std::time::Instant>,
@@ -80,17 +81,10 @@ impl CairnApp {
                 let lines = cx
                     .background_executor()
                     .spawn(async move {
-                        let stats: Vec<CommitStat> = std::thread::scope(|s| {
-                            let handles: Vec<_> = line_paths.iter().map(|p| s.spawn(move || cairn_core::insights::activity(&cairn_core::Git::new(p), CONTRIBUTOR_DAYS as u32, true))).collect();
-                            handles.into_iter().filter_map(|h| h.join().ok()).flatten().collect()
-                        });
-                        let mut by: HashMap<String, (u64, u64)> = HashMap::new();
-                        for c in stats {
-                            let e = by.entry(c.author.to_lowercase()).or_default();
-                            e.0 += c.added as u64;
-                            e.1 += c.removed as u64;
-                        }
-                        by
+                        std::thread::scope(|s| {
+                            let handles: Vec<_> = line_paths.iter().map(|p| s.spawn(move || (p.clone(), cairn_core::insights::activity(&cairn_core::Git::new(p), CONTRIBUTOR_DAYS as u32, true)))).collect();
+                            handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
+                        })
                     })
                     .await;
                 let _ = this.update(cx, |this, cx| {
@@ -106,12 +100,12 @@ impl CairnApp {
                 .background_executor()
                 .spawn(async move {
                     let days = (CALENDAR_WEEKS * 7 + 7) as u32;
-                    let (summaries, activity): (Vec<RepoSummary>, Vec<Vec<CommitStat>>) = std::thread::scope(|s| {
-                        let handles: Vec<_> = paths.iter().map(|p| s.spawn(move || (cairn_core::workspace::summarize(p), cairn_core::insights::activity(&cairn_core::Git::new(p), days, false)))).collect();
+                    let (summaries, activity): (Vec<RepoSummary>, Vec<(PathBuf, Vec<CommitStat>)>) = std::thread::scope(|s| {
+                        let handles: Vec<_> = paths.iter().map(|p| s.spawn(move || (cairn_core::workspace::summarize(p), (p.clone(), cairn_core::insights::activity(&cairn_core::Git::new(p), days, false))))).collect();
                         handles.into_iter().filter_map(|h| h.join().ok()).unzip()
                     });
                     let me = paths.first().and_then(|p| cairn_core::Git::new(p).run(["config", "user.name"]).ok()).map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-                    (summaries, activity.into_iter().flatten().collect::<Vec<_>>(), me)
+                    (summaries, activity, me)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -260,16 +254,28 @@ impl CairnApp {
     /// The section, or `None` before the history has loaded or when it is empty.
     pub(crate) fn render_activity(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use chrono::Datelike;
-        if self.home.activity.is_empty() {
+        let picked = self.home.activity_repo.as_ref().filter(|p| self.home.activity.iter().any(|(r, _)| r == *p));
+        let in_scope = |p: &PathBuf| picked.is_none_or(|x| x == p);
+        let activity: Vec<&CommitStat> = cairn_core::insights::unique_commits(self.home.activity.iter().filter(|(p, _)| in_scope(p)).flat_map(|(_, s)| s));
+        if self.home.activity.iter().all(|(_, s)| s.is_empty()) {
             return None;
         }
+        let lines: Option<HashMap<String, (u64, u64)>> = self.home.lines.as_ref().map(|all| {
+            let mut by: HashMap<String, (u64, u64)> = HashMap::new();
+            for c in cairn_core::insights::unique_commits(all.iter().filter(|(p, _)| in_scope(p)).flat_map(|(_, s)| s)) {
+                let e = by.entry(c.author.to_lowercase()).or_default();
+                e.0 += c.added as u64;
+                e.1 += c.removed as u64;
+            }
+            by
+        });
         let theme = cx.theme().clone();
         let today = chrono::Local::now().date_naive();
         let this_monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
         let first_monday = this_monday - chrono::Duration::weeks(CALENDAR_WEEKS - 1);
         let mut days = vec![0u32; (CALENDAR_WEEKS * 7) as usize];
         let now = chrono::Utc::now().timestamp();
-        for c in &self.home.activity {
+        for c in &activity {
             let Some(date) = chrono::DateTime::from_timestamp(c.time, 0).map(|d| d.with_timezone(&chrono::Local).date_naive()) else { continue };
             let i = (date - first_monday).num_days();
             if (0..CALENDAR_WEEKS * 7).contains(&i) {
@@ -336,7 +342,7 @@ impl CairnApp {
 
         let mut weeks = vec![0u32; BAR_WEEKS as usize];
         let bar_start = this_monday - chrono::Duration::weeks(BAR_WEEKS - 1);
-        for c in &self.home.activity {
+        for c in &activity {
             let Some(date) = chrono::DateTime::from_timestamp(c.time, 0).map(|d| d.with_timezone(&chrono::Local).date_naive()) else { continue };
             let i = (date - bar_start).num_days() / 7;
             if (0..BAR_WEEKS).contains(&i) && date >= bar_start {
@@ -383,7 +389,7 @@ impl CairnApp {
 
         let since = now - CONTRIBUTOR_DAYS * DAY;
         let mut people: Vec<(String, u32, u64, u64)> = Vec::new();
-        for c in self.home.activity.iter().filter(|c| c.time >= since) {
+        for c in activity.iter().filter(|c| c.time >= since) {
             match people.iter_mut().find(|p| p.0.eq_ignore_ascii_case(&c.author)) {
                 Some(p) => {
                     p.1 += 1;
@@ -413,7 +419,7 @@ impl CairnApp {
                             .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{share:.0}%"))),
                     )
                     .child(h_flex().h(px(6.)).w_full().rounded(px(3.)).bg(theme.muted.opacity(0.7)).child(div().h_full().rounded(px(3.)).w(relative(share / 100.)).bg(if you { theme.primary } else { theme.primary.opacity(0.6) })))
-                    .child(hstack().gap_2().text_xs().text_color(theme.muted_foreground).child(match self.home.lines.as_ref().map(|l| l.get(&name.to_lowercase()).copied().unwrap_or((*added, *removed))) {
+                    .child(hstack().gap_2().text_xs().text_color(theme.muted_foreground).child(match lines.as_ref().map(|l| l.get(&name.to_lowercase()).copied().unwrap_or((*added, *removed))) {
                         Some((a, r)) => t!("home.lines", added = short_count(a), removed = short_count(r)).to_string(),
                         None => t!("home.counting_lines").to_string(),
                     })),
@@ -424,11 +430,38 @@ impl CairnApp {
             .child(hstack().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("home.contributors_title"))).child(spacer()).child(div().text_xs().text_color(theme.muted_foreground).child(t!("home.contributors_sub", people = people.len(), days = CONTRIBUTOR_DAYS).to_string())))
             .child(rows);
 
+        let repos: Vec<PathBuf> = self.home.activity.iter().filter(|(_, s)| !s.is_empty()).map(|(p, _)| p.clone()).collect();
+        let name_of = |p: &PathBuf| self.library.repos.iter().find(|r| &r.path == p).map(|r| r.name.clone()).unwrap_or_else(|| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let mut picker = h_flex().flex_wrap().gap_1p5().child(crate::widgets::toggle_pill("act-all", tr("home.all_repos"), picked.is_none(), cx).on_click(cx.listener(|this, _, _, cx| {
+            this.home.activity_repo = None;
+            cx.notify();
+        })));
+        for (i, p) in repos.iter().enumerate() {
+            let pick = p.clone();
+            picker = picker.child(crate::widgets::toggle_pill(("act-repo", i), name_of(p), picked == Some(p), cx).on_click(cx.listener(move |this, _, _, cx| {
+                this.home.activity_repo = Some(pick.clone());
+                cx.notify();
+            })));
+        }
+        let sub: SharedString = match picked {
+            Some(p) => t!("home.activity_sub_one", repo = name_of(p)).to_string().into(),
+            None => tr("home.activity_sub"),
+        };
         Some(
             v_flex()
                 .gap_3()
-                .child(hstack().gap_2().pt_1().child(icon(IconName::Activity).small().text_color(theme.green)).child(div().text_base().font_weight(FontWeight::BOLD).child(tr("home.activity_title"))).child(div().text_xs().text_color(theme.muted_foreground).child(tr("home.activity_sub"))))
-                .child(h_flex().flex_wrap().items_stretch().gap_3().child(calendar).child(weekly))
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(hstack().gap_2().child(icon(IconName::Activity).small().text_color(theme.green)).child(div().text_base().font_weight(FontWeight::BOLD).child(tr("home.activity_title"))).child(div().text_xs().text_color(theme.muted_foreground).child(sub)))
+                        .child(spacer())
+                        .when(repos.len() > 1, |d| d.child(picker)),
+                )
+                .when(activity.is_empty(), |d| d.child(div().p_4().text_sm().text_color(theme.muted_foreground).child(tr("home.no_activity"))))
+                .when(!activity.is_empty(), |d| d.child(h_flex().flex_wrap().items_stretch().gap_3().child(calendar).child(weekly)))
                 .when(!people.is_empty(), |d| d.child(contributors))
                 .into_any_element(),
         )

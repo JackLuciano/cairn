@@ -73,7 +73,8 @@ pub fn unstage_all(git: &Git) -> Result<()> {
     Ok(())
 }
 
-/// Throws away working-tree changes to files. Untracked files are deleted.
+/// Throws away working-tree changes to files. Untracked files are deleted. Their content is
+/// saved first, so Lost & found can bring it back.
 ///
 /// # Arguments
 /// * `git` - runner for the repository
@@ -83,6 +84,8 @@ pub fn unstage_all(git: &Git) -> Result<()> {
 /// # Returns
 /// `Ok(())` once the files are reverted.
 pub fn discard_files(git: &Git, tracked: &[String], untracked: &[String]) -> Result<()> {
+    let all: Vec<String> = tracked.iter().chain(untracked).cloned().collect();
+    crate::discarded::backup(git, &all)?;
     if !tracked.is_empty() {
         let mut args = vec!["restore".to_string(), "--worktree".into(), "--".into()];
         args.extend(tracked.iter().cloned());
@@ -201,6 +204,38 @@ pub fn pull(git: &Git, mode: PullMode, autostash: bool) -> Result<String> {
         args.push("--autostash");
     }
     git.run(args)
+}
+
+/// What a sync would do for the current branch, measured against its upstream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyncPlan {
+    pub ahead: u32,
+    pub behind: u32,
+    pub rewritten: u32,
+}
+
+/// Measures what a sync would do: commits to push, commits to pull, and how many incoming
+/// commits are copies of ones this branch already has, which happens when someone rebased or
+/// force pushed the branch on the server.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+///
+/// # Returns
+/// The plan, all zero when the branch has no upstream.
+pub fn sync_plan(git: &Git) -> SyncPlan {
+    let Ok(counts) = git.run(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]) else {
+        return SyncPlan::default();
+    };
+    let mut parts = counts.split_whitespace().map(|n| n.parse::<u32>().unwrap_or(0));
+    let ahead = parts.next().unwrap_or(0);
+    let behind = parts.next().unwrap_or(0);
+    let rewritten = if ahead > 0 && behind > 0 {
+        git.run(["log", "--format=%m", "--cherry", "HEAD...@{upstream}", "--"]).map(|out| out.lines().filter(|l| l.trim() == "=").count() as u32).unwrap_or(0)
+    } else {
+        0
+    };
+    SyncPlan { ahead, behind, rewritten }
 }
 
 /// Pushes a branch.
@@ -381,6 +416,15 @@ pub fn reset(git: &Git, target: &str, mode: ResetMode) -> Result<()> {
         ResetMode::Hard => "--hard",
         ResetMode::Keep => "--keep",
     };
+    if mode == ResetMode::Hard {
+        let changed: Vec<String> = git
+            .run(["status", "--porcelain", "-z", "--untracked-files=no"])?
+            .split('\0')
+            .filter(|e| e.len() > 3)
+            .map(|e| e[3..].to_string())
+            .collect();
+        crate::discarded::backup(git, &changed)?;
+    }
     git.run(["reset", "-q", flag, target])?;
     Ok(())
 }

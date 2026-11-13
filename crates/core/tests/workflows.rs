@@ -168,6 +168,18 @@ fn discard_restores_tracked_and_removes_untracked() {
     ops::discard_files(&git, &["a.txt".into()], &["junk.txt".into()]).unwrap();
     assert!(load_status(&git).unwrap().is_clean());
     assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "1\n");
+
+    let saved = cairn_core::discarded::list(&git);
+    assert_eq!(saved.len(), 1);
+    let all = cairn_core::log::LogOptions::default();
+    assert!(cairn_core::log::load_log(&git, &all).unwrap().iter().all(|c| c.summary != "Discarded changes"), "backups stay out of History");
+    assert_eq!(saved[0].files, vec!["a.txt".to_string(), "junk.txt".to_string()]);
+    cairn_core::discarded::restore(&git, &saved[0]).unwrap();
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "oops\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("junk.txt")).unwrap(), "x\n");
+    assert_eq!(git.run(["diff", "--cached", "--name-only"]).unwrap(), "", "restoring leaves the index alone");
+    cairn_core::discarded::delete(&git, &saved[0]).unwrap();
+    assert!(cairn_core::discarded::list(&git).is_empty());
 }
 
 #[test]
@@ -430,8 +442,23 @@ fn worktrees_are_added_listed_and_pruned_once_merged() {
     write(&main_dir, "a.txt", "1\n");
     commit(&git, "base");
 
+    write(&main_dir, ".gitignore", ".env\nconfig/*.local.json\nbuild/\n");
+    commit(&git, "ignore");
+    write(&main_dir, ".env", "SECRET=1\n");
+    std::fs::create_dir_all(main_dir.join("config")).unwrap();
+    write(&main_dir.join("config"), "db.local.json", "{}\n");
+    std::fs::create_dir_all(main_dir.join("build")).unwrap();
+    write(&main_dir.join("build"), "out.bin", "x\n");
+
     let wt_path = root.path().join("wt-fix");
     refs::add_worktree(&git, &wt_path, "fix/typo").unwrap();
+    let copied = refs::copy_ignored_files(&git, &wt_path, &refs::worktree_patterns(".env, *.local.json")).unwrap();
+    assert_eq!(copied.len(), 2, "{copied:?}");
+    assert_eq!(std::fs::read_to_string(wt_path.join(".env")).unwrap(), "SECRET=1\n");
+    assert!(wt_path.join("config").join("db.local.json").exists());
+    assert!(!wt_path.join("build").exists(), "only matching files are copied");
+    std::fs::remove_file(wt_path.join(".env")).unwrap();
+    std::fs::remove_file(wt_path.join("config").join("db.local.json")).unwrap();
     let listed = refs::list_worktrees(&git).unwrap();
     assert_eq!(listed.len(), 2);
     assert!(listed.iter().any(|w| w.is_main));
