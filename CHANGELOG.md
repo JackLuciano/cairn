@@ -5,6 +5,57 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
+A home that tells you where you stand, a branch picker you can search, and clearer, safer
+screens everywhere.
+
+### Added
+
+- Home is now a dashboard: a greeting with what needs you, tiles for repositories with changes,
+  pulls waiting and reviews, and every pull request waiting for you across all repositories.
+- Activity charts on Home: a six-month contribution calendar, commits per week, and who
+  contributed how much in the last 90 days, with commits, share and lines added and removed.
+- A searchable branch picker replaces the long branch menu. Branches are grouped into current,
+  recent, yours and only on the server, each with its last commit, pull request and how far it
+  is behind. Switch, compare, highlight or open a pull request right from it. The Highlight
+  button in History uses it too.
+- Click any commit of a pull request to see only that commit's changes, and step through the
+  commits one by one.
+- "Create pull request from…" in a commit's right-click menu, for the branches on that commit.
+- Push, pull and fetch show their progress in a corner toast: downloading or uploading, a
+  percentage, and whether it finished.
+- The diff toolbar shows how many lines changed, switches between unified and split view, word
+  highlights and line wrapping, and jumps between changes. A change map along the edge shows
+  where the changes are; click it to jump there. Your choices are remembered for every tab.
+- Settings for appearance, the graph and diffs show a live preview of History and a diff.
+- Repository cards on Home show changes, pulls and pushes waiting.
+
+### Changed
+
+- Pages are grouped into Work and Review, and the less common pages live in a Tools panel that
+  says what each one does. The Conflicts tab only appears when there are conflicts, and narrow
+  windows show icons only.
+- Branches are cards with their last commit, pull request, how far ahead or behind `main` they
+  are, and conflict warnings, with All, Active and Merged filters.
+- Stashes are cards with the files inside, the branch they came from and how old they are.
+  Apply, pop and drop appear when you hover one.
+- Reset, force push, discard, deleting a branch and dropping a stash explain what happens, what
+  you lose, and whether you can get it back.
+- The commit card in History scrolls, shows the full message and the changed files, is readable
+  in every theme, and hides when you right-click.
+- The branch legend in History lists the branches on screen, fits the window instead of
+  scrolling, and puts the rest behind "+N". Narrow windows hide the Author and Branch columns.
+- Buttons, tabs and cards react when you press them, and the progress toast slides in. "Reduce
+  motion" keeps everything still.
+- Built with Rust 1.100.
+
+### Fixed
+
+- Opening a pull request from a branch that only exists on the server no longer tries to push
+  it first.
+- Dialogs stay solid with the glass window on Windows 11.
+
 ## [0.4.0] - 2026-11-13
 
 Ship from Cairn, see every branch at a glance, and a faster, fresher look.

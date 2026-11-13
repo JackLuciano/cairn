@@ -1,9 +1,9 @@
 use cairn_core::graph::{GraphRow, LinePart};
-use cairn_core::log::{CommitInfo, RefKind};
+use cairn_core::log::{CommitDetails, CommitInfo, RefKind};
 use cairn_core::settings::{DateFormat, GraphStyle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu as _};
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
 use rust_i18n::t;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -22,58 +22,274 @@ const DIM_ALPHA: f32 = 0.4;
 const TEXT_DIM_ALPHA: f32 = 0.72;
 const BRANCH_COL_W: f32 = 150.;
 
-const LEGEND_MAX: usize = 10;
+const LEGEND_MAX: usize = 8;
+const MIN_DESC_W: f32 = 240.;
 
-/// The card shown when hovering a commit: message, author, branch and labels at a glance.
+const CARD_W: f32 = 420.;
+const CARD_FILES: usize = 6;
+const CARD_BODY_LINES: usize = 6;
+const CARD_CACHE_MAX: usize = 400;
+
+type DetailsCache = std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CommitDetails>>>;
+
+static CARD_DETAILS: std::sync::LazyLock<DetailsCache> = std::sync::LazyLock::new(Default::default);
+
+thread_local! {
+    static CARD_HIDDEN_FOR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What a commit's hover card knows before its message and files have loaded.
 #[derive(Clone)]
-struct CommitCard {
+struct CardInfo {
+    id: String,
     summary: String,
     author: String,
     email: String,
     time: i64,
     hash: String,
+    parents: Vec<String>,
     branch: Option<String>,
     branch_color: Option<Hsla>,
-    refs: Vec<String>,
+    refs: Vec<(String, IconName, Hsla)>,
     merge: bool,
     on_branch: bool,
+    git: cairn_core::Git,
+}
+
+/// The card shown when hovering a commit: author, full message, branch, labels and the files it
+/// changed. The message and files load in the background and are cached for the next hover.
+struct CommitCard {
+    info: CardInfo,
+    details: Option<std::sync::Arc<CommitDetails>>,
+    failed: bool,
+    _load: Option<Task<()>>,
+}
+
+impl CommitCard {
+    /// Creates the card and starts loading the commit's message and files unless they are cached.
+    ///
+    /// # Arguments
+    /// * `info` - what the history row already knows about the commit
+    ///
+    /// # Returns
+    /// The card.
+    fn new(info: CardInfo, cx: &mut Context<Self>) -> Self {
+        let cached = CARD_DETAILS.lock().ok().and_then(|m| m.get(&info.id).cloned());
+        let load = cached.is_none().then(|| {
+            let git = info.git.clone();
+            let id = info.id.clone();
+            cx.spawn(async move |this, cx| {
+                let key = id.clone();
+                let details = cx.background_executor().spawn(async move { cairn_core::log::commit_details(&git, &id).ok().map(std::sync::Arc::new) }).await;
+                if let (Some(d), Ok(mut cache)) = (&details, CARD_DETAILS.lock()) {
+                    if cache.len() >= CARD_CACHE_MAX {
+                        cache.clear();
+                    }
+                    cache.insert(key, d.clone());
+                }
+                let _ = this.update(cx, |card, cx| {
+                    card.failed = details.is_none();
+                    card.details = details;
+                    cx.notify();
+                });
+            })
+        });
+        Self { info, details: cached, failed: false, _load: load }
+    }
+
+    fn render_files(&self, d: &CommitDetails, cx: &App) -> Div {
+        let theme = cx.theme();
+        let added: u32 = d.files.iter().filter_map(|f| f.added).sum();
+        let removed: u32 = d.files.iter().filter_map(|f| f.removed).sum();
+        let count = d.files.len();
+        let title = if count == 1 { t!("history.card_file_one").to_string() } else { t!("history.card_files", count = count).to_string() };
+        let total = (added + removed).max(1) as f32;
+        let mut col = v_flex()
+            .gap_1()
+            .child(
+                hstack()
+                    .gap_2()
+                    .text_xs()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(title))
+                    .child(spacer())
+                    .child(div().font_family(theme.mono_font_family.clone()).text_color(theme.green).child(format!("+{added}")))
+                    .child(div().font_family(theme.mono_font_family.clone()).text_color(theme.red).child(format!("−{removed}")))
+                    .child(
+                        h_flex()
+                            .w(px(48.))
+                            .h(px(5.))
+                            .rounded(px(3.))
+                            .overflow_hidden()
+                            .bg(theme.border)
+                            .child(div().h_full().w(relative(added as f32 / total)).bg(theme.green))
+                            .child(div().h_full().w(relative(removed as f32 / total)).bg(theme.red)),
+                    ),
+            );
+        for f in d.files.iter().take(CARD_FILES) {
+            let (dir, name) = match f.path.rsplit_once('/') {
+                Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+                None => (String::new(), f.path.clone()),
+            };
+            col = col.child(
+                hstack()
+                    .gap_2()
+                    .h(px(22.))
+                    .text_xs()
+                    .child(status_letter(f.status, cx))
+                    .child(h_flex().flex_1().min_w_0().overflow_hidden().child(div().flex_shrink(1.).min_w_0().truncate().text_color(theme.muted_foreground).child(dir)).child(div().flex_none().text_color(theme.foreground).child(name)))
+                    .when_some(f.added.filter(|n| *n > 0), |d, n| d.child(div().flex_none().font_family(theme.mono_font_family.clone()).text_color(theme.green).child(format!("+{n}"))))
+                    .when_some(f.removed.filter(|n| *n > 0), |d, n| d.child(div().flex_none().font_family(theme.mono_font_family.clone()).text_color(theme.red).child(format!("−{n}")))),
+            );
+        }
+        if count > CARD_FILES {
+            col = col.child(div().pl(px(26.)).text_xs().text_color(theme.muted_foreground).child(t!("history.card_more_files", count = count - CARD_FILES).to_string()));
+        }
+        col
+    }
 }
 
 impl Render for CommitCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if CARD_HIDDEN_FOR.with(|h| h.borrow().as_deref() == Some(self.info.id.as_str())) {
+            return div().into_any_element();
+        }
         let theme = cx.theme().clone();
-        let color = self.branch_color.unwrap_or(theme.primary);
+        let info = &self.info;
+        let color = info.branch_color.unwrap_or(theme.primary);
+        let mono = theme.mono_font_family.clone();
+        let body = self.details.as_ref().map(|d| {
+            let lines: Vec<&str> = d.body.lines().collect();
+            let mut text = lines.iter().take(CARD_BODY_LINES).copied().collect::<Vec<_>>().join("\n");
+            if lines.len() > CARD_BODY_LINES {
+                text.push_str("\n…");
+            }
+            text
+        });
+        let signed = self.details.as_ref().is_some_and(|d| d.signature == cairn_core::log::SignatureStatus::Good);
+        let chips = h_flex()
+            .flex_wrap()
+            .gap_1p5()
+            .items_center()
+            .when_some(info.branch.clone(), |d, b| {
+                d.child(
+                    hstack()
+                        .gap_1p5()
+                        .px_2()
+                        .h(px(22.))
+                        .rounded(px(11.))
+                        .border_1()
+                        .border_color(color.opacity(0.5))
+                        .bg(color.opacity(0.16))
+                        .text_xs()
+                        .font_family(mono.clone())
+                        .text_color(color)
+                        .child(div().size(px(7.)).rounded_full().bg(color))
+                        .child(b),
+                )
+            })
+            .child(if info.on_branch { crate::widgets::badge(tr("history.card_on_branch"), theme.green) } else { crate::widgets::badge(tr("history.card_off_branch"), theme.yellow) })
+            .when(info.merge, |d| d.child(crate::widgets::badge(tr("history.card_merge"), theme.magenta)))
+            .when(signed, |d| d.child(crate::widgets::badge(tr("history.card_signed"), theme.green)));
+        let labels: Vec<&(String, IconName, Hsla)> = info.refs.iter().filter(|(n, _, _)| Some(n) != info.branch.as_ref()).collect();
+        let more_labels = labels.len().saturating_sub(8);
+        let relative = relative_time(info.time);
+        let exact = full_time(info.time);
+        let parents = info.parents.iter().map(|p| p.chars().take(7).collect::<String>()).collect::<Vec<_>>().join(" ");
+
         v_flex()
-            .w(px(360.))
-            .gap_2()
-            .p_3()
-            .rounded(px(12.))
+            .w(px(CARD_W))
+            .rounded(px(14.))
+            .overflow_hidden()
             .border_1()
-            .border_color(color.opacity(0.45))
+            .border_color(theme.border)
             .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .font_family(theme.font_family.clone())
             .shadow(crate::widgets::soft_shadow(cx))
+            .child(
+                v_flex()
+                    .gap_2p5()
+                    .px_4()
+                    .pt_3()
+                    .pb_3()
+                    .child(
+                        hstack()
+                            .gap_2p5()
+                            .child(avatar(&info.author, px(32.), cx))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).truncate().child(info.author.clone()))
+                                    .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(info.email.clone())),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_none()
+                                    .items_end()
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(relative.clone()))
+                                    .when(!exact.starts_with(relative.as_ref()), |d| d.child(div().text_xs().text_color(theme.muted_foreground).child(exact.clone()))),
+                            ),
+                    )
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).line_height(rems(1.35)).whitespace_normal().child(info.summary.clone()))
+                    .when_some(body.filter(|b| !b.is_empty()), |d, b| {
+                        d.child(div().pl_2p5().border_l_2().border_color(theme.border).text_xs().line_height(rems(1.25)).text_color(theme.muted_foreground).whitespace_normal().child(b))
+                    })
+                    .child(chips)
+                    .when(!labels.is_empty(), |d| {
+                        d.child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .children(labels.iter().take(8).map(|(name, ic, c)| {
+                                    hstack()
+                                        .flex_none()
+                                        .gap_1()
+                                        .px(px(6.))
+                                        .h(px(18.))
+                                        .rounded(px(4.))
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(*c)
+                                        .bg(c.opacity(0.12))
+                                        .border_1()
+                                        .border_color(c.opacity(0.35))
+                                        .child(icon(*ic).xsmall())
+                                        .child(name.clone())
+                                }))
+                                .when(more_labels > 0, |d| d.child(div().text_xs().text_color(theme.muted_foreground).child(format!("+{more_labels}")))),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .map(|d| match &self.details {
+                        Some(details) => d.child(self.render_files(details, cx)),
+                        None if self.failed => d.child(div().text_xs().text_color(theme.muted_foreground).child(tr("history.card_no_details"))),
+                        None => d.child(crate::skeleton::card_files(cx)),
+                    }),
+            )
             .child(
                 hstack()
                     .gap_2()
-                    .child(avatar(&self.author, px(28.), cx))
-                    .child(v_flex().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(self.author.clone())).child(div().text_xs().text_color(theme.muted_foreground).truncate().child(self.email.clone())))
+                    .px_4()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .bg(theme.muted.opacity(0.35))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(icon(IconName::GitCommitHorizontal).xsmall())
+                    .child(div().font_family(mono.clone()).text_color(theme.foreground).child(info.hash.clone()))
+                    .when(!parents.is_empty(), |d| d.child(div().font_family(mono.clone()).child(format!("← {parents}"))))
                     .child(spacer())
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(relative_time(self.time))),
+                    .child(div().truncate().child(tr("history.card_hint"))),
             )
-            .child(div().text_sm().whitespace_normal().child(self.summary.clone()))
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1p5()
-                    .items_center()
-                    .when_some(self.branch.clone(), |d, b| d.child(hstack().gap_1().px_2().h(px(20.)).rounded(px(10.)).bg(color.opacity(0.15)).text_xs().font_family(theme.mono_font_family.clone()).text_color(color).child(div().size(px(6.)).rounded_full().bg(color)).child(b)))
-                    .when(self.merge, |d| d.child(crate::widgets::badge(tr("history.card_merge"), theme.magenta)))
-                    .when(!self.on_branch, |d| d.child(crate::widgets::badge(tr("history.card_off_branch"), theme.yellow)))
-                    .children(self.refs.iter().take(3).map(|r| crate::widgets::badge(r.clone(), theme.muted_foreground)))
-                    .child(spacer())
-                    .child(div().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.muted_foreground).child(self.hash.clone())),
-            )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(tr("history.card_hint")))
+            .into_any_element()
     }
 }
 
@@ -307,6 +523,25 @@ impl RepoView {
         first.is_some() && names.any(|n| Some(n) != first)
     }
 
+    /// Which optional columns fit next to a readable commit message at the list's current width.
+    ///
+    /// # Returns
+    /// `(branch column, author column)`.
+    fn fitting_columns(&self) -> (bool, bool) {
+        let branch_wanted = self.shows_branch_column();
+        let width = self.history_width.get();
+        if width <= 0. {
+            return (branch_wanted, true);
+        }
+        let graph = if self.show_graph { self.graph_w + 10. } else { 0. };
+        let free = width - 28. - graph - 86. - 74.;
+        let author = 120. + if self.settings.appearance.show_avatars { 32. } else { 0. };
+        let branch = BRANCH_COL_W + 10.;
+        let show_branch = branch_wanted && free - branch >= MIN_DESC_W;
+        let show_author = free - author - if show_branch { branch } else { 0. } >= MIN_DESC_W;
+        (show_branch, show_author)
+    }
+
     /// Loads another page of history once the list is scrolled near its end.
     ///
     /// # Arguments
@@ -372,19 +607,59 @@ impl RepoView {
             return None;
         }
         let theme = cx.theme().clone();
-        let mut names: Vec<(String, usize)> = self.owner_colors.iter().map(|(n, i)| (n.clone(), *i)).collect();
-        names.sort_by_key(|(_, i)| *i);
-        let total = names.len();
+        let range = if self.history_visible.is_empty() { 0..self.owners.len().min(30) } else { self.history_visible.start..self.history_visible.end.min(self.owners.len()) };
+        let mut names: Vec<(String, usize)> = Vec::new();
+        for owner in self.owners[range].iter().flatten() {
+            if !names.iter().any(|(n, _)| n == owner)
+                && let Some(ix) = self.owner_colors.get(owner)
+            {
+                names.push((owner.clone(), *ix));
+            }
+        }
+        let labelled: Vec<(String, String, bool, usize)> = names
+            .into_iter()
+            .map(|(name, ix)| {
+                let remote = self.remotes.iter().find_map(|r| name.strip_prefix(&format!("{}/", r.name)).map(str::to_string));
+                let is_remote = remote.is_some();
+                (remote.unwrap_or_else(|| name.clone()), name, is_remote, ix)
+            })
+            .collect();
+        let width = self.history_width.get();
+        let mut budget = if width > 0. { width - 32. - 80. - 44. } else { f32::MAX };
+        let mut fits = 0;
+        for (short, _, is_remote, _) in labelled.iter().take(LEGEND_MAX) {
+            let chip = (34. + short.chars().count() as f32 * 7.2 + if *is_remote { 16. } else { 0. }).min(240.) + 6.;
+            if chip > budget && fits > 0 {
+                break;
+            }
+            budget -= chip;
+            fits += 1;
+        }
+        let hidden = SharedString::from(labelled.iter().skip(fits).map(|(_, n, _, _)| n.as_str()).collect::<Vec<_>>().join("\n"));
+        let total = labelled.len();
         let focus = self.focus_branch.clone().or_else(|| self.current_branch().map(str::to_string));
-        let mut row = hstack().gap_1p5().px_4().py(px(6.)).border_b_1().border_color(theme.border.opacity(0.6)).overflow_hidden();
-        for (k, (name, ix)) in names.into_iter().take(LEGEND_MAX).enumerate() {
+        let mut row = hstack()
+            .gap_1p5()
+            .px_4()
+            .py(px(6.))
+            .border_b_1()
+            .border_color(theme.border.opacity(0.6))
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .overflow_hidden()
+            .child(div().flex_none().text_xs().text_color(theme.muted_foreground).mr_1().child(tr("history.legend_in_view")));
+        for (k, (short, name, is_remote, ix)) in labelled.into_iter().take(fits).enumerate() {
             let color = lane_color(ix, cx);
             let on = focus.as_deref() == Some(name.as_str());
             let pick = name.clone();
+            let full = SharedString::from(name);
             row = row.child(
                 hstack()
                     .id(("legend", k))
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_w(px(48.))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx))
                     .gap_1p5()
                     .h(px(22.))
                     .px_2()
@@ -398,16 +673,30 @@ impl RepoView {
                     .text_color(if on { theme.foreground } else { theme.muted_foreground })
                     .when(on, |d| d.shadow(crate::widgets::glow(color, 8.)))
                     .hover(move |s| s.bg(color.opacity(0.16)).text_color(color))
-                    .child(div().size(px(7.)).rounded_full().bg(color))
-                    .child(name)
+                    .active(|s| s.opacity(crate::widgets::PRESSED))
+                    .max_w(px(240.))
+                    .child(div().flex_none().size(px(7.)).rounded_full().bg(color))
+                    .when(is_remote, |d| d.child(icon(IconName::Cloud).xsmall().flex_none()))
+                    .child(div().min_w_0().truncate().child(short))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_branch = None;
                         this.set_focus_branch(Some(pick.clone()), cx);
                     })),
             );
         }
-        if total > LEGEND_MAX {
-            row = row.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(format!("+{}", total - LEGEND_MAX)));
+        if total > fits {
+            row = row.child(
+                div()
+                    .id("legend-more")
+                    .flex_none()
+                    .px_1p5()
+                    .rounded(px(8.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.muted))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hidden.clone()).build(window, cx))
+                    .child(format!("+{}", total - fits)),
+            );
         }
         Some(row.into_any_element())
     }
@@ -515,23 +804,13 @@ impl RepoView {
         let time = self.format_time(commit.time);
         let view = cx.entity();
         let faded = row.dim && !selected;
-        let branch_col = self.shows_branch_column().then(|| self.owners.get(ix).cloned().flatten());
+        let (show_branch, show_author) = self.fitting_columns();
+        let branch_col = show_branch.then(|| self.owners.get(ix).cloned().flatten());
         let continues = ix > 0 && self.owners.get(ix - 1) == self.owners.get(ix) && !commit.refs.iter().any(|r| matches!(r.kind, RefKind::LocalBranch | RefKind::RemoteBranch));
         let text = if faded { theme.foreground.opacity(TEXT_DIM_ALPHA) } else { theme.foreground };
         let muted = if faded { theme.muted_foreground.opacity(TEXT_DIM_ALPHA + 0.1) } else { theme.muted_foreground };
 
-        let card = CommitCard {
-            summary: commit.summary.clone(),
-            author: commit.author.clone(),
-            email: commit.email.clone(),
-            time: commit.time,
-            hash: commit.id.chars().take(10).collect(),
-            branch: self.owners.get(ix).cloned().flatten(),
-            branch_color: self.owners.get(ix).cloned().flatten().and_then(|o| self.branch_color(&o, cx)),
-            refs: commit.refs.iter().map(|r| r.name.clone()).collect(),
-            merge: is_merge,
-            on_branch: !row.dim,
-        };
+        let card = self.card_info(ix, cx);
         let fresh = self.fresh.contains(&commit.id);
         let row_el = div()
             .id(("commit", ix))
@@ -541,7 +820,19 @@ impl RepoView {
             .items_center()
             .bg(bg)
             .when(selected, |d| d.bg(linear_gradient(90., linear_color_stop(theme.primary.opacity(0.22), 0.), linear_color_stop(bg, 0.45))).border_l_2().border_color(theme.primary))
-            .tooltip(move |_, cx| cx.new(|_| card.clone()).into())
+            .tooltip(move |_, cx| cx.new(|cx| CommitCard::new(card.clone(), cx)).into())
+            .on_mouse_down(MouseButton::Right, {
+                let id = commit.id.clone();
+                move |_, window, _| {
+                    CARD_HIDDEN_FOR.with(|h| *h.borrow_mut() = Some(id.clone()));
+                    window.refresh();
+                }
+            })
+            .on_hover(|hovered, _, _| {
+                if *hovered {
+                    CARD_HIDDEN_FOR.with(|h| h.borrow_mut().take());
+                }
+            })
             .border_b_1()
             .border_color(theme.border.opacity(0.4))
             .when(!selected, |d| d.hover(|s| s.bg(cx.theme().list_hover)))
@@ -613,8 +904,8 @@ impl RepoView {
                         ),
                 )
             })
-            .when(self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(avatar(&commit.author, px(22.), cx))))
-            .child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted).child(commit.author.clone()))
+            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(avatar(&commit.author, px(22.), cx))))
+            .when(show_author, |d| d.child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted).child(commit.author.clone())))
             .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(muted).child(time))
             .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(muted).child(short))
             .context_menu(move |menu, _window, cx| {
@@ -624,7 +915,8 @@ impl RepoView {
                 if selected.len() > 1 && selected.contains(&id) {
                     crate::commit_menu::build_multi(menu, v, selected.len())
                 } else {
-                    crate::commit_menu::build(menu, v, id)
+                    let heads = v.read(cx).pr_heads(&id);
+                    crate::commit_menu::build(menu, v, id, heads)
                 }
             });
         if fresh {
@@ -634,6 +926,79 @@ impl RepoView {
                 .into_any_element()
         } else {
             row_el.into_any_element()
+        }
+    }
+
+    /// Branches pointing at a commit that a pull request could be opened from: not the main
+    /// branch, and without an open pull request yet. A local branch wins over its remote copy.
+    ///
+    /// # Arguments
+    /// * `id` - the commit's hash
+    ///
+    /// # Returns
+    /// `(ref, name shown)` pairs.
+    pub(crate) fn pr_heads(&self, id: &str) -> Vec<(String, String)> {
+        let Some(commit) = self.commits.iter().find(|c| c.id == id) else {
+            return Vec::new();
+        };
+        let trunk = self.trunk.as_deref().map(|t| self.remotes.iter().find_map(|r| t.strip_prefix(&format!("{}/", r.name))).unwrap_or(t)).unwrap_or("main");
+        let mut heads: Vec<(String, String)> = Vec::new();
+        for r in commit.refs.iter().filter(|r| r.kind == RefKind::LocalBranch) {
+            heads.push((r.name.clone(), r.name.clone()));
+        }
+        for r in commit.refs.iter().filter(|r| r.kind == RefKind::RemoteBranch) {
+            let short = self.remotes.iter().find_map(|rm| r.name.strip_prefix(&format!("{}/", rm.name))).unwrap_or(&r.name).to_string();
+            if short != "HEAD" && !heads.iter().any(|(_, n)| *n == short) {
+                heads.push((r.name.clone(), short));
+            }
+        }
+        heads.retain(|(_, n)| n != trunk && !matches!(n.as_str(), "main" | "master") && !self.prs.iter().any(|p| &p.head == n));
+        heads.truncate(3);
+        heads
+    }
+
+    /// Gathers what the hover card of a history row shows.
+    ///
+    /// # Arguments
+    /// * `ix` - the row's index
+    ///
+    /// # Returns
+    /// The card's data.
+    fn card_info(&self, ix: usize, cx: &App) -> CardInfo {
+        let commit = &self.commits[ix];
+        let theme = cx.theme();
+        let owner = self.owners.get(ix).cloned().flatten();
+        CardInfo {
+            id: commit.id.clone(),
+            summary: commit.summary.clone(),
+            author: commit.author.clone(),
+            email: commit.email.clone(),
+            time: commit.time,
+            hash: commit.id.chars().take(10).collect(),
+            parents: commit.parents.clone(),
+            branch_color: owner.as_deref().and_then(|o| self.branch_color(o, cx)),
+            branch: owner,
+            refs: commit
+                .refs
+                .iter()
+                .map(|r| {
+                    let (fallback, ic) = match r.kind {
+                        RefKind::LocalBranch => (theme.primary, IconName::GitBranch),
+                        RefKind::RemoteBranch => (theme.muted_foreground, IconName::Cloud),
+                        RefKind::Tag => (theme.yellow, IconName::Tag),
+                        RefKind::Stash => (theme.magenta, IconName::Archive),
+                        RefKind::Head => (theme.red, IconName::CircleDot),
+                    };
+                    let color = match r.kind {
+                        RefKind::LocalBranch | RefKind::RemoteBranch => self.branch_color(&r.name, cx).unwrap_or(fallback),
+                        _ => fallback,
+                    };
+                    (r.name.clone(), ic, color)
+                })
+                .collect(),
+            merge: commit.is_merge(),
+            on_branch: !self.rows.get(ix).is_some_and(|r| r.dim),
+            git: self.git(),
         }
     }
 
@@ -654,6 +1019,10 @@ impl RepoView {
             "history-list",
             count,
             cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                if this.history_visible != range {
+                    this.history_visible = range.clone();
+                    cx.notify();
+                }
                 this.maybe_load_more(range.end, cx);
                 range.map(|ix| this.render_commit_row(ix, cx)).collect::<Vec<_>>()
             }),
@@ -661,13 +1030,38 @@ impl RepoView {
         .track_scroll(&self.history_scroll)
         .size_full();
         let legend = self.render_legend(cx);
+        let debug_card = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_CARD").ok().and_then(|v| v.parse::<usize>().ok()).filter(|ix| *ix < count) } else { None };
+        let debug_card = debug_card.map(|ix| {
+            let info = self.card_info(ix, cx);
+            window.use_keyed_state(("debug-card", ix), cx, move |_, cx| CommitCard::new(info, cx))
+        });
 
+        let (show_branch, show_author) = self.fitting_columns();
+        let measured = self.history_width.clone();
+        let me = cx.entity_id();
         let main = v_flex()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                let w = f32::from(bounds.size.width);
+                                if (measured.get() - w).abs() > 0.5 {
+                                    measured.set(w);
+                                    cx.notify(me);
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .when_some(debug_card, |d, card| d.child(deferred(div().absolute().top(px(150.)).left(px(260.)).child(card))))
+                    .child(
                         hstack()
+                            .flex_wrap()
                             .px_4()
                             .py(px(10.))
                             .gap_2()
@@ -724,23 +1118,7 @@ impl RepoView {
                                         .label(SharedString::from(t!("history.highlight", name = shown).to_string()))
                                         .tooltip(tr("history.highlight_hint"))
                                         .dropdown_caret(true)
-                                        .dropdown_menu(move |menu, _, cx| {
-                                            let mut menu = menu.label(t!("history.highlight_title").to_string());
-                                            if let Some(cur) = current.clone() {
-                                                let v = view.clone();
-                                                menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(t!("history.highlight_current", name = cur).to_string()).icon(icon(IconName::CircleDot)).on_click(move |_, _, cx| {
-                                                    v.update(cx, |v, cx| v.set_focus_branch(None, cx));
-                                                }));
-                                            }
-                                            crate::pages::compare::ref_menu(menu.separator(), &view, |v, name, cx| {
-                                                if name == "HEAD" {
-                                                    v.set_focus_branch(None, cx);
-                                                } else {
-                                                    v.focus_branch = None;
-                                                    v.set_focus_branch(Some(name), cx);
-                                                }
-                                            }, cx)
-                                        }),
+                                        .on_click(move |_, window, cx| crate::branch_picker::open(view.clone(), crate::branch_picker::Mode::Highlight, window, cx)),
                                 )
                                 .when(other, |d| {
                                     d.child(Button::new("history-focus-clear").xsmall().ghost().icon(icon(IconName::X)).tooltip(tr("history.highlight_clear")).on_click(cx.listener(|this, _, _, cx| this.set_focus_branch(None, cx))))
@@ -802,9 +1180,9 @@ impl RepoView {
                             .border_color(theme.border.opacity(0.6))
                             .when(self.show_graph, |d| d.child(div().w(px(graph_header_w)).whitespace_nowrap().overflow_hidden().child(tr("history.col_graph").to_uppercase())))
                             .child(div().flex_1().child(tr("history.col_description").to_uppercase()))
-                            .when(self.shows_branch_column(), |d| d.child(div().w(px(BRANCH_COL_W)).child(tr("history.col_branch").to_uppercase())))
-                            .when(self.settings.appearance.show_avatars, |d| d.child(div().w(px(22.))))
-                            .child(div().w(px(110.)).child(tr("history.col_author").to_uppercase()))
+                            .when(show_branch, |d| d.child(div().w(px(BRANCH_COL_W)).child(tr("history.col_branch").to_uppercase())))
+                            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().w(px(22.))))
+                            .when(show_author, |d| d.child(div().w(px(110.)).child(tr("history.col_author").to_uppercase())))
                             .child(div().w(px(76.)).text_right().child(tr("history.col_date").to_uppercase()))
                             .child(div().w(px(64.)).child(tr("history.col_commit").to_uppercase())),
                     )

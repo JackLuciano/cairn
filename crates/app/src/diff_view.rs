@@ -27,6 +27,19 @@ pub(crate) struct DiffPane {
     path: Option<SharedString>,
     anchor: Rc<RefCell<Option<DiffLinePosition>>>,
     pub show_all: Option<String>,
+    cursor: usize,
+}
+
+/// The tooltip of one mark on the change map.
+///
+/// # Arguments
+/// * `n` - which change, from 1
+/// * `total` - how many changes the file has
+///
+/// # Returns
+/// Such as "Change 2 of 5".
+fn t_change(n: usize, total: usize) -> SharedString {
+    rust_i18n::t!("diff.change_n_of", n = n, total = total).to_string().into()
 }
 
 /// The beginning of a very large diff, so it appears at once; whole hunks are kept, and a hunk
@@ -72,6 +85,7 @@ impl DiffPane {
             path: None,
             anchor: Rc::default(),
             show_all: None,
+            cursor: 0,
         }
     }
 
@@ -100,6 +114,7 @@ impl DiffPane {
             });
             if !same_file {
                 self.anchor.borrow_mut().take();
+                self.cursor = 0;
             }
             self.path = path;
             self.shown = Some((diff.clone(), tab_width));
@@ -236,8 +251,8 @@ impl RepoView {
         let Some(diff) = self.change_diff.as_ref() else { return };
         if extend && let Some((lh, ll)) = self.last_line.filter(|(lh, _)| *lh == h) {
             let (a, b) = if ll <= l { (ll, l) } else { (l, ll) };
-            for i in a..=b {
-                if matches!(diff.hunks[h].lines[i].kind, LineKind::Added | LineKind::Removed) {
+            for (i, line) in diff.hunks[h].lines.iter().enumerate().take(b + 1).skip(a) {
+                if matches!(line.kind, LineKind::Added | LineKind::Removed) {
                     self.line_selection.insert((lh, i));
                 }
             }
@@ -261,7 +276,170 @@ impl RepoView {
     ///
     /// # Returns
     /// The diff surface, or an empty state when there is nothing to show as text.
+    /// Shows one file's diff with a toolbar (line counts, unified or split, word highlights,
+    /// wrapping, jumping between changes) and a change map beside it.
+    ///
+    /// # Arguments
+    /// * `source` - which surface shows the diff
+    /// * `diff` - the file's diff
+    ///
+    /// # Returns
+    /// The diff with its controls.
     pub(crate) fn render_file_diff(&mut self, source: DiffSource, diff: &FileDiff, cx: &mut Context<Self>) -> AnyElement {
+        let body = self.render_diff_body(source, diff, cx);
+        if diff.is_binary || diff.hunks.is_empty() {
+            return body;
+        }
+        let theme = cx.theme().clone();
+        let (added, removed) = diff.stats();
+        let total_lines: usize = diff.hunks.iter().map(|h| h.lines.len()).sum::<usize>().max(1);
+        let targets: Vec<(usize, Option<DiffLinePosition>, f32, f32, Hsla)> = {
+            let path = self.pane(source).path.clone();
+            let mut at = 0usize;
+            diff.hunks
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    let adds = h.lines.iter().any(|l| l.kind == LineKind::Added);
+                    let dels = h.lines.iter().any(|l| l.kind == LineKind::Removed);
+                    let color = match (adds, dels) {
+                        (true, false) => theme.green,
+                        (false, true) => theme.red,
+                        _ => theme.yellow,
+                    };
+                    let pos = path.clone().and_then(|p| h.lines.iter().filter(|l| l.kind != LineKind::Context).find_map(line_position).map(|(side, n)| DiffLinePosition::new(p, side, n)));
+                    let top = at as f32 / total_lines as f32;
+                    let height = h.lines.len() as f32 / total_lines as f32;
+                    at += h.lines.len();
+                    (i, pos, top, height, color)
+                })
+                .collect()
+        };
+        let hunks = targets.len();
+        let cursor = self.pane(source).cursor.min(hunks.saturating_sub(1));
+        let settings = self.settings.diffs.clone();
+        let split = settings.layout == DiffLayout::Split;
+        let words = settings.highlight == DiffHighlight::Words;
+        let positions: Vec<Option<DiffLinePosition>> = targets.iter().map(|t| t.1.clone()).collect();
+        let seg = |id: &'static str, label: SharedString, on: bool, cx: &App| {
+            let theme = cx.theme();
+            div()
+                .id(id)
+                .px_2()
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .when(on, |d| d.bg(theme.background).text_color(theme.foreground).shadow_xs())
+                .when(!on, |d| d.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
+                .child(label)
+        };
+        let set_prefs = move |f: fn(&mut cairn_core::settings::Settings)| {
+            move |this: &mut RepoView, _: &ClickEvent, _: &mut Window, cx: &mut Context<RepoView>| {
+                f(&mut this.settings);
+                cx.emit(crate::repo_view::DiffPrefsEvent(this.settings.diffs.clone()));
+                cx.notify();
+            }
+        };
+        let toolbar = h_flex()
+            .flex_none()
+            .gap_2()
+            .px_3()
+            .h(px(36.))
+            .border_b_1()
+            .border_color(theme.border.opacity(0.7))
+            .bg(theme.sidebar)
+            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.green).child(format!("+{added}")))
+            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.red).child(format!("−{removed}")))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("diff.changes_n", hunks)))
+            .child(div().flex_1())
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .p(px(2.))
+                    .rounded(px(8.))
+                    .bg(theme.secondary)
+                    .child(seg("diff-unified", tr("diff.unified"), !split, cx).on_click(cx.listener(set_prefs(|s| s.diffs.layout = DiffLayout::Unified))))
+                    .child(seg("diff-split", tr("diff.split"), split, cx).on_click(cx.listener(set_prefs(|s| s.diffs.layout = DiffLayout::Split)))),
+            )
+            .child(crate::widgets::toggle_pill("diff-words", tr("diff.words"), words, cx).on_click(cx.listener(set_prefs(|s| s.diffs.highlight = if s.diffs.highlight == DiffHighlight::Words { DiffHighlight::Lines } else { DiffHighlight::Words }))))
+            .child(crate::widgets::toggle_pill("diff-wrap", tr("diff.wrap"), settings.wrap_lines, cx).on_click(cx.listener(set_prefs(|s| s.diffs.wrap_lines = !s.diffs.wrap_lines))))
+            .child(div().w(px(1.)).h(px(18.)).bg(theme.border))
+            .child(Button::new("diff-prev").xsmall().ghost().icon(icon(IconName::ChevronUp)).tooltip(tr("diff.prev_change")).on_click({
+                let positions = positions.clone();
+                cx.listener(move |this, _, _, cx| this.jump_to_change(source, -1, &positions, cx))
+            }))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{}/{}", cursor + 1, hunks)))
+            .child(Button::new("diff-next").xsmall().ghost().icon(icon(IconName::ChevronDown)).tooltip(tr("diff.next_change")).on_click({
+                let positions = positions.clone();
+                cx.listener(move |this, _, _, cx| this.jump_to_change(source, 1, &positions, cx))
+            }));
+        let mut map = div().relative().flex_none().w(px(12.)).h_full().border_l_1().border_color(theme.border.opacity(0.6)).bg(theme.sidebar.opacity(0.6));
+        for (i, pos, top, height, color) in targets {
+            let tip: SharedString = t_change(i + 1, hunks);
+            map = map.child(
+                div()
+                    .id(("diff-map", i))
+                    .absolute()
+                    .left(px(2.))
+                    .right(px(2.))
+                    .top(relative(top))
+                    .h(relative(height.max(0.004)))
+                    .min_h(px(3.))
+                    .rounded(px(2.))
+                    .cursor_pointer()
+                    .bg(color.opacity(if i == cursor { 1. } else { 0.65 }))
+                    .hover(move |s| s.bg(color))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let pane = this.pane_mut(source);
+                        pane.cursor = i;
+                        if let Some(pos) = pos.clone() {
+                            pane.state.update(cx, |s, cx| s.scroll_to_line(pos, cx));
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        v_flex().size_full().child(toolbar).child(h_flex().flex_1().min_h_0().child(div().flex_1().min_w_0().h_full().child(body)).child(map)).into_any_element()
+    }
+
+    /// Scrolls a diff to the previous or next change.
+    ///
+    /// # Arguments
+    /// * `source` - which diff surface
+    /// * `delta` - `-1` for the previous change, `1` for the next
+    /// * `positions` - where each change starts
+    fn jump_to_change(&mut self, source: DiffSource, delta: isize, positions: &[Option<DiffLinePosition>], cx: &mut Context<Self>) {
+        let pane = self.pane_mut(source);
+        let next = (pane.cursor as isize + delta).clamp(0, positions.len() as isize - 1) as usize;
+        pane.cursor = next;
+        if let Some(pos) = positions.get(next).cloned().flatten() {
+            pane.state.update(cx, |s, cx| s.scroll_to_line(pos, cx));
+        }
+        cx.notify();
+    }
+
+    fn pane(&self, source: DiffSource) -> &DiffPane {
+        match source {
+            DiffSource::Change => &self.change_pane,
+            DiffSource::CommitFile => &self.commit_pane,
+            DiffSource::Page => &self.page_pane,
+        }
+    }
+
+    fn pane_mut(&mut self, source: DiffSource) -> &mut DiffPane {
+        match source {
+            DiffSource::Change => &mut self.change_pane,
+            DiffSource::CommitFile => &mut self.commit_pane,
+            DiffSource::Page => &mut self.page_pane,
+        }
+    }
+
+    fn render_diff_body(&mut self, source: DiffSource, diff: &FileDiff, cx: &mut Context<Self>) -> AnyElement {
         if diff.is_binary {
             if let Some((old, new)) = image_pair(source, diff, cx) {
                 return render_image_diff(old, new, cx).into_any_element();

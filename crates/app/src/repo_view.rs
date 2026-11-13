@@ -43,13 +43,19 @@ pub(crate) enum Page {
 }
 
 impl Page {
-    /// Pages reached from the "More" tab instead of a tab of their own.
-    pub(crate) const MORE: [(Page, &'static str, IconName); 5] = [
-        (Page::FileHistory, "page.file_history", IconName::FileClock),
-        (Page::Compare, "page.compare", IconName::GitCompareArrows),
-        (Page::Recover, "page.recover", IconName::LifeBuoy),
-        (Page::Submodules, "page.submodules", IconName::Boxes),
-        (Page::Lfs, "page.lfs", IconName::HardDrive),
+    /// Pages reached from the "Tools" panel instead of a tab of their own, each with a one-line
+    /// explanation for people who do not know the git term.
+    pub(crate) const TOOLS: [(Page, &'static str, IconName, &'static str); 10] = [
+        (Page::Rebase, "page.rebase", IconName::GitPullRequestArrow, "page_bar.rebase_desc"),
+        (Page::Absorb, "page.absorb", IconName::Scissors, "page_bar.absorb_desc"),
+        (Page::Conflicts, "page.conflicts", IconName::TriangleAlert, "page_bar.conflicts_desc"),
+        (Page::Compare, "page.compare", IconName::GitCompareArrows, "page_bar.compare_desc"),
+        (Page::Blame, "page.blame", IconName::TextSearch, "page_bar.blame_desc"),
+        (Page::FileHistory, "page.file_history", IconName::FileClock, "page_bar.file_history_desc"),
+        (Page::Bisect, "page.bisect", IconName::Crosshair, "page_bar.bisect_desc"),
+        (Page::Recover, "page.recover", IconName::LifeBuoy, "page_bar.recover_desc"),
+        (Page::Submodules, "page.submodules", IconName::Boxes, "page_bar.submodules_desc"),
+        (Page::Lfs, "page.lfs", IconName::HardDrive, "page_bar.lfs_desc"),
     ];
 }
 
@@ -83,6 +89,11 @@ impl EventEmitter<OpenRepoEvent> for RepoView {}
 pub(crate) struct HistoryScopeEvent(pub bool);
 
 impl EventEmitter<HistoryScopeEvent> for RepoView {}
+
+/// Sent when the diff toolbar changes how diffs look, so the choice is saved.
+pub(crate) struct DiffPrefsEvent(pub cairn_core::settings::Diffs);
+
+impl EventEmitter<DiffPrefsEvent> for RepoView {}
 
 /// Sent when a side panel was resized, so the width is saved: the commit details panel, the file
 /// list on the Changes and Pull requests pages.
@@ -174,6 +185,13 @@ pub(crate) struct RepoView {
     conflict_sig: String,
     pub history_limit: usize,
     pub loading_more: bool,
+    pub history_visible: std::ops::Range<usize>,
+    pub history_width: std::rc::Rc<std::cell::Cell<f32>>,
+    pub page_bar_width: std::rc::Rc<std::cell::Cell<f32>>,
+    pub branch_stats: (String, std::collections::HashMap<String, (u32, u32)>),
+    pub branch_stats_loading: bool,
+    pub branch_filter: crate::pages::branches::BranchFilter,
+    pub live_op: Option<crate::live_op::LiveOp>,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
     pub selected_commit: Option<String>,
@@ -210,7 +228,7 @@ pub(crate) struct RepoView {
     pub pulls: crate::pages::pulls::PullsState,
     focus: FocusHandle,
     watcher: Option<crate::watcher::RepoWatcher>,
-    _tasks: Vec<Task<()>>,
+    pub(crate) _tasks: Vec<Task<()>>,
 }
 
 impl RepoView {
@@ -274,6 +292,13 @@ impl RepoView {
             conflict_sig: String::new(),
             history_limit: 0,
             loading_more: false,
+            history_visible: 0..0,
+            history_width: Default::default(),
+            page_bar_width: Default::default(),
+            branch_stats: Default::default(),
+            branch_stats_loading: false,
+            branch_filter: Default::default(),
+            live_op: None,
             multi_select: Vec::new(),
             last_clicked: None,
             selected_commit: None,
@@ -930,8 +955,16 @@ impl RepoView {
             return;
         }
         self.busy = Some(label.clone());
+        self.live_op = None;
         cx.notify();
-        let git = self.git();
+        let progress: crate::live_op::SharedProgress = Default::default();
+        let sink = progress.clone();
+        let git = self.git().with_progress(move |phase, done| {
+            if let Ok(mut p) = sink.lock() {
+                *p = Some((phase.to_string(), done));
+            }
+        });
+        self.watch_progress(label.clone(), progress, cx);
         let snapshots = self.settings.checks.snapshots;
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -946,7 +979,9 @@ impl RepoView {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
+                let shown = this.finish_live_op(result.is_ok(), cx);
                 match result {
+                    Ok(_) if shown => {}
                     Ok(_) => window.push_notification(
                         Notification::success(t!("op.done", what = label.to_string()).to_string()),
                         cx,
@@ -1306,13 +1341,6 @@ impl RepoView {
         let behind = self.status.branch.behind;
         let busy = self.busy.clone();
         let compact = self.settings.appearance.compact_toolbar;
-        let local: Vec<Branch> = self.branches.iter().filter(|b| !b.is_remote).cloned().collect();
-        let remote_only: Vec<Branch> = self
-            .branches
-            .iter()
-            .filter(|b| b.is_remote && !self.branches.iter().any(|l| !l.is_remote && b.name.ends_with(&format!("/{}", l.name))))
-            .cloned()
-            .collect();
         let view = cx.entity();
 
         let branch_button = framed(Button::new("branch-switcher"), Tone::Plain, cx)
@@ -1322,80 +1350,55 @@ impl RepoView {
             .label(branch_label)
             .dropdown_caret(true)
             .tooltip(tr("toolbar.switch_branch_tip"))
-            .dropdown_menu({
+            .on_click({
                 let view = view.clone();
-                move |mut menu, _window, _cx| {
-                    menu = menu.label(t!("toolbar.local_branches").to_string());
-                    for b in &local {
-                        let name = b.name.clone();
-                        let view = view.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(b.name.clone())
-                                .checked(b.is_head)
-                                .on_click(move |_, window, cx| {
-                                    let name = name.clone();
-                                    view.update(cx, |v, cx| v.checkout(name, false, window, cx));
-                                }),
-                        );
-                    }
-                    if !remote_only.is_empty() {
-                        menu = menu.separator().label(t!("toolbar.remote_branches").to_string());
-                        for b in remote_only.iter().take(30) {
-                            let name = b.name.clone();
-                            let view = view.clone();
-                            menu = menu.item(PopupMenuItem::new(b.name.clone()).on_click(move |_, window, cx| {
-                                let name = name.clone();
-                                view.update(cx, |v, cx| v.checkout(name, true, window, cx));
-                            }));
-                        }
-                    }
-                    let view_new = view.clone();
-                    let view_issue = view.clone();
-                    menu.separator()
-                        .item(
-                            PopupMenuItem::new(t!("toolbar.new_branch").to_string())
-                                .icon(icon(IconName::GitBranchPlus))
-                                .on_click(move |_, window, cx| {
-                                    crate::dialogs::new_branch(view_new.clone(), None, window, cx);
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new(t!("issue_branch.button_long").to_string())
-                                .icon(icon(IconName::Ticket))
-                                .on_click(move |_, window, cx| {
-                                    crate::issue_branch::open(view_issue.clone(), window, cx);
-                                }),
-                        )
-                }
+                move |_, window, cx| crate::branch_picker::open(view.clone(), crate::branch_picker::Mode::Switch, window, cx)
             });
 
-        let page_tab = |id: &'static str, page: Page, label: SharedString, count: usize, cx: &mut Context<Self>| {
+        let bar_w = self.page_bar_width.get();
+        let icons_only = bar_w > 0. && bar_w < 760.;
+        let page_tab = |id: &'static str, page: Page, ic: IconName, label: SharedString, count: usize, cx: &mut Context<Self>| {
             let active = self.page == page;
             let theme = cx.theme().clone();
             let fg = if active { theme.foreground } else { theme.muted_foreground };
-            let border = if active { theme.primary } else { theme.transparent };
             let tint = if page == Page::Conflicts { theme.red } else { theme.yellow };
             let hover = theme.foreground;
+            let hover_bg = theme.list_hover;
+            let tip = label.clone();
             div()
                 .id(id)
                 .flex_none()
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(40.))
-                .px_3()
+                .h(px(30.))
+                .px_2p5()
+                .rounded(px(8.))
                 .cursor_pointer()
                 .text_sm()
                 .whitespace_nowrap()
                 .font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                 .text_color(fg)
-                .border_b_2()
-                .border_color(border)
-                .when(active, |d| d.bg(linear_gradient(0., linear_color_stop(theme.primary.opacity(0.16), 0.), linear_color_stop(theme.primary.opacity(0.), 0.75))))
-                .when(!active, |d| d.hover(move |s| s.text_color(hover)))
-                .child(label)
+                .when(active, |d| d.bg(theme.background).border_1().border_color(theme.primary.opacity(0.45)).shadow(crate::widgets::glow(theme.primary, 6.)))
+                .when(!active, |d| d.border_1().border_color(theme.transparent).hover(move |s| s.text_color(hover).bg(hover_bg)))
+                .active(|s| s.opacity(crate::widgets::PRESSED))
+                .child(icon(ic).small().text_color(if active { theme.primary } else { fg }))
+                .when(!icons_only, |d| d.child(label))
+                .when(icons_only, |d| d.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
                 .when(count > 0, |d| d.child(count_chip(count.to_string(), tint.opacity(0.15), tint)))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_page(page, window, cx)))
+        };
+        let group = |label: SharedString, cx: &App| {
+            let theme = cx.theme();
+            hstack()
+                .flex_none()
+                .gap_0p5()
+                .p(px(3.))
+                .rounded(px(10.))
+                .bg(theme.secondary.opacity(0.6))
+                .border_1()
+                .border_color(theme.border.opacity(0.6))
+                .when(!icons_only, |d| d.child(div().px_1p5().text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(theme.muted_foreground.opacity(0.8)).child(label.to_uppercase())))
         };
         let change_count = self.status.files.len();
         let conflict_count = self.status.conflicted().count();
@@ -1568,49 +1571,104 @@ impl RepoView {
                             }),
                     ),
             )
-            .child(
+            .child({
+                let measured = self.page_bar_width.clone();
+                let me = cx.entity_id();
+                let tool = Page::TOOLS.iter().find(|(p, ..)| *p == self.page).copied();
+                let tools_label: SharedString = tool.map(|(_, l, ..)| tr(l)).unwrap_or_else(|| tr("page_bar.tools"));
+                let tools_icon = tool.map(|(_, _, ic, _)| ic).unwrap_or(IconName::Wrench);
+                let current_page = self.page;
+                let tools_view = view.clone();
+                let tools = gpui_kit::component::popover::Popover::new("page-tools")
+                    .anchor(Anchor::TopRight)
+                    .when(cfg!(debug_assertions) && std::env::var("CAIRN_DEBUG_TOOLS").is_ok(), |p| p.open(true))
+                    .trigger(
+                        Button::new("page-tools-btn")
+                            .ghost()
+                            .h(px(30.))
+                            .px_2p5()
+                            .rounded(px(8.))
+                            .text_sm()
+                            .icon(icon(tools_icon).small())
+                            .when(tool.is_some(), |b| b.font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).border_1().border_color(theme.primary.opacity(0.45)).bg(theme.background))
+                            .when(tool.is_none(), |b| b.font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground))
+                            .when(!icons_only || tool.is_some(), |b| b.label(tools_label))
+                            .when(conflict_count > 0 && tool.is_none(), |b| b.child(count_chip(conflict_count.to_string(), theme.red.opacity(0.15), theme.red)))
+                            .dropdown_caret(true),
+                    )
+                    .content(move |_, _, cx| {
+                        let theme = cx.theme().clone();
+                        let mut grid = h_flex().flex_wrap().gap_2().w(px(560.));
+                        for (page, label, ic, desc) in Page::TOOLS {
+                            let on = current_page == page;
+                            let v = tools_view.clone();
+                            let tint = if page == Page::Conflicts && conflict_count > 0 { theme.red } else { theme.primary };
+                            grid = grid.child(
+                                h_flex()
+                                    .id(SharedString::from(format!("tool-{label}")))
+                                    .w(px(274.))
+                                    .gap_2p5()
+                                    .p_2p5()
+                                    .rounded(px(10.))
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if on { tint.opacity(0.55) } else { theme.border.opacity(0.6) })
+                                    .when(on, |d| d.bg(tint.opacity(0.1)))
+                                    .hover(|s| s.bg(theme.list_hover).border_color(tint.opacity(0.45)))
+                                    .active(|s| s.opacity(crate::widgets::PRESSED))
+                                    .child(div().flex_none().size(px(32.)).rounded(px(9.)).flex().items_center().justify_center().bg(tint.opacity(0.14)).child(icon(ic).small().text_color(tint)))
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(hstack().gap_1p5().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr(label))).when(page == Page::Conflicts && conflict_count > 0, |d| d.child(count_chip(conflict_count.to_string(), theme.red.opacity(0.15), theme.red))))
+                                            .child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(tr(desc))),
+                                    )
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        v.update(cx, |v, cx| v.open_page(page, window, cx));
+                                        cx.emit(DismissEvent);
+                                    })),
+                            );
+                        }
+                        v_flex().gap_2().p_1().child(div().text_xs().font_weight(FontWeight::BOLD).text_color(theme.muted_foreground).child(tr("page_bar.tools_title").to_uppercase())).child(grid)
+                    });
                 hstack()
-                    .id("page-tabs")
+                    .relative()
+                    .gap_2()
                     .px_3()
-                    .gap_0p5()
+                    .py(px(6.))
                     .border_t_1()
                     .border_color(theme.border)
-                    .overflow_x_scroll()
-                    .child(page_tab("page-history", Page::History, tr("page.history"), 0, cx))
-                    .child(page_tab("page-changes", Page::Changes, tr("page.changes"), change_count, cx))
-                    .child(page_tab("page-branches", Page::Branches, tr("page.branches"), 0, cx))
-                    .child(page_tab("page-stack", Page::Stack, tr("page.stack"), 0, cx))
-                    .child(page_tab("page-rebase", Page::Rebase, tr("page.rebase"), 0, cx))
-                    .child(page_tab("page-absorb", Page::Absorb, tr("page.absorb"), 0, cx))
-                    .child(page_tab("page-conflicts", Page::Conflicts, tr("page.conflicts"), conflict_count, cx))
-                    .child(page_tab("page-blame", Page::Blame, tr("page.blame"), 0, cx))
-                    .child(page_tab("page-bisect", Page::Bisect, tr("page.bisect"), 0, cx))
-                    .child(page_tab("page-stashes", Page::Stashes, tr("page.stashes"), self.stashes.len(), cx))
-                    .child(page_tab("page-pulls", Page::PullRequests, tr("page.pulls"), self.prs.len(), cx))
-                    .child({
-                        let current = Page::MORE.iter().find(|(p, _, _)| *p == self.page);
-                        let active = current.is_some();
-                        let label: SharedString = current.map(|(_, l, _)| tr(l)).unwrap_or_else(|| tr("page.more"));
-                        let view = view.clone();
-                        Button::new("page-more")
-                            .ghost()
-                            .h(px(40.))
-                            .px_3()
-                            .rounded_none()
-                            .text_sm()
-                            .when(active, |b| b.font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).border_b_2().border_color(theme.primary))
-                            .when(!active, |b| b.font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground))
-                            .label(label)
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for (page, label, ic) in Page::MORE {
-                                    let v = view.clone();
-                                    menu = menu.item(PopupMenuItem::new(t!(label).to_string()).icon(icon(ic)).on_click(move |_, window, cx| v.update(cx, |v, cx| v.open_page(page, window, cx))));
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                let w = f32::from(bounds.size.width);
+                                if (measured.get() - w).abs() > 0.5 {
+                                    measured.set(w);
+                                    cx.notify(me);
                                 }
-                                menu
-                            })
-                    }),
-            )
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .child(
+                        group(tr("page_bar.work"), cx)
+                            .child(page_tab("page-history", Page::History, IconName::GitCommitHorizontal, tr("page.history"), 0, cx))
+                            .child(page_tab("page-changes", Page::Changes, IconName::FilePen, tr("page.changes"), change_count, cx))
+                            .child(page_tab("page-branches", Page::Branches, IconName::GitBranch, tr("page.branches"), 0, cx))
+                            .child(page_tab("page-stashes", Page::Stashes, IconName::Archive, tr("page.stashes"), self.stashes.len(), cx)),
+                    )
+                    .child(
+                        group(tr("page_bar.review"), cx)
+                            .child(page_tab("page-pulls", Page::PullRequests, IconName::GitPullRequest, tr("page.pulls"), self.prs.len(), cx))
+                            .child(page_tab("page-stack", Page::Stack, IconName::Layers, tr("page.stack"), 0, cx)),
+                    )
+                    .when(conflict_count > 0, |d| d.child(page_tab("page-conflicts", Page::Conflicts, IconName::TriangleAlert, tr("page.conflicts"), conflict_count, cx)))
+                    .child(spacer())
+                    .child(tools)
+            })
             .when(self.in_progress != InProgress::None, |d| d.child(self.render_in_progress(window, cx)))
     }
 
@@ -1780,6 +1838,7 @@ impl Render for RepoView {
             }
         };
         v_flex()
+            .relative()
             .size_full()
             .key_context("RepoView")
             .track_focus(&self.focus)
@@ -1799,6 +1858,7 @@ impl Render for RepoView {
                 }
             })
             .child(self.render_status_bar(cx))
+            .children(self.render_live_op(cx))
     }
 }
 

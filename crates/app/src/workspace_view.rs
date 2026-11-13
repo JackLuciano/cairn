@@ -37,7 +37,7 @@ pub(crate) struct OpenPrEvent(pub PathBuf, pub u64);
 
 impl EventEmitter<OpenPrEvent> for WorkspacePanel {}
 
-fn mock_queue(paths: &[PathBuf]) -> Vec<(PathBuf, QueuedPr)> {
+pub(crate) fn mock_queue(paths: &[PathBuf]) -> Vec<(PathBuf, QueuedPr)> {
     let find = |name: &str| paths.iter().find(|p| p.file_name().is_some_and(|f| f == name)).cloned();
     let pr = |repo: &str, number: u64, title: &str, author: &str, created: &str, mine: bool| QueuedPr { repo: format!("aurora/{repo}"), number, title: title.into(), url: String::new(), author: author.into(), created: created.into(), is_draft: false, mine };
     [
@@ -58,7 +58,7 @@ fn mock_queue(paths: &[PathBuf]) -> Vec<(PathBuf, QueuedPr)> {
 ///
 /// # Returns
 /// Each matching pull request with the local repository it belongs to.
-fn load_queue(paths: &[PathBuf]) -> Result<Vec<(PathBuf, QueuedPr)>, String> {
+pub(crate) fn load_queue(paths: &[PathBuf]) -> Result<Vec<(PathBuf, QueuedPr)>, String> {
     let slugs: Vec<(PathBuf, String)> = paths
         .iter()
         .filter_map(|p| {

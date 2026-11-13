@@ -52,7 +52,17 @@ pub(crate) fn build_multi(menu: PopupMenu, view: Entity<RepoView>, n: usize) -> 
         }))
 }
 
-pub(crate) fn build(menu: PopupMenu, view: Entity<RepoView>, id: String) -> PopupMenu {
+/// The right-click menu of one commit.
+///
+/// # Arguments
+/// * `view` - the repository view
+/// * `id` - the commit's hash
+/// * `pr_heads` - branches on this commit that a pull request can be opened from, as
+///   `(ref, name shown)`
+///
+/// # Returns
+/// The menu.
+pub(crate) fn build(menu: PopupMenu, view: Entity<RepoView>, id: String, pr_heads: Vec<(String, String)>) -> PopupMenu {
     let short: String = id.chars().take(7).collect();
     let item = |label: String, ic: IconName| PopupMenuItem::new(label).icon(icon(ic));
 
@@ -76,6 +86,15 @@ pub(crate) fn build(menu: PopupMenu, view: Entity<RepoView>, id: String) -> Popu
     .item(item(t!("commit_menu.new_tag").to_string(), IconName::Tag).on_click(move |_, window, cx| {
         crate::dialogs::new_tag(v3.clone(), i3.clone(), window, cx);
     }))
+    .when(!pr_heads.is_empty(), |mut m| {
+        m = m.separator();
+        for (head, name) in pr_heads {
+            let v = view.clone();
+            let label = t!("commit_menu.new_pr", name = name).to_string();
+            m = m.item(item(label, IconName::GitPullRequestCreate).on_click(move |_, window, cx| crate::new_pr::open_for(v.clone(), head.clone(), window, cx)));
+        }
+        m
+    })
     .separator()
     .item(item(t!("commit_menu.cherry_pick").to_string(), IconName::GitCommitHorizontal).on_click(move |_, window, cx| {
         let id = i4.clone();
