@@ -125,7 +125,7 @@ branches.
 - **Open pull requests from Cairn.** Pick the base branch, reviewers and labels, and let AI write
   the title and description from your commits. Branches that were never pushed are published
   for you.
-- **AI review.** One click and Claude reads the whole pull request and drafts review comments on
+- **AI review.** One click and your AI provider reads the whole pull request and drafts review comments on
   the exact lines. Untick what you don't want to say and post the rest as one review.
 - **Branches from issues.** Pick an open issue and get a branch named after it, linked to the
   issue on GitHub.
@@ -211,11 +211,13 @@ narrows down the commit that broke things.</td>
 Explain a commit, spot what could break, summarize your day, review before you push, write a
 commit message or a pull request description, or get a suggestion for a tricky conflict.
 
-- Connect with an **Anthropic API key**, your **Claude Code** login on this computer, or a
-  **custom endpoint**.
+- Connect with **Claude Code**, **Codex CLI**, an **Anthropic API key**, or a **custom endpoint**.
+  In **Settings → AI**, **Automatic** detects local CLIs on PATH and prefers Claude Code when
+  both are installed. Select a provider directly to override it. For Codex, sign in with
+  `codex login` and use **Test connection** in Cairn.
 - **Off until you turn it on.** Paths you exclude (such as `.env` files) are never sent, and
   anything that looks like a secret is redacted first.
-- A monthly spending limit keeps costs predictable.
+- API connections can use a monthly spending limit.
 
 ### Safety net
 

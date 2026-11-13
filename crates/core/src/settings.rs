@@ -186,10 +186,18 @@ pub enum AiSuggest {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
-    #[default]
     ClaudeCode,
     ApiKey,
     CustomEndpoint,
+    CodexCli,
+    #[default]
+    Automatic,
+}
+
+impl AiProvider {
+    pub fn uses_api(self) -> bool {
+        matches!(self, Self::ApiKey | Self::CustomEndpoint)
+    }
 }
 
 /// When the AI review runs before a push.
@@ -501,6 +509,8 @@ pub struct Ai {
     pub monthly_limit_usd: u32,
     pub model_deep: String,
     pub model_fast: String,
+    pub codex_model_deep: String,
+    pub codex_model_fast: String,
     pub show_usage: bool,
     pub review: AiReview,
     pub conflict_suggestions: bool,
@@ -514,11 +524,13 @@ impl Default for Ai {
     fn default() -> Self {
         Self {
             enabled: true,
-            provider: AiProvider::ClaudeCode,
+            provider: AiProvider::default(),
             endpoint_url: "http://localhost:4000".into(),
             monthly_limit_usd: 20,
             model_deep: "claude-opus-5-5".into(),
             model_fast: "claude-haiku-5-5".into(),
+            codex_model_deep: String::new(),
+            codex_model_fast: String::new(),
             show_usage: false,
             review: AiReview::Ask,
             conflict_suggestions: true,
@@ -735,6 +747,14 @@ mod tests {
         assert_eq!(partial.appearance.theme, ThemeMode::Light);
         assert_eq!(partial.general.language, Language::System);
         assert_eq!(partial.git.pull_mode, PullMode::Rebase);
+        assert_eq!(partial.ai.provider, AiProvider::Automatic);
+    }
+
+    #[test]
+    fn preserves_saved_claude_provider() {
+        let settings: Settings = toml::from_str("[ai]\nprovider = \"claude_code\"\n").unwrap();
+        assert_eq!(settings.ai.provider, AiProvider::ClaudeCode);
+        assert!(settings.ai.codex_model_fast.is_empty());
     }
 
     #[test]

@@ -791,6 +791,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "smol",
+ "tempfile",
  "ureq",
  "uuid",
  "velopack",

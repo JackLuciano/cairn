@@ -51,6 +51,12 @@ fn save(state: &WindowState) {
 }
 
 impl WindowState {
+    fn has_valid_bounds(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
+            && self.width.is_finite() && self.width > 0.
+            && self.height.is_finite() && self.height > 0.
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         Bounds { origin: point(px(self.x), px(self.y)), size: size(px(self.width.max(MIN_SIZE.0)), px(self.height.max(MIN_SIZE.1))) }
     }
@@ -75,11 +81,21 @@ impl WindowState {
 pub(crate) fn restore(cx: &App) -> (Option<DisplayId>, WindowBounds) {
     let fallback = || (None, WindowBounds::Windowed(Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx)));
     let Some(state) = load() else { return fallback() };
-    let Some(display) = cx.displays().into_iter().find(|d| d.uuid().ok() == state.display) else { return fallback() };
-    LAST_SAVED.with(|l| *l.borrow_mut() = Some(state.clone()));
-    let saved = state.bounds();
-    let bounds = if display.bounds().intersects(&saved) { saved } else { Bounds::centered(Some(display.id()), saved.size, cx) };
-    (Some(display.id()), state.with_bounds(bounds))
+    let display = state.display.and_then(|uuid| {
+        cx.displays().into_iter().find(|d| d.uuid().ok() == Some(uuid))
+    });
+    let display_id = display.as_ref().map(|d| d.id());
+    let bounds = if state.has_valid_bounds() {
+        let saved = state.bounds();
+        if display.as_ref().is_some_and(|d| d.bounds().intersects(&saved)) {
+            saved
+        } else {
+            Bounds::centered(display_id, saved.size, cx)
+        }
+    } else {
+        Bounds::centered(display_id, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx)
+    };
+    (display_id, state.with_bounds(bounds))
 }
 
 /// Saves the window's monitor, position, size and maximized state every time it moves or resizes,
@@ -107,14 +123,19 @@ pub(crate) fn capture(window: &Window, cx: &App) {
         WindowBounds::Fullscreen(b) => (b, Mode::Fullscreen),
     };
     let display = window.display(cx).and_then(|d| d.uuid().ok());
-    save(&WindowState {
+    let state = WindowState {
         display,
         x: bounds.origin.x.into(),
         y: bounds.origin.y.into(),
         width: bounds.size.width.into(),
         height: bounds.size.height.into(),
         mode,
-    });
+    };
+    // Windows can report an empty normal rectangle while the native window
+    // is closing. Keep the last valid placement captured during move/resize.
+    if state.has_valid_bounds() {
+        save(&state);
+    }
 }
 
 #[cfg(windows)]
@@ -145,5 +166,14 @@ mod tests {
         assert_eq!(f32::from(b.origin.x), 2560.);
         assert_eq!(f32::from(b.size.width), 960.);
         assert_eq!(f32::from(b.size.height), 600.);
+    }
+
+    #[test]
+    fn empty_native_placement_is_invalid() {
+        let mut state = WindowState { display: None, x: 8., y: 4., width: -16., height: -8., mode: Mode::Windowed };
+        assert!(!state.has_valid_bounds());
+        state.width = 1440.;
+        state.height = 900.;
+        assert!(state.has_valid_bounds());
     }
 }
