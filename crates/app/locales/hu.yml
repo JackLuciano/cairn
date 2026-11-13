@@ -197,7 +197,7 @@ progress:
   skip_tip: "Ezt a commitot kihagyja, és a következővel folytatja"
 
 op:
-  busy: "Még fut egy másik művelet. Várd meg, amíg befejeződik."
+  busy_with: "Még fut: %{what}. Próbáld újra, ha végzett."
   done: "%{what}: kész"
   failed: "%{what} nem sikerült"
   restore_discarded: "Elvetett változások visszahozása"

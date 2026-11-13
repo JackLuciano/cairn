@@ -213,6 +213,7 @@ pub(crate) struct RepoView {
     pub branch_filter: crate::pages::branches::BranchFilter,
     pub live_op: Option<crate::live_op::LiveOp>,
     pub live_cancel: Option<cairn_core::git::CancelHandle>,
+    pub busy_warned: bool,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
     pub selected_commit: Option<String>,
@@ -321,6 +322,7 @@ impl RepoView {
             branch_filter: Default::default(),
             live_op: None,
             live_cancel: None,
+            busy_warned: false,
             multi_select: Vec::new(),
             last_clicked: None,
             selected_commit: None,
@@ -994,11 +996,15 @@ impl RepoView {
     ) where
         F: FnOnce(&Git) -> cairn_core::Result<String> + Send + 'static,
     {
-        if self.busy.is_some() {
-            window.push_notification(Notification::warning(tr("op.busy")), cx);
+        if let Some(running) = &self.busy {
+            if !self.busy_warned && running != &label {
+                self.busy_warned = true;
+                window.push_notification(Notification::warning(t!("op.busy_with", what = running.to_string()).to_string()), cx);
+            }
             return;
         }
         self.busy = Some(label.clone());
+        self.busy_warned = false;
         self.live_op = None;
         cx.notify();
         let progress: crate::live_op::SharedProgress = Default::default();

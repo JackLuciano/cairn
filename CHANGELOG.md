@@ -5,6 +5,15 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-13
+
+No more pile of "still running" warnings.
+
+### Fixed
+
+- Sync no longer lets a second click start between its steps, and a click while something is
+  running shows one short note naming what is running instead of a pile of warnings.
+
 ## [0.5.1] - 2026-11-13
 
 Sync the way VS Code does it, discards you can take back, and fewer accidental commits to main.
