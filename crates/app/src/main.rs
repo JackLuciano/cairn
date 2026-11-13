@@ -41,10 +41,74 @@ use gpui_kit::*;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
+#[cfg(test)]
+mod locale_tests {
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn selectable_locales_have_distinct_translations() {
+        use rust_i18n::t;
+
+        assert_eq!(t!("settings.accent", locale = "en"), "Accent color");
+        assert_eq!(t!("settings.accent", locale = "en-GB"), "Accent colour");
+        for (locale, label) in [
+            ("de", "Sprache"), ("es", "Idioma"), ("fr", "Langue"), ("hu", "Nyelv"), ("ja", "言語"),
+            ("pt-BR", "Idioma"), ("ru", "Язык"), ("zh-CN", "语言"), ("zh-TW", "語言"),
+        ] {
+            assert_eq!(t!("settings.language", locale = locale), label, "{locale}");
+        }
+        assert_eq!(t!("settings.language", locale = "en-GB"), "Language");
+    }
+
+    fn flatten(value: &serde_json::Value, prefix: &str, entries: &mut BTreeMap<String, String>) {
+        if let Some(mapping) = value.as_object() {
+            for (key, child) in mapping {
+                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+                flatten(child, &path, entries);
+            }
+        } else {
+            entries.insert(prefix.to_owned(), value.as_str().expect("locale value must be a string").to_owned());
+        }
+    }
+
+    #[test]
+    fn catalogs_cover_every_key_and_preserve_interpolation() {
+        use cairn_core::settings::Language;
+
+        let catalogs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
+        let load = |locale: &str| {
+            let text = std::fs::read_to_string(catalogs.join(format!("{locale}.yml"))).unwrap();
+            let value = serde_saphyr::from_str(&text).unwrap();
+            let mut entries = BTreeMap::new();
+            flatten(&value, "", &mut entries);
+            entries
+        };
+        let markers = regex::Regex::new(r"%\{\w+\}|%[a-zA-Z]").unwrap();
+        let placeholders = |s: &str| {
+            let mut names: Vec<_> = markers.find_iter(s).map(|m| m.as_str().to_owned()).collect();
+            names.sort_unstable();
+            names
+        };
+        let base = load("en");
+        for language in Language::ALL {
+            let locale = language.code();
+            let translated = load(locale);
+            assert!(base.keys().eq(translated.keys()), "{locale} has a different set of keys");
+            for (key, source) in &base {
+                let actual = &translated[key];
+                assert!(!actual.trim().is_empty() || source.trim().is_empty(), "{locale}: {key} is empty");
+                assert_eq!(placeholders(actual), placeholders(source), "{locale}: {key}");
+                assert_eq!(super::_rust_i18n_translate(locale, key), actual.as_str(), "{locale}: {key}");
+            }
+        }
+    }
+}
+
 fn main() {
     velopack::VelopackApp::build().run();
     let settings = Settings::load();
-    rust_i18n::set_locale(settings.general.language.code());
+    let locale = platform::resolve_language(settings.general.language).code();
+    rust_i18n::set_locale(locale);
 
     gpui_kit::application().with_assets(AllAssets).run(move |cx| {
         let _ = cx.text_system().add_fonts(vec![
@@ -55,7 +119,7 @@ fn main() {
         ]);
         gpui_kit::init(cx);
         palette::bind_keys(cx);
-        gpui_kit::component::set_locale(settings.general.language.code());
+        gpui_kit::component::set_locale(locale);
         theme::apply(&settings, None, cx);
 
         let hidden = cfg!(debug_assertions) && std::env::var_os("CAIRN_DEBUG_HIDDEN").is_some();

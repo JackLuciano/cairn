@@ -5,6 +5,13 @@ window after an update.
 
 ## [Unreleased]
 
+### Added
+
+- Choose a language from a dropdown in Settings → General. American and British English are
+  separate options. French, German, Japanese, Brazilian Portuguese, Russian, Simplified and
+  Traditional Chinese, and Spanish are available.
+- Follow the system's display language by default, with American English as the fallback.
+
 ## [0.5.2] - 2026-11-13
 
 No more pile of "still running" warnings.

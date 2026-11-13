@@ -67,9 +67,18 @@ pub(crate) fn month_spend() -> f64 {
 }
 
 fn language_line(settings: &Settings) -> &'static str {
-    match settings.general.language {
+    match crate::platform::resolve_language(settings.general.language) {
         Language::Hungarian => "Answer in Hungarian, using the informal \"te\" form. Keep code, file names and commit message prefixes as they are.",
-        Language::English => "Answer in English.",
+        Language::System | Language::English => "Answer in American English.",
+        Language::EnglishUk => "Answer in British English.",
+        Language::German => "Answer in German. Keep code and file names as they are.",
+        Language::Spanish => "Answer in Spanish. Keep code and file names as they are.",
+        Language::ChineseSimplified => "Answer in Simplified Chinese. Keep code and file names as they are.",
+        Language::ChineseTraditional => "Answer in Traditional Chinese. Keep code and file names as they are.",
+        Language::French => "Answer in French. Keep code and file names as they are.",
+        Language::Japanese => "Answer in Japanese. Keep code and file names as they are.",
+        Language::Portuguese => "Answer in Brazilian Portuguese. Keep code and file names as they are.",
+        Language::Russian => "Answer in Russian. Keep code and file names as they are.",
     }
 }
 

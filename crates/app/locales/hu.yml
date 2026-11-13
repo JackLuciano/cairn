@@ -579,6 +579,7 @@ settings:
   merge_tool_desc: "A git által ismert neve, például bc, meld vagy kdiff3. Üresen a git config merge.tool beállítását használja."
   startup: "Amikor a Cairn elindul"
   language: "Nyelv"
+  language_system: "Rendszer nyelve"
   language_desc: "Mentés után azonnal érvénybe lép."
   confirm_quit: "Figyelmeztetés bezáráskor, ha művelet fut"
   confirm_quit_desc: "Például amíg egy push vagy rebase még fut."
