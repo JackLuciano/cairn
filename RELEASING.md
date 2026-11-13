@@ -14,6 +14,19 @@ away with the "Restart to update" button).
    script installs the `vpk` tool with it on first run.
 2. Install the [GitHub CLI](https://cli.github.com/) and log in: `gh auth login`.
 
+## Checks on pull requests
+
+Nothing runs on its own when a pull request is opened or updated. After reviewing a pull
+request, add a label to start its checks:
+
+| Label | Runs |
+| --- | --- |
+| `run-ci` | Clippy and tests on Windows |
+| `run-builds` | The macOS and Linux builds |
+
+The results appear in the pull request's checks. To run them again after new commits, remove
+the label and add it again. On `main`, start them from **Actions → Run workflow**.
+
 ## Cutting a release
 
 ```powershell
