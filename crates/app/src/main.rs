@@ -41,6 +41,57 @@ use gpui_kit::*;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
+fn main() {
+    velopack::VelopackApp::build().run();
+    let settings = Settings::load();
+    let locale = platform::resolve_language(settings.general.language).code();
+    rust_i18n::set_locale(locale);
+
+    gpui_kit::application().with_assets(AllAssets).run(move |cx| {
+        let _ = cx.text_system().add_fonts(vec![
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.ttf").as_slice()),
+        ]);
+        gpui_kit::init(cx);
+        palette::bind_keys(cx);
+        gpui_kit::component::set_locale(locale);
+        theme::apply(&settings, None, cx);
+
+        let hidden = cfg!(debug_assertions) && std::env::var_os("CAIRN_DEBUG_HIDDEN").is_some();
+        let (display_id, window_bounds) = if hidden {
+            let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+            bounds.origin = point(px(-6000.), px(0.));
+            (None, WindowBounds::Windowed(bounds))
+        } else {
+            window_state::restore(cx)
+        };
+        let options = WindowOptions {
+            window_bounds: Some(window_bounds),
+            display_id,
+            window_min_size: Some(size(px(960.), px(600.))),
+            app_id: Some("dev.cairn.app".into()),
+            focus: !hidden,
+            window_background: if settings.appearance.glass && theme::glass_supported() { WindowBackgroundAppearance::MicaBackdrop } else { WindowBackgroundAppearance::Opaque },
+            ..TitleBar::window_options()
+        };
+        gpui_kit::open_window(options, cx, move |window, cx| {
+            window.set_window_title("Cairn");
+            cx.new(|cx| {
+                if !hidden {
+                    window_state::track(window, cx);
+                }
+                app::CairnApp::new(window, cx)
+            })
+        })
+        .expect("failed to open the Cairn window");
+        if !hidden {
+            cx.activate(true);
+        }
+    });
+}
+
 #[cfg(test)]
 mod locale_tests {
     use std::collections::BTreeMap;
@@ -102,55 +153,4 @@ mod locale_tests {
             }
         }
     }
-}
-
-fn main() {
-    velopack::VelopackApp::build().run();
-    let settings = Settings::load();
-    let locale = platform::resolve_language(settings.general.language).code();
-    rust_i18n::set_locale(locale);
-
-    gpui_kit::application().with_assets(AllAssets).run(move |cx| {
-        let _ = cx.text_system().add_fonts(vec![
-            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
-            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
-            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
-            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.ttf").as_slice()),
-        ]);
-        gpui_kit::init(cx);
-        palette::bind_keys(cx);
-        gpui_kit::component::set_locale(locale);
-        theme::apply(&settings, None, cx);
-
-        let hidden = cfg!(debug_assertions) && std::env::var_os("CAIRN_DEBUG_HIDDEN").is_some();
-        let (display_id, window_bounds) = if hidden {
-            let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-            bounds.origin = point(px(-6000.), px(0.));
-            (None, WindowBounds::Windowed(bounds))
-        } else {
-            window_state::restore(cx)
-        };
-        let options = WindowOptions {
-            window_bounds: Some(window_bounds),
-            display_id,
-            window_min_size: Some(size(px(960.), px(600.))),
-            app_id: Some("dev.cairn.app".into()),
-            focus: !hidden,
-            window_background: if settings.appearance.glass && theme::glass_supported() { WindowBackgroundAppearance::MicaBackdrop } else { WindowBackgroundAppearance::Opaque },
-            ..TitleBar::window_options()
-        };
-        gpui_kit::open_window(options, cx, move |window, cx| {
-            window.set_window_title("Cairn");
-            cx.new(|cx| {
-                if !hidden {
-                    window_state::track(window, cx);
-                }
-                app::CairnApp::new(window, cx)
-            })
-        })
-        .expect("failed to open the Cairn window");
-        if !hidden {
-            cx.activate(true);
-        }
-    });
 }
