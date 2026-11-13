@@ -10,6 +10,10 @@ window after an update.
 - Use Codex CLI for Cairn's AI features. Settings → AI detects local CLI installations and lets
   you choose Codex CLI, Claude Code, or automatic selection.
 
+### Fixed
+
+- Restore the last window size and maximized state when reopening Cairn.
+
 ## [0.5.2] - 2026-11-13
 
 No more pile of "still running" warnings.
