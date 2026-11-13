@@ -14,7 +14,7 @@ Native Rust, GPU-rendered with [GPUI](https://gpui.rs). Every risky operation is
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust)](https://www.rust-lang.org)
 [![Languages](https://img.shields.io/badge/UI-English%20%7C%20Magyar-8b5cf6)](#languages)
 
-[Features](#features) · [Install](#install) · [Shortcuts](#keyboard-shortcuts) · [AI](#ask-ai) · [Build from source](#build-from-source)
+[Features](#features) · [Install](#install) · [Shortcuts](#keyboard-shortcuts) · [AI](#ask-ai) · [Build from source](#build-from-source) · [Code signing policy](CODE_SIGNING_POLICY.md)
 
 <br>
 
@@ -271,8 +271,10 @@ Download `dev.cairn.app-win-Setup.exe` from the
 [latest release](https://github.com/JackLuciano/cairn/releases/latest) and run it. It installs for
 your user only, no admin rights needed. Updates arrive automatically.
 
-The installer is not code-signed yet, so Windows SmartScreen may ask you to confirm the first time
-("More info", then "Run anyway").
+Windows releases are signed through [SignPath Foundation](https://signpath.org/), which provides
+free code signing for open source projects (see the [code signing policy](CODE_SIGNING_POLICY.md)
+for how releases are signed and what Cairn sends over the network). Until signing is active,
+Windows SmartScreen may ask you to confirm the first time ("More info", then "Run anyway").
 
 **Requirements**
 

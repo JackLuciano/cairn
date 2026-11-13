@@ -43,6 +43,30 @@ Try it without publishing:
 ./scripts/release.ps1 -DryRun
 ```
 
+## Signed releases (GitHub Actions + SignPath)
+
+Signed Windows releases are built on GitHub, because SignPath only signs files it can trace back
+to a GitHub Actions build of this repository. After the version bump and changelog are merged,
+run **Actions → Release (Windows) → Run workflow** on `main`. The workflow builds `cairn.exe`,
+sends it to SignPath, packs the installer with Velopack, sends the installer to SignPath, tags
+the commit, publishes the release and starts the macOS and Linux builds. Each signing request
+waits until an approver approves it on signpath.io.
+
+Without the SignPath settings below, the same workflow publishes an unsigned release.
+
+One-time SignPath setup (after SignPath Foundation accepts the project):
+
+1. In SignPath, create two artifact configurations with the slugs `app` and `installer`, from
+   [`.signpath/artifact-configurations`](.signpath/artifact-configurations).
+2. Create a CI user with submitter rights on the release signing policy and copy its API token.
+3. In GitHub → Settings → Secrets and variables → Actions, add:
+   - the secret `SIGNPATH_API_TOKEN`
+   - the variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` and
+     `SIGNPATH_POLICY_SLUG`
+4. Install the SignPath GitHub App on the repository, if SignPath asks for it.
+
+The local `./scripts/release.ps1` still works, but its releases are unsigned.
+
 ## What users get
 
 | File | Purpose |

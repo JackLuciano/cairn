@@ -1,0 +1,157 @@
+name: Release (Windows)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-windows
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  APP_ID: dev.cairn.app
+  VPK_VERSION: 1.3.39-g8d2844f
+  REPO_URL: https://github.com/${{ github.repository }}
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - name: Releases come from main
+        if: github.ref != 'refs/heads/main'
+        run: throw "Start this workflow on main."
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Version and release notes
+        id: meta
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if (-not $version) { throw 'No version in Cargo.toml.' }
+          $tag = "v$version"
+          gh release view $tag *> $null
+          if (-not $LASTEXITCODE) { throw "Release $tag already exists. Bump the version first." }
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $match = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($version))\][^\n]*\n(.*?)(?=^## \[|\z)")
+          if (-not $match.Success -or -not $match.Groups[1].Value.Trim()) { throw "CHANGELOG.md has no section for [$version]." }
+          $notes = $match.Groups[1].Value.Trim()
+          if ($env:SIGN -eq 'true') {
+            $notes += "`n`n---`n`nThe Windows installer and program are signed. [Code signing policy]($env:REPO_URL/blob/main/CODE_SIGNING_POLICY.md)"
+          }
+          New-Item -ItemType Directory -Force releases/stage | Out-Null
+          $notes | Set-Content releases/notes.md -Encoding utf8NoBOM
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "Releasing Cairn $tag, signing: $env:SIGN"
+
+      - name: Build
+        run: cargo build -p cairn --release
+
+      - name: Stage the program
+        run: Copy-Item target/release/cairn.exe releases/stage/
+
+      - name: Upload the unsigned program
+        id: unsigned-app
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cairn-unsigned
+          path: releases/stage/cairn.exe
+          if-no-files-found: error
+
+      - name: Sign the program
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: app
+          github-artifact-id: ${{ steps.unsigned-app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 18000
+          output-artifact-directory: releases/signed-app
+          parameters: |
+            version: "${{ steps.meta.outputs.version }}"
+
+      - name: Use the signed program
+        if: env.SIGN == 'true'
+        run: Copy-Item releases/signed-app/cairn.exe releases/stage/cairn.exe -Force
+
+      - name: Install Velopack
+        run: |
+          dotnet tool install -g vpk --version $env:VPK_VERSION
+          "$HOME\.dotnet\tools" >> $env:GITHUB_PATH
+
+      - name: Pack the installer and updates
+        run: |
+          vpk download github --repoUrl $env:REPO_URL --token $env:GH_TOKEN -o releases
+          vpk pack -u $env:APP_ID -v ${{ steps.meta.outputs.version }} -p releases/stage -e cairn.exe `
+            --packTitle Cairn --packAuthors "The Cairn contributors" `
+            --releaseNotes releases/notes.md -i crates/app/assets/cairn.ico -o releases
+          if ($LASTEXITCODE) { throw 'vpk pack failed.' }
+
+      - name: Upload the unsigned installer
+        id: unsigned-setup
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-unsigned
+          path: releases/${{ env.APP_ID }}-win-Setup.exe
+          if-no-files-found: error
+
+      - name: Sign the installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 18000
+          output-artifact-directory: releases/signed-setup
+          parameters: |
+            version: "${{ steps.meta.outputs.version }}"
+
+      - name: Use the signed installer
+        if: env.SIGN == 'true'
+        run: Copy-Item "releases/signed-setup/$env:APP_ID-win-Setup.exe" "releases/$env:APP_ID-win-Setup.exe" -Force
+
+      - name: Check the signatures
+        if: env.SIGN == 'true'
+        run: |
+          foreach ($f in "releases/stage/cairn.exe", "releases/$env:APP_ID-win-Setup.exe") {
+            $s = Get-AuthenticodeSignature $f
+            if ($s.Status -ne 'Valid') { throw "$f is not signed correctly: $($s.Status)" }
+            Write-Host "$f signed by $($s.SignerCertificate.Subject)"
+          }
+
+      - name: Publish the release
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a $tag -m "Cairn $tag"
+          git push origin $tag
+          vpk upload github --repoUrl $env:REPO_URL --token $env:GH_TOKEN --publish --releaseName "Cairn $tag" --tag $tag -o releases
+          if ($LASTEXITCODE) { throw 'vpk upload failed.' }
+          gh release edit $tag --notes-file releases/notes.md --latest
+
+      - name: Start the macOS and Linux builds
+        run: gh workflow run build-unix.yml --ref ${{ steps.meta.outputs.tag }}
