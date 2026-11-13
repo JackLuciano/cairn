@@ -790,6 +790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tempfile",
  "ureq",
  "uuid",
  "velopack",

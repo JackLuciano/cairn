@@ -64,6 +64,20 @@ fn ai_on(s: &Settings) -> bool {
     s.ai.enabled
 }
 
+const AI_PROVIDERS: [AiProvider; 5] = [
+    AiProvider::Automatic, AiProvider::ClaudeCode, AiProvider::CodexCli,
+    AiProvider::ApiKey, AiProvider::CustomEndpoint,
+];
+
+fn codex_selected(s: &Settings) -> bool {
+    use crate::ai::{LocalCli, automatic_provider};
+    match s.ai.provider {
+        AiProvider::CodexCli => true,
+        AiProvider::Automatic => automatic_provider(LocalCli::Claude.installed(), LocalCli::Codex.installed()) == Some(AiProvider::CodexCli),
+        _ => false,
+    }
+}
+
 fn schema() -> Vec<Category> {
     vec![
         Category {
@@ -266,19 +280,21 @@ fn schema() -> Vec<Category> {
                     label: "settings.group.connection",
                     rows: vec![
                         row("ai_enabled", "settings.ai_enabled", None, Control::Toggle(|s| s.ai.enabled, |s, v| s.ai.enabled = v)),
-                        RowDef { visible: Some(ai_on), ..row("ai_provider", "settings.ai_provider", Some("settings.ai_provider_desc"), Control::Choice(&["opt.claude_code", "opt.api_key", "opt.custom"], |s| s.ai.provider as usize, |s, i| s.ai.provider = [AiProvider::ClaudeCode, AiProvider::ApiKey, AiProvider::CustomEndpoint][i])) },
+                        RowDef { visible: Some(ai_on), ..row("ai_provider", "settings.ai_provider", Some("settings.ai_provider_desc"), Control::Choice(&["opt.ai_automatic", "opt.claude_code", "opt.codex_cli", "opt.api_key", "opt.custom"], |s| AI_PROVIDERS.iter().position(|p| *p == s.ai.provider).unwrap_or(0), |s, i| s.ai.provider = AI_PROVIDERS[i])) },
                         RowDef { visible: Some(|s| s.ai.enabled && s.ai.provider == AiProvider::ApiKey), ..row("api_key", "settings.api_key", Some("settings.api_key_desc"), Control::Secret("anthropic")) },
                         RowDef { visible: Some(|s| s.ai.enabled && s.ai.provider == AiProvider::CustomEndpoint), ..row("endpoint", "settings.endpoint", Some("settings.endpoint_desc"), Control::Text(|s| s.ai.endpoint_url.clone(), |s, v| s.ai.endpoint_url = v)) },
                         RowDef { visible: Some(|s| s.ai.enabled && s.ai.provider == AiProvider::CustomEndpoint), ..row("endpoint_key", "settings.endpoint_key", None, Control::Secret("custom")) },
                         RowDef { visible: Some(ai_on), ..row("ai_test", "ai.test", Some("settings.ai_test_desc"), Control::TestAi) },
-                        RowDef { visible: Some(|s| s.ai.enabled && s.ai.provider != AiProvider::ClaudeCode), ..row("limit", "settings.monthly_limit", Some("settings.monthly_limit_desc"), Control::Number(|s| f64::from(s.ai.monthly_limit_usd), |s, v| s.ai.monthly_limit_usd = v as u32, 0., 1000., 5., "unit.usd")) },
+                        RowDef { visible: Some(|s| s.ai.enabled && s.ai.provider.uses_api()), ..row("limit", "settings.monthly_limit", Some("settings.monthly_limit_desc"), Control::Number(|s| f64::from(s.ai.monthly_limit_usd), |s, v| s.ai.monthly_limit_usd = v as u32, 0., 1000., 5., "unit.usd")) },
                     ],
                 },
                 Group {
                     label: "settings.group.models",
                     rows: vec![
-                        RowDef { visible: Some(ai_on), ..row("model_deep", "settings.model_deep", None, Control::Choice(&["model.opus", "model.sonnet"], |s| (s.ai.model_deep != "claude-opus-5-5") as usize, |s, i| s.ai.model_deep = ["claude-opus-5-5", "claude-sonnet-5-5"][i].into())) },
-                        RowDef { visible: Some(ai_on), ..row("model_fast", "settings.model_fast", None, Control::Choice(&["model.haiku", "model.sonnet", "model.opus"], |s| ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"].iter().position(|m| *m == s.ai.model_fast).unwrap_or(0), |s, i| s.ai.model_fast = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"][i].into())) },
+                        RowDef { visible: Some(|s| s.ai.enabled && !codex_selected(s)), ..row("model_deep", "settings.model_deep", None, Control::Choice(&["model.opus", "model.sonnet"], |s| (s.ai.model_deep != "claude-opus-5-5") as usize, |s, i| s.ai.model_deep = ["claude-opus-5-5", "claude-sonnet-5-5"][i].into())) },
+                        RowDef { visible: Some(|s| s.ai.enabled && !codex_selected(s)), ..row("model_fast", "settings.model_fast", None, Control::Choice(&["model.haiku", "model.sonnet", "model.opus"], |s| ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"].iter().position(|m| *m == s.ai.model_fast).unwrap_or(0), |s, i| s.ai.model_fast = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"][i].into())) },
+                        RowDef { visible: Some(|s| s.ai.enabled && codex_selected(s)), ..row("codex_model_deep", "settings.model_deep", Some("settings.codex_model_desc"), Control::Text(|s| s.ai.codex_model_deep.clone(), |s, v| s.ai.codex_model_deep = v)) },
+                        RowDef { visible: Some(|s| s.ai.enabled && codex_selected(s)), ..row("codex_model_fast", "settings.model_fast", Some("settings.codex_model_desc"), Control::Text(|s| s.ai.codex_model_fast.clone(), |s, v| s.ai.codex_model_fast = v)) },
                         RowDef { visible: Some(ai_on), ..row("show_usage", "settings.show_usage", None, Control::Toggle(|s| s.ai.show_usage, |s, v| s.ai.show_usage = v)) },
                     ],
                 },
@@ -665,7 +681,8 @@ impl SettingsPanel {
             }
             Control::Choice(options, get, set) => {
                 let current = get(&self.draft);
-                let mut group = h_flex().p(px(2.)).gap(px(2.)).rounded(px(8.)).border_1().border_color(theme.border).bg(theme.background);
+                let mut group = h_flex().p(px(2.)).gap(px(2.)).rounded(px(8.)).border_1().border_color(theme.border).bg(theme.background)
+                    .when(r.id == "ai_provider", |d| d.flex_wrap());
                 for (i, key) in options.iter().enumerate() {
                     let on = i == current;
                     let (hover, active, fg, muted) = (theme.list_hover, theme.secondary, theme.foreground, theme.muted_foreground);
@@ -839,6 +856,22 @@ impl SettingsPanel {
         let defaults = Settings::default();
         let modified = is_modified(&r, &self.draft, &defaults);
         let control = self.render_control(r, cx);
+        let cli_status = (r.id == "ai_provider").then(|| {
+            use crate::ai::{LocalCli, automatic_provider};
+            let claude = LocalCli::Claude.installed();
+            let codex = LocalCli::Codex.installed();
+            let status = |installed| tr(if installed { "settings.cli_found" } else { "settings.cli_missing" }).to_string();
+            let detected = t!("settings.cli_detected", claude = status(claude), codex = status(codex)).to_string();
+            if self.draft.ai.provider != AiProvider::Automatic {
+                return detected;
+            }
+            let selected = tr(match automatic_provider(claude, codex) {
+                Some(AiProvider::ClaudeCode) => "opt.claude_code",
+                Some(AiProvider::CodexCli) => "opt.codex_cli",
+                _ => "settings.cli_none",
+            });
+            format!("{detected}\n{}", t!("settings.cli_selected", provider = selected.to_string()))
+        });
         h_flex()
             .flex_wrap()
             .items_center()
@@ -857,7 +890,8 @@ impl SettingsPanel {
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(r.label)))
                             .when(modified, |d| d.child(div().size(px(7.)).rounded_full().bg(theme.primary))),
                     )
-                    .when_some(r.desc, |d, desc| d.child(div().text_xs().text_color(theme.muted_foreground).child(tr(desc)))),
+                    .when_some(r.desc, |d, desc| d.child(div().text_xs().text_color(theme.muted_foreground).child(tr(desc))))
+                    .when_some(cli_status, |d, status| d.child(div().text_xs().text_color(theme.muted_foreground).child(status))),
             )
             .child(control)
             .when(modified, |d| {
