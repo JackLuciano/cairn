@@ -20,7 +20,7 @@ and is not signed with this certificate.
 | Reviewers (review every change from people outside the team) | [JackLuciano](https://github.com/JackLuciano) |
 | Approvers (approve each signing request) | [JackLuciano](https://github.com/JackLuciano) |
 
-Changes reach `main` only through pull requests that pass the checks. Everyone in these roles
+Changes reach `main` only through reviewed pull requests. Everyone in these roles
 uses two-factor authentication on GitHub and SignPath.
 
 ## Privacy policy
