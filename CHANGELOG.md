@@ -5,6 +5,10 @@ window after an update.
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore the last window size and maximized state when reopening Cairn.
+
 ## [0.5.2] - 2026-11-13
 
 No more pile of "still running" warnings.
