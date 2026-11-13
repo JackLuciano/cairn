@@ -1,7 +1,7 @@
 name: Translation problem
 description: A wrong, missing or awkward text in English or Hungarian.
 title: "[Text] "
-labels: ["documentation"]
+labels: ["translation", "needs triage"]
 body:
   - type: dropdown
     id: language
