@@ -5,6 +5,10 @@ window after an update.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13
+
+Sync the way VS Code does it, discards you can take back, and fewer accidental commits to main.
+
 ### Added
 
 - Choose what happens after a commit in Settings → Commits: nothing, push, or sync (pull what's
