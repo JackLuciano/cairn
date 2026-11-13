@@ -38,9 +38,14 @@ impl RepoView {
 
     fn sync_after_fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let git = self.git();
+        self.busy = Some(tr("op.sync"));
+        cx.notify();
         let task = cx.spawn_in(window, async move |this, cx| {
             let plan = cx.background_executor().spawn(async move { cairn_core::ops::sync_plan(&git) }).await;
-            let _ = this.update_in(cx, |v, window, cx| v.sync_with_plan(plan, window, cx));
+            let _ = this.update_in(cx, |v, window, cx| {
+                v.busy = None;
+                v.sync_with_plan(plan, window, cx);
+            });
         });
         self._tasks.push(task);
     }

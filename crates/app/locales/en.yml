@@ -197,7 +197,7 @@ progress:
   skip_tip: "Leave this commit out and go on with the next one"
 
 op:
-  busy: "Another operation is still running. Wait for it to finish."
+  busy_with: "%{what} is still running. Try again when it's done."
   done: "%{what}: done"
   failed: "%{what} failed"
   restore_discarded: "Bring back discarded changes"
