@@ -104,6 +104,8 @@ branches.
   inside a stash before applying it and restore single files from it.
 - **Go to file (Ctrl+P).** Type part of any file name to open its history, its line history or
   the file itself.
+- **Browse any commit.** Look through the files of any commit, branch or tag and save a file as
+  it was then.
 - **Conflicts before they happen.** Cairn checks quietly in the background whether your branches
   and open pull requests would conflict with `main`, and names the files.
 
@@ -129,6 +131,12 @@ branches.
   the exact lines. Untick what you don't want to say and post the rest as one review.
 - **Branches from issues.** Pick an open issue and get a branch named after it, linked to the
   issue on GitHub.
+- **Auto-merge.** Let GitHub merge a pull request by itself once its reviews and checks pass.
+- **CI checks.** See every GitHub Actions run, read the log of the failed steps, re-run failed
+  jobs, start a workflow by hand, and let AI explain why a run failed.
+- **Releases.** Cairn suggests the next version, writes the notes from merged pull requests or
+  with AI, and publishes the release.
+- **Co-authors.** Credit the people you worked with on a commit in two clicks.
 
 - **One commit at a time.** Click any commit of a pull request to see only what it changed, and
   step through them in order.
@@ -262,8 +270,9 @@ committing update the screen before git has even finished, huge diffs open with 
 right away, and skeleton placeholders show the shape of the page while it loads. One **Sync**
 button fetches, pulls and pushes whatever is needed, and the status bar shows where you stand.
 
-Cairn updates itself in the background (or when you press "Check now" in Settings → Updates) and
-shows what changed after each update:
+Cairn updates itself the way you choose in Settings → Updates: automatically when you close it,
+only after you say so, or only when you press "Check now". Downloads show their progress, and
+Cairn shows what changed after each update:
 
 <img src="docs/screenshots/dark/whats-new.png" alt="What's new popup" width="100%">
 

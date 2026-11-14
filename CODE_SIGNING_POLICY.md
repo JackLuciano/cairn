@@ -32,8 +32,8 @@ What that means in practice:
 
 - **Git and GitHub.** Fetch, pull, push, clone and pull request features talk to the remotes
   you configured, through your own `git` and GitHub CLI (`gh`) installations.
-- **Updates.** Cairn checks this repository's GitHub Releases for new versions. Turn off
-  automatic updates in Settings → Updates; "Check now" then only runs when you press it.
+- **Updates.** Cairn checks this repository's GitHub Releases for new versions. Choose Manual in
+  Settings → Updates and Cairn only checks when you press "Check now".
 - **Gravatar.** Off until you enable "Load author photos from Gravatar" in Settings →
   Appearance. When "Show author avatars" is also on, Cairn sends a SHA-256 hash of each
   displayed commit author's email address to gravatar.com to look up their photo.
