@@ -102,12 +102,7 @@ mod locale_tests {
 
         assert_eq!(t!("settings.accent", locale = "en"), "Accent color");
         assert_eq!(t!("settings.accent", locale = "en-GB"), "Accent colour");
-        for (locale, label) in [
-            ("de", "Sprache"), ("es", "Idioma"), ("fr", "Langue"), ("hu", "Nyelv"), ("ja", "言語"),
-            ("pt-BR", "Idioma"), ("ru", "Язык"), ("zh-CN", "语言"), ("zh-TW", "語言"),
-        ] {
-            assert_eq!(t!("settings.language", locale = locale), label, "{locale}");
-        }
+        assert_eq!(t!("settings.language", locale = "hu"), "Nyelv");
         assert_eq!(t!("settings.language", locale = "en-GB"), "Language");
     }
 
@@ -144,9 +139,16 @@ mod locale_tests {
         for language in Language::ALL {
             let locale = language.code();
             let translated = load(locale);
-            assert!(base.keys().eq(translated.keys()), "{locale} has a different set of keys");
+            if language == Language::EnglishUk {
+                for (key, value) in &translated {
+                    let source = base.get(key).unwrap_or_else(|| panic!("{locale}: unknown key {key}"));
+                    assert_ne!(value, source, "{locale}: {key} duplicates the fallback");
+                }
+            } else {
+                assert!(base.keys().eq(translated.keys()), "{locale} has a different set of keys");
+            }
             for (key, source) in &base {
-                let actual = &translated[key];
+                let actual = translated.get(key).unwrap_or(source);
                 assert!(!actual.trim().is_empty() || source.trim().is_empty(), "{locale}: {key} is empty");
                 assert_eq!(placeholders(actual), placeholders(source), "{locale}: {key}");
                 assert_eq!(super::_rust_i18n_translate(locale, key), actual.as_str(), "{locale}: {key}");

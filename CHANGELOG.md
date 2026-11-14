@@ -9,9 +9,7 @@ window after an update.
 
 - Use Codex CLI for Cairn's AI features. Settings → AI detects local CLI installations and lets
   you choose Codex CLI, Claude Code, or automatic selection.
-- Choose a language from a dropdown in Settings → General. American and British English are
-  separate options. French, German, Japanese, Brazilian Portuguese, Russian, Simplified and
-  Traditional Chinese, and Spanish are available.
+- Choose American English, British English, or Hungarian from a dropdown in Settings → General.
 - Follow the system's display language by default, with American English as the fallback.
 
 ### Fixed

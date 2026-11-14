@@ -45,30 +45,14 @@ pub enum Language {
     English,
     Hungarian,
     EnglishUk,
-    German,
-    Spanish,
-    ChineseSimplified,
-    ChineseTraditional,
-    French,
-    Japanese,
-    Portuguese,
-    Russian,
 }
 
 impl Language {
     // Alphabetical by English language name, with the English variants together.
-    pub const ALL: [Self; 11] = [
-        Self::ChineseSimplified,
-        Self::ChineseTraditional,
+    pub const ALL: [Self; 3] = [
         Self::EnglishUk,
         Self::English,
-        Self::French,
-        Self::German,
         Self::Hungarian,
-        Self::Japanese,
-        Self::Portuguese,
-        Self::Russian,
-        Self::Spanish,
     ];
 
     pub fn label(self) -> &'static str {
@@ -77,14 +61,6 @@ impl Language {
             Self::English => "English (US)",
             Self::EnglishUk => "English (UK)",
             Self::Hungarian => "Hungarian · Magyar",
-            Self::German => "German · Deutsch",
-            Self::Spanish => "Spanish · Español",
-            Self::ChineseSimplified => "Chinese (Simplified) · 简体中文",
-            Self::ChineseTraditional => "Chinese (Traditional) · 繁體中文",
-            Self::French => "French · Français",
-            Self::Japanese => "Japanese · 日本語",
-            Self::Portuguese => "Portuguese (Brazil) · Português",
-            Self::Russian => "Russian · Русский",
         }
     }
 
@@ -95,14 +71,6 @@ impl Language {
             Self::English => "en",
             Self::Hungarian => "hu",
             Self::EnglishUk => "en-GB",
-            Self::German => "de",
-            Self::Spanish => "es",
-            Self::ChineseSimplified => "zh-CN",
-            Self::ChineseTraditional => "zh-TW",
-            Self::French => "fr",
-            Self::Japanese => "ja",
-            Self::Portuguese => "pt-BR",
-            Self::Russian => "ru",
         }
     }
 
@@ -111,16 +79,7 @@ impl Language {
         let mut parts = locale.split(['-', '.', '@']);
         match parts.next() {
             Some("en") if parts.any(|part| part == "gb") => Self::EnglishUk,
-            Some("zh") if parts.clone().any(|part| part == "hans") => Self::ChineseSimplified,
-            Some("zh") if parts.any(|part| matches!(part, "hant" | "tw" | "hk" | "mo")) => Self::ChineseTraditional,
-            Some("zh") => Self::ChineseSimplified,
-            Some("fr") => Self::French,
-            Some("de") => Self::German,
             Some("hu") => Self::Hungarian,
-            Some("ja") => Self::Japanese,
-            Some("pt") => Self::Portuguese,
-            Some("ru") => Self::Russian,
-            Some("es") => Self::Spanish,
             _ => Self::English,
         }
     }
@@ -776,12 +735,10 @@ mod tests {
         for (locale, language) in [
             ("en_GB.UTF-8", Language::EnglishUk),
             ("en-US", Language::English),
-            ("ru-RU", Language::Russian),
-            ("pt-PT", Language::Portuguese),
-            ("zh-Hant", Language::ChineseTraditional),
-            ("zh-HK", Language::ChineseTraditional),
-            ("zh-Hans-HK", Language::ChineseSimplified),
-            ("zh-CN", Language::ChineseSimplified),
+            ("hu-HU", Language::Hungarian),
+            ("ru-RU", Language::English),
+            ("pt-PT", Language::English),
+            ("zh-Hant", Language::English),
             ("fi-FI", Language::English),
             ("", Language::English),
         ] {
