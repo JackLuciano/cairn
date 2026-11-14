@@ -8,6 +8,7 @@ window after an update.
 ### Added
 
 - Show Gravatar images for commit authors in History, with initials when no image is available.
+  Cached images are available offline and refresh in the background after 24 hours.
 - Use Codex CLI for Cairn's AI features. Settings → AI detects local CLI installations and lets
   you choose Codex CLI, Claude Code, or automatic selection.
 

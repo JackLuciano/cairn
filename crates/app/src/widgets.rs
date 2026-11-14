@@ -3,9 +3,6 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
-use sha2::{Digest, Sha256};
-use std::sync::{Arc, LazyLock};
-use std::time::Duration;
 
 pub(crate) fn tr(key: &str) -> SharedString {
     SharedString::from(t!(key).to_string())
@@ -471,54 +468,10 @@ pub(crate) fn avatar(name: &str, size: Pixels, cx: &App) -> Div {
         .child(initial)
 }
 
-pub(crate) fn commit_author_avatar(name: &str, email: &str, size: Pixels, window: &mut Window, cx: &mut App) -> Div {
-    let image = gravatar_hash(email)
-        .and_then(|hash| window.use_asset::<Gravatar>(&hash, cx))
-        .flatten();
-    match image {
+pub(crate) fn commit_author_avatar(name: &str, email: &str, size: Pixels, cx: &mut App) -> Div {
+    match crate::gravatar::image(email, cx) {
         Some(image) => div().flex_none().child(img(image).size(size).rounded_full()),
         None => avatar(name, size, cx),
-    }
-}
-
-fn gravatar_hash(email: &str) -> Option<String> {
-    let email = email.trim().to_lowercase();
-    let (local, domain) = email.split_once('@')?;
-    if local.is_empty() || domain.is_empty() {
-        return None;
-    }
-    Some(format!("{:x}", Sha256::digest(email.as_bytes())))
-}
-
-struct Gravatar;
-
-impl Asset for Gravatar {
-    type Source = String;
-    type Output = Option<Arc<RenderImage>>;
-
-    fn load(hash: String, cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
-        static CLIENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
-            ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(5)))
-                .build()
-                .into()
-        });
-
-        let svg_renderer = cx.svg_renderer();
-        async move {
-            smol::unblock(move || {
-                let url = format!("https://gravatar.com/avatar/{hash}?s=96&d=404");
-                let mut response = CLIENT.get(&url).call().ok()?;
-                let content_type = response.headers().get("content-type")?.to_str().ok()?;
-                let format = ImageFormat::from_mime_type(content_type)?;
-                if !matches!(format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::Gif | ImageFormat::Webp) {
-                    return None;
-                }
-                let bytes = response.body_mut().with_config().limit(256 * 1024).read_to_vec().ok()?;
-                Image::from_bytes(format, bytes).to_image_data(svg_renderer).ok()
-            })
-            .await
-        }
     }
 }
 
@@ -571,18 +524,8 @@ pub(crate) fn hstack() -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_path, gravatar_hash};
+    use super::display_path;
     use std::path::MAIN_SEPARATOR as SEP;
-
-    #[test]
-    fn hashes_normalized_gravatar_email() {
-        assert_eq!(
-            gravatar_hash("  USER@example.COM ").as_deref(),
-            Some("b4c9a289323b21a01c3e940f150eb9b8c542587f1abfd8f0e1cc1ffc5e475514"),
-        );
-        assert_eq!(gravatar_hash(" "), None);
-        assert_eq!(gravatar_hash("user@"), None);
-    }
 
     #[test]
     fn home_paths_are_shortened() {
