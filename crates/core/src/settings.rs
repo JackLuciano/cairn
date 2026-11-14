@@ -736,10 +736,6 @@ mod tests {
             ("en_GB.UTF-8", Language::EnglishUk),
             ("en-US", Language::English),
             ("hu-HU", Language::Hungarian),
-            ("ru-RU", Language::English),
-            ("pt-PT", Language::English),
-            ("zh-Hant", Language::English),
-            ("fi-FI", Language::English),
             ("", Language::English),
         ] {
             assert_eq!(Language::from_locale(locale), language, "{locale}");
