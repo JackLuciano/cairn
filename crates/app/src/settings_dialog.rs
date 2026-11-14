@@ -127,6 +127,7 @@ fn schema() -> Vec<Category> {
                         row("code_font", "settings.code_font", None, Control::Text(|s| s.appearance.code_font.clone(), |s, v| s.appearance.code_font = v)),
                         row("code_size", "settings.code_size", None, Control::Number(|s| f64::from(s.appearance.code_font_size), |s, v| s.appearance.code_font_size = v as f32, 10., 18., 0.5, "unit.px")),
                         row("avatars", "settings.avatars", None, Control::Toggle(|s| s.appearance.show_avatars, |s, v| s.appearance.show_avatars = v)),
+                        row("gravatar", "settings.gravatar", Some("settings.gravatar_desc"), Control::Toggle(|s| s.appearance.load_gravatar, |s, v| s.appearance.load_gravatar = v)),
                     ],
                 },
             ],

@@ -3,6 +3,14 @@
 All notable changes to Cairn are listed here. Each section is shown in the app's "What's new"
 window after an update.
 
+## [Unreleased]
+
+### Added
+
+- Opt in to Gravatar photos for commit authors in Settings → Appearance.
+  History shows initials when Gravatar is off or no image is available.
+  Cached images are available offline and refresh in the background after 24 hours.
+
 ## [0.6.0] - 2026-11-14
 
 Codex CLI for AI features, British English, and Cairn follows your system language.

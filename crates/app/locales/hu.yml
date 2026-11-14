@@ -600,6 +600,8 @@ settings:
   code_font: "Kód betűtípusa"
   code_size: "Kód betűmérete"
   avatars: "Szerzők avatarjainak megjelenítése"
+  gravatar: "Szerzői fényképek betöltése a Gravatarról"
+  gravatar_desc: "A szerzői avatarok megjelenítésekor minden megjelenített szerző e-mail-címének kivonatát elküldi a gravatar.com-nak."
   graph_style: "Vonalstílus"
   show_remotes: "Távoli ágak megjelenítése"
   show_tags: "Címkék megjelenítése"

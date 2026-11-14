@@ -468,6 +468,15 @@ pub(crate) fn avatar(name: &str, size: Pixels, cx: &App) -> Div {
         .child(initial)
 }
 
+/// Shows a commit author's initials or their Gravatar photo when photo loading is enabled.
+pub(crate) fn commit_author_avatar(name: &str, email: &str, size: Pixels, load_gravatar: bool, cx: &mut App) -> Div {
+    let photo = load_gravatar.then(|| crate::gravatar::image(email, cx)).flatten();
+    match photo {
+        Some(image) => div().flex_none().child(img(image).size(size).rounded_full()),
+        None => avatar(name, size, cx),
+    }
+}
+
 pub(crate) fn relative_time(ts: i64) -> SharedString {
     let now = chrono::Utc::now().timestamp();
     let diff = (now - ts).max(0);

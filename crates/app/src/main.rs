@@ -6,6 +6,7 @@ mod assist;
 mod branch_picker;
 mod changes;
 mod guard;
+mod gravatar;
 mod home;
 mod live_op;
 mod pages;

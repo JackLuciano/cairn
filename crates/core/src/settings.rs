@@ -233,6 +233,7 @@ pub struct Appearance {
     pub code_font: String,
     pub code_font_size: f32,
     pub show_avatars: bool,
+    pub load_gravatar: bool,
     pub reduce_motion: bool,
     pub palette: Palette,
     pub glass: bool,
@@ -251,6 +252,7 @@ impl Default for Appearance {
             code_font: "JetBrains Mono".into(),
             code_font_size: 12.5,
             show_avatars: true,
+            load_gravatar: false,
             reduce_motion: false,
             palette: Palette::Graphite,
             glass: true,
@@ -698,12 +700,15 @@ mod tests {
     fn round_trips_through_toml_and_fills_missing_keys() {
         let mut s = Settings::default();
         s.appearance.theme = ThemeMode::Light;
+        s.appearance.load_gravatar = true;
         s.general.language = Language::Hungarian;
         let text = toml::to_string_pretty(&s).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(back, s);
-        let partial: Settings = toml::from_str("[appearance]\ntheme = \"light\"\n").unwrap();
+        let partial: Settings = toml::from_str("[appearance]\ntheme = \"light\"\nshow_avatars = true\n").unwrap();
         assert_eq!(partial.appearance.theme, ThemeMode::Light);
+        assert!(partial.appearance.show_avatars);
+        assert!(!partial.appearance.load_gravatar);
         assert_eq!(partial.general.language, Language::System);
         assert_eq!(partial.git.pull_mode, PullMode::Rebase);
         assert_eq!(partial.ai.provider, AiProvider::Automatic);
