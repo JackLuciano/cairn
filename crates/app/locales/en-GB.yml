@@ -1,0 +1,8 @@
+# British English overrides. Shared strings come from en.yml.
+settings:
+  cat:
+    appearance_desc: "Theme, colours, fonts and motion. Changes preview right away."
+    git: "Git behaviour"
+  accent: "Accent colour"
+  palette: "Theme colours"
+  palette_desc: "The colours of the whole app. Each works in dark and light mode."

@@ -1,6 +1,40 @@
 use std::path::Path;
 use std::process::Command;
 
+use cairn_core::settings::Language;
+
+pub(crate) fn resolve_language(language: Language) -> Language {
+    if language == Language::System {
+        system_locale().as_deref().map_or(Language::English, Language::from_locale)
+    } else {
+        language
+    }
+}
+
+#[cfg(windows)]
+fn system_locale() -> Option<String> {
+    use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+    use windows::core::PWSTR;
+
+    let mut count = 0;
+    let mut len = 0;
+    // Query the required UTF-16 buffer size before fetching the UI language list.
+    unsafe { GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut len) }.ok()?;
+    let mut buffer = vec![0; len as usize];
+    unsafe {
+        GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, Some(PWSTR(buffer.as_mut_ptr())), &mut len)
+    }.ok()?;
+    let first = buffer.split(|&ch| ch == 0).next()?;
+    String::from_utf16(first).ok()
+}
+
+#[cfg(not(windows))]
+fn system_locale() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|locale| !locale.is_empty())
+}
+
 /// Opens a file or folder in the editor named in Settings → Tools.
 ///
 /// # Arguments

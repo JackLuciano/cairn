@@ -775,7 +775,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cairn"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "cairn-core",
@@ -788,6 +788,7 @@ dependencies = [
  "regex",
  "rust-i18n",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sha2 0.10.9",
  "smol",
@@ -801,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-core"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "dirs 6.0.0",

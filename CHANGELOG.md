@@ -3,7 +3,9 @@
 All notable changes to Cairn are listed here. Each section is shown in the app's "What's new"
 window after an update.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-14
+
+Codex CLI for AI features, British English, and Cairn follows your system language.
 
 ### Added
 
@@ -11,6 +13,8 @@ window after an update.
   Cached images are available offline and refresh in the background after 24 hours.
 - Use Codex CLI for Cairn's AI features. Settings → AI detects local CLI installations and lets
   you choose Codex CLI, Claude Code, or automatic selection.
+- Choose American English, British English, or Hungarian from a dropdown in Settings → General.
+- Follow the system's display language by default, with American English as the fallback.
 
 ### Fixed
 
