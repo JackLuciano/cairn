@@ -71,7 +71,7 @@ pub struct ReviewComment {
     pub line: Option<u64>,
 }
 
-fn gh(dir: &std::path::Path, args: &[&str]) -> Result<String> {
+pub(crate) fn gh(dir: &std::path::Path, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("gh");
     cmd.current_dir(dir).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
@@ -246,6 +246,7 @@ pub struct PrDetails {
     pub reviewers: Vec<PrReviewer>,
     pub assignees: Vec<String>,
     pub merge_state: String,
+    pub auto_merge: bool,
 }
 
 /// How a pull request is merged.
@@ -280,6 +281,38 @@ pub fn pr_merge(git: &Git, number: u64, method: MergeMethod, delete_branch: bool
     gh(git.dir(), &args)
 }
 
+/// Turns on GitHub's auto-merge, so the pull request merges by itself once its required reviews
+/// and checks pass. In repositories with a merge queue this adds it to the queue instead.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `method` - squash, merge commit or rebase
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_auto_merge(git: &Git, number: u64, method: MergeMethod) -> Result<String> {
+    let n = number.to_string();
+    let flag = match method {
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Rebase => "--rebase",
+    };
+    gh(git.dir(), &["pr", "merge", n.as_str(), "--auto", flag, "--delete-branch"])
+}
+
+/// Turns off auto-merge for a pull request.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_cancel_auto_merge(git: &Git, number: u64) -> Result<String> {
+    gh(git.dir(), &["pr", "merge", &number.to_string(), "--disable-auto"])
+}
+
 /// Marks a draft pull request as ready for review.
 ///
 /// # Arguments
@@ -303,7 +336,7 @@ pub fn pr_ready(git: &Git, number: u64) -> Result<String> {
 pub fn pr_details(git: &Git, number: u64) -> Result<PrDetails> {
     let out = gh(git.dir(), &[
         "pr", "view", &number.to_string(), "--json",
-        "number,title,url,state,isDraft,reviewDecision,baseRefName,headRefName,statusCheckRollup,author,body,headRefOid,comments,reviews,files,createdAt,additions,deletions,changedFiles,labels,reviewRequests,commits,latestReviews,assignees,mergeStateStatus",
+        "number,title,url,state,isDraft,reviewDecision,baseRefName,headRefName,statusCheckRollup,author,body,headRefOid,comments,reviews,files,createdAt,additions,deletions,changedFiles,labels,reviewRequests,commits,latestReviews,assignees,mergeStateStatus,autoMergeRequest",
     ])?;
     let v: serde_json::Value = serde_json::from_str(&out)?;
     let gh_pr: GhPr = serde_json::from_value(v.clone())?;
@@ -362,6 +395,7 @@ pub fn pr_details(git: &Git, number: u64) -> Result<PrDetails> {
         reviewers,
         assignees,
         merge_state: s(&v, "/mergeStateStatus"),
+        auto_merge: v.get("autoMergeRequest").is_some_and(|a| !a.is_null()),
     })
 }
 
@@ -666,7 +700,7 @@ pub fn submit(git: &Git, remote: &str, stack: &[StackBranch], draft: bool) -> Re
     Ok(format!("{} branches pushed, {created} pull requests opened", stack.len()))
 }
 
-fn gh_with_input(dir: &std::path::Path, args: &[&str], input: &str) -> Result<String> {
+pub(crate) fn gh_with_input(dir: &std::path::Path, args: &[&str], input: &str) -> Result<String> {
     use std::io::Write as _;
     let mut cmd = Command::new("gh");
     cmd.current_dir(dir).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());

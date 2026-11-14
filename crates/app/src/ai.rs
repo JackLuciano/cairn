@@ -521,6 +521,37 @@ pub(crate) fn review_pr(settings: &Settings, title: &str, body: &str, diff: &str
     serde_json::from_str::<Vec<Finding>>(&json).map_err(|e| format!("Could not read the review: {e}"))
 }
 
+/// Explains why a CI run failed, from the end of its log.
+///
+/// # Arguments
+/// * `settings` - AI connection settings
+/// * `workflow` - the workflow's name
+/// * `title` - the run's title, usually the commit summary
+/// * `log` - the last lines of the failed steps' log
+///
+/// # Returns
+/// A short explanation with the likely fix, or an error message for the user.
+pub(crate) fn explain_ci_failure(settings: &Settings, workflow: &str, title: &str, log: &str) -> Result<String, String> {
+    let system = "You read failed CI logs for a developer. Say in one or two sentences what failed and why, quoting the key error line. Then give up to three short bullet points on how to fix it. No headings. If the log does not show the cause, say what to look at next.";
+    let user = format!("Workflow: {workflow}\nRun: {title}\n\nEnd of the failed steps' log:\n{}", sanitize_diff(settings, log));
+    complete(settings, Tier::Fast, system, &user)
+}
+
+/// Writes release notes from the commits since the previous release.
+///
+/// # Arguments
+/// * `settings` - AI connection settings
+/// * `tag` - the new version's tag
+/// * `commits` - one commit summary per line
+///
+/// # Returns
+/// The notes in Markdown, or an error message for the user.
+pub(crate) fn release_notes(settings: &Settings, tag: &str, commits: &str) -> Result<String, String> {
+    let system = "You write release notes for users of the software in Markdown. Group the changes under \"### Added\", \"### Changed\" and \"### Fixed\" (leave out empty groups), one short user-facing bullet per change, merging related commits. Skip chores, CI, refactors and version bumps unless users would notice them. Do not invent changes. Reply with only the notes.";
+    let user = format!("Version: {tag}\n\nCommits since the previous release:\n{commits}");
+    Ok(strip_fences(&complete(settings, Tier::Deep, system, &user)?))
+}
+
 pub(crate) fn pr_description(settings: &Settings, commits: &str, diff: &str) -> Result<(String, String), String> {
     let system = "You write pull request descriptions in Markdown. First line: a short title. Then a blank line, then: a one-paragraph summary, a \"## Changes\" bullet list, and a \"## Testing\" section containing only the placeholder [Describe how you tested this]. Do not invent test results.";
     let user = format!("Commits:\n{commits}\n\nDiff:\n{}", sanitize_diff(settings, diff));

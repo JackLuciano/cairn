@@ -23,7 +23,8 @@ pub(crate) struct CairnApp {
     pub active: Option<usize>,
     pub open_category: Option<Option<Uuid>>,
     pub sidebar_open: bool,
-    pub update_ready: Option<(String, std::sync::Arc<velopack::UpdateInfo>)>,
+    pub update: crate::updater::UpdateStatus,
+    pub update_message: Option<SharedString>,
     workspace: Option<(Uuid, Entity<crate::workspace_view::WorkspacePanel>)>,
     side_toggled: std::collections::HashSet<String>,
     focus: FocusHandle,
@@ -52,7 +53,8 @@ impl CairnApp {
             active: None,
             open_category: None,
             sidebar_open: true,
-            update_ready: None,
+            update: Default::default(),
+            update_message: None,
             workspace: None,
             side_toggled: if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SIDE").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default() } else { Default::default() },
             focus: cx.focus_handle(),
@@ -84,15 +86,11 @@ impl CairnApp {
             });
             false
         });
-        crate::updater::start(&mut app, window, cx);
+        crate::updater::start(window, cx);
         crate::whats_new::show_after_update(&mut app, window, cx);
         cx.on_app_quit(|this, _| {
-            let ready = this.update_ready.clone();
-            async move {
-                if let Some((_, info)) = ready {
-                    crate::updater::apply_on_exit(&info);
-                }
-            }
+            let (status, mode) = (this.update.clone(), this.settings.updates.effective_mode());
+            async move { crate::updater::apply_on_exit(&status, mode) }
         })
         .detach();
         if app.settings.general.startup == StartupMode::RestoreTabs {
@@ -824,9 +822,29 @@ impl CairnApp {
                 )
                 .when(tab.read(cx).clashes.contains_key(&b.name), |d| d.child(icon(IconName::TriangleAlert).xsmall().text_color(theme.red)))
                 .child(div().flex_none().text_size(px(11.)).text_color(theme.muted_foreground.opacity(0.8)).child(branch_meta(b)))
-                .on_click(move |_, window, cx| {
-                    let name = name.clone();
-                    t.update(cx, |v, cx| v.checkout(name, false, window, cx));
+                .on_click({
+                    let (t, name) = (t.clone(), name.clone());
+                    move |_, window, cx| {
+                        let name = name.clone();
+                        t.update(cx, |v, cx| v.checkout(name, false, window, cx));
+                    }
+                })
+                .context_menu({
+                    let (t, name, head) = (t.clone(), name.clone(), b.is_head);
+                    move |menu, _, _| {
+                        let (t1, t2, t3) = (t.clone(), t.clone(), t.clone());
+                        let (n1, n2, n3) = (name.clone(), name.clone(), name.clone());
+                        menu.when(!head, |m| {
+                            m.item(PopupMenuItem::new(t!("branches.checkout").to_string()).icon(icon(IconName::LogIn)).on_click(move |_, window, cx| {
+                                let n = n1.clone();
+                                t1.update(cx, |v, cx| v.checkout(n, false, window, cx));
+                            }))
+                        })
+                        .item(PopupMenuItem::new(t!("branches.rename").to_string()).icon(icon(IconName::Pencil)).on_click(move |_, window, cx| crate::branch_actions::rename(t2.clone(), n2.clone(), window, cx)))
+                        .when(!head, |m| {
+                            m.separator().item(PopupMenuItem::new(t!("branches.delete").to_string()).icon(icon(IconName::Trash)).on_click(move |_, window, cx| crate::branch_actions::delete(t3.clone(), n3.clone(), false, window, cx)))
+                        })
+                    }
                 })
         };
 
@@ -1172,7 +1190,7 @@ impl CairnApp {
                         .occlude()
                         .gap(px(6.))
                         .pr_2()
-                        .when_some(self.update_ready.as_ref().map(|(v, _)| v.clone()), |d, v| d.child(crate::updater::update_pill(&v, cx)))
+                        .children(crate::updater::update_pill(self, cx))
                         .when(self.active.is_none(), |d| {
                             d.child(
                                 crate::widgets::framed(Button::new("open-palette"), crate::widgets::Tone::Plain, cx)

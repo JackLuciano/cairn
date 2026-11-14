@@ -1064,8 +1064,22 @@ impl RepoView {
             framed_if(Button::new("pr-ready"), Tone::Plain, d.author == me && !busy, cx).w_full().icon(icon(IconName::Eye)).label(tr("pulls.mark_ready")).on_click(cx.listener(move |this, _, window, cx| {
                 this.send_pr_action(move |git| stack::pr_ready(git, number), tr("pulls.marked_ready"), window, cx);
             })).into_any_element()
+        } else if d.auto_merge {
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(hstack().gap_2().p_2p5().rounded(px(8.)).bg(theme.green.opacity(0.1)).text_sm().text_color(theme.green).child(icon(IconName::Clock).small()).child(div().flex_1().whitespace_normal().child(tr("pulls.auto_merge_on"))))
+                .child(framed_if(Button::new("pr-auto-off"), Tone::Plain, !busy, cx).w_full().icon(icon(IconName::X)).label(tr("pulls.auto_merge_cancel")).on_click(cx.listener(move |this, _, window, cx| {
+                    this.send_pr_action(move |git| stack::pr_cancel_auto_merge(git, number), tr("pulls.auto_merge_cancelled"), window, cx);
+                })))
+                .into_any_element()
         } else {
-            h_flex()
+            let auto_label = match method {
+                MergeMethod::Squash => tr("pulls.auto_squash"),
+                MergeMethod::Merge => tr("pulls.auto_merge"),
+                MergeMethod::Rebase => tr("pulls.auto_rebase"),
+            };
+            let merge_row = h_flex()
                 .w_full()
                 .child(framed_if(Button::new("pr-merge"), Tone::Accent, r.can_merge && !busy, cx).flex_1().h(px(36.)).rounded_r_none().icon(icon(IconName::GitMerge)).label(method_label).on_click(cx.listener(move |this, _, window, cx| {
                     let method = this.pulls.method;
@@ -1091,7 +1105,17 @@ impl RepoView {
                             }
                             menu
                         }),
-                )
+                );
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(merge_row)
+                .when(!r.can_merge, |d| {
+                    d.child(framed_if(Button::new("pr-auto-on"), Tone::Plain, !busy, cx).w_full().icon(icon(IconName::Clock)).label(auto_label).tooltip(tr("pulls.auto_merge_tip")).on_click(cx.listener(move |this, _, window, cx| {
+                        let method = this.pulls.method;
+                        this.send_pr_action(move |git| stack::pr_auto_merge(git, number, method), tr("pulls.auto_merge_enabled"), window, cx);
+                    })))
+                })
                 .into_any_element()
         };
         v_flex()
@@ -1399,7 +1423,12 @@ impl RepoView {
                     "passed" => tr("pulls.checks_passed"),
                     "failed" => crate::widgets::plural("pulls.checks_failed", failed).into(),
                     _ => tr("pulls.checks_running"),
-                })).child(div().text_xs().text_color(theme.muted_foreground).child(t!("pulls.checks_count", passed = passed, total = total).to_string()))),
+                })).child(div().text_xs().text_color(theme.muted_foreground).child(t!("pulls.checks_count", passed = passed, total = total).to_string())))
+                .child(spacer())
+                .child({
+                    let head = d.pr.head.clone();
+                    framed(Button::new("pr-open-runs"), Tone::Plain, cx).icon(icon(IconName::Logs)).label(tr("pulls.open_runs")).on_click(cx.listener(move |this, _, window, cx| this.open_checks_for(Some(head.clone()), window, cx)))
+                }),
         );
         let mut sorted = d.pr.checks.clone();
         sorted.sort_by_key(|c| match c.state() {

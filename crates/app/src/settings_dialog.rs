@@ -391,7 +391,7 @@ fn schema() -> Vec<Category> {
                 label: "settings.group.updates",
                 rows: vec![
                     row("check_updates", "settings.check_updates", Some("settings.check_updates_desc"), Control::CheckUpdates),
-                    row("auto_update", "settings.auto_update", Some("settings.auto_update_desc"), Control::Toggle(|s| s.updates.auto_update, |s, v| s.updates.auto_update = v)),
+                    row("update_mode", "settings.update_mode", Some("settings.update_mode_desc"), Control::Choice(&["opt.update_auto", "opt.update_ask", "opt.update_manual"], |s| UpdateMode::ALL.iter().position(|m| *m == s.updates.effective_mode()).unwrap_or(0), |s, i| s.updates.set_mode(UpdateMode::ALL.get(i).copied().unwrap_or_default()))),
                     row("release_notes", "settings.release_notes", None, Control::Toggle(|s| s.updates.show_release_notes, |s, v| s.updates.show_release_notes = v)),
                 ],
             }],
@@ -471,7 +471,7 @@ pub(crate) fn request_category(category: &'static str) {
 impl SettingsPanel {
     fn new(app: Entity<CairnApp>, settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("settings.search")));
-        let mut subs = vec![cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify())];
+        let mut subs = vec![cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()), cx.observe(&app, |_, _, cx| cx.notify())];
         let mut texts = HashMap::new();
         let mut areas = HashMap::new();
         let mut secrets = HashMap::new();
@@ -799,42 +799,36 @@ impl SettingsPanel {
                     .into_any_element()
             }
             Control::CheckUpdates => {
-                let status = self.secret_status.get("updates").cloned();
-                let checking = status.as_ref().is_some_and(|s| *s == tr("update.checking"));
+                let (busy, ready, status) = {
+                    let app = self.app.read(cx);
+                    (app.update.busy(), matches!(app.update, crate::updater::UpdateStatus::Ready { .. }), crate::updater::settings_status(app, cx))
+                };
                 v_flex()
                     .items_end()
                     .gap_1()
                     .child(
-                        crate::widgets::framed_if(Button::new("check-updates"), crate::widgets::Tone::Plain, !checking, cx)
-                            .icon(icon(IconName::RefreshCw))
-                            .label(tr("settings.check_updates_button"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.secret_status.insert("updates", tr("update.checking"));
-                                cx.notify();
-                                let app = this.app.clone();
-                                cx.spawn(async move |this, cx| {
-                                    let result = cx.background_executor().spawn(async move { crate::updater::check_now() }).await;
-                                    let _ = this.update(cx, |this, cx| {
-                                        let msg: SharedString = match result {
-                                            Ok(Some(info)) => {
-                                                let version = info.TargetFullRelease.Version.clone();
-                                                app.update(cx, |a, cx| {
-                                                    a.update_ready = Some((version.clone(), info));
-                                                    cx.notify();
-                                                });
-                                                t!("update.found", version = version).to_string().into()
-                                            }
-                                            Ok(None) => t!("update.up_to_date", version = crate::updater::current_version()).to_string().into(),
-                                            Err(e) => e.into(),
-                                        };
-                                        this.secret_status.insert("updates", msg);
-                                        cx.notify();
-                                    });
-                                })
-                                .detach();
-                            })),
+                        hstack()
+                            .gap_2()
+                            .child(
+                                crate::widgets::framed_if(Button::new("check-updates"), crate::widgets::Tone::Plain, !busy && !ready, cx)
+                                    .icon(icon(IconName::RefreshCw))
+                                    .label(tr("settings.check_updates_button"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.app.update(cx, |a, cx| a.check_updates_now(window, cx));
+                                    })),
+                            )
+                            .when(ready, |d| {
+                                d.child(
+                                    crate::widgets::framed(Button::new("install-update"), crate::widgets::Tone::Accent, cx)
+                                        .icon(icon(IconName::Download))
+                                        .label(tr("settings.install_update_button"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.app.update(cx, |a, cx| a.install_update_now(window, cx));
+                                        })),
+                                )
+                            }),
                     )
-                    .when_some(status, |d, s| d.child(div().max_w(px(320.)).text_xs().text_color(theme.muted_foreground).child(s)))
+                    .children(status)
                     .into_any_element()
             }
             Control::Secret(name) => {

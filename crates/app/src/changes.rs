@@ -613,7 +613,26 @@ impl RepoView {
                     )
                     .child(Input::new(&self.summary)),
             )
-            .child(v_flex().gap_1p5().child(field_label(tr("changes.description_label"), cx)).child(Textarea::new(&self.body)))
+            .child(
+                v_flex()
+                    .gap_1p5()
+                    .child(
+                        hstack()
+                            .child(field_label(tr("changes.description_label"), cx))
+                            .child(spacer())
+                            .child({
+                                let n = cairn_core::people::co_author_emails(&self.body.read(cx).value()).len();
+                                Button::new("co-authors")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(icon(IconName::UserPlus))
+                                    .label(if n > 0 { crate::widgets::plural("coauthors.button_n", n).into() } else { tr("coauthors.button") })
+                                    .tooltip(tr("coauthors.button_tip"))
+                                    .on_click(cx.listener(|this, _, window, cx| this.open_coauthors(window, cx)))
+                            }),
+                    )
+                    .child(Textarea::new(&self.body)),
+            )
             .child(
                 v_flex()
                     .gap_2()
