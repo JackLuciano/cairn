@@ -11,7 +11,7 @@ use gpui_kit::*;
 
 use crate::diff_view::DiffSource;
 use crate::repo_view::RepoView;
-use crate::widgets::{avatar, empty_state, full_time, hstack, icon, lane_color, relative_time, spacer, status_letter, toggle_pill, tr};
+use crate::widgets::{commit_author_avatar, empty_state, full_time, hstack, icon, lane_color, relative_time, spacer, status_letter, toggle_pill, tr};
 
 pub(crate) const ROW_H: f32 = 34.;
 const LANE_W: f32 = 14.;
@@ -45,6 +45,7 @@ struct CardInfo {
     summary: String,
     author: String,
     email: String,
+    show_avatars: bool,
     time: i64,
     hash: String,
     parents: Vec<String>,
@@ -149,7 +150,7 @@ impl CommitCard {
 }
 
 impl Render for CommitCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if CARD_HIDDEN_FOR.with(|h| h.borrow().as_deref() == Some(self.info.id.as_str())) {
             return div().into_any_element();
         }
@@ -215,7 +216,7 @@ impl Render for CommitCard {
                     .child(
                         hstack()
                             .gap_2p5()
-                            .child(avatar(&info.author, px(32.), cx))
+                            .when(info.show_avatars, |d| d.child(commit_author_avatar(&info.author, &info.email, px(32.), window, cx)))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -785,7 +786,7 @@ impl RepoView {
         chips
     }
 
-    fn render_commit_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_commit_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let commit = self.commits[ix].clone();
         let row = self.rows[ix].clone();
         let theme = cx.theme().clone();
@@ -904,7 +905,7 @@ impl RepoView {
                         ),
                 )
             })
-            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(avatar(&commit.author, px(22.), cx))))
+            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(commit_author_avatar(&commit.author, &commit.email, px(22.), window, cx))))
             .when(show_author, |d| d.child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted).child(commit.author.clone())))
             .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(muted).child(time))
             .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(muted).child(short))
@@ -973,6 +974,7 @@ impl RepoView {
             summary: commit.summary.clone(),
             author: commit.author.clone(),
             email: commit.email.clone(),
+            show_avatars: self.settings.appearance.show_avatars,
             time: commit.time,
             hash: commit.id.chars().take(10).collect(),
             parents: commit.parents.clone(),
@@ -1018,13 +1020,13 @@ impl RepoView {
         let list = uniform_list(
             "history-list",
             count,
-            cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+            cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
                 if this.history_visible != range {
                     this.history_visible = range.clone();
                     cx.notify();
                 }
                 this.maybe_load_more(range.end, cx);
-                range.map(|ix| this.render_commit_row(ix, cx)).collect::<Vec<_>>()
+                range.map(|ix| this.render_commit_row(ix, window, cx)).collect::<Vec<_>>()
             }),
         )
         .track_scroll(&self.history_scroll)
@@ -1203,7 +1205,7 @@ impl RepoView {
             .into_any_element()
     }
 
-    fn render_commit_details(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_commit_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let Some(d) = self.details.clone() else {
             if self.selected_commit.is_some() {
@@ -1258,7 +1260,7 @@ impl RepoView {
                     .child(
                         hstack()
                             .gap_2()
-                            .child(avatar(&d.author, px(22.), cx))
+                            .when(self.settings.appearance.show_avatars, |row| row.child(commit_author_avatar(&d.author, &d.email, px(22.), window, cx)))
                             .child(div().font_weight(FontWeight::MEDIUM).child(d.author.clone()))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(full_time(d.author_time))),
                     )
