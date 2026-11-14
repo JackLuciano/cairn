@@ -45,7 +45,7 @@ struct CardInfo {
     summary: String,
     author: String,
     email: String,
-    show_avatars: bool,
+    view: WeakEntity<RepoView>,
     time: i64,
     hash: String,
     parents: Vec<String>,
@@ -156,6 +156,10 @@ impl Render for CommitCard {
         }
         let theme = cx.theme().clone();
         let info = &self.info;
+        let (show_avatars, load_gravatar) = info.view.upgrade().map(|view| {
+            let appearance = &view.read(cx).settings.appearance;
+            (appearance.show_avatars, appearance.load_gravatar)
+        }).unwrap_or_default();
         let color = info.branch_color.unwrap_or(theme.primary);
         let mono = theme.mono_font_family.clone();
         let body = self.details.as_ref().map(|d| {
@@ -216,7 +220,7 @@ impl Render for CommitCard {
                     .child(
                         hstack()
                             .gap_2p5()
-                            .when(info.show_avatars, |d| d.child(commit_author_avatar(&info.author, &info.email, px(32.), cx)))
+                            .when(show_avatars, |d| d.child(commit_author_avatar(&info.author, &info.email, px(32.), load_gravatar, cx)))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -905,7 +909,7 @@ impl RepoView {
                         ),
                 )
             })
-            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(commit_author_avatar(&commit.author, &commit.email, px(22.), cx))))
+            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(commit_author_avatar(&commit.author, &commit.email, px(22.), self.settings.appearance.load_gravatar, cx))))
             .when(show_author, |d| d.child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted).child(commit.author.clone())))
             .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(muted).child(time))
             .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(muted).child(short))
@@ -965,7 +969,7 @@ impl RepoView {
     ///
     /// # Returns
     /// The card's data.
-    fn card_info(&self, ix: usize, cx: &App) -> CardInfo {
+    fn card_info(&self, ix: usize, cx: &Context<Self>) -> CardInfo {
         let commit = &self.commits[ix];
         let theme = cx.theme();
         let owner = self.owners.get(ix).cloned().flatten();
@@ -974,7 +978,7 @@ impl RepoView {
             summary: commit.summary.clone(),
             author: commit.author.clone(),
             email: commit.email.clone(),
-            show_avatars: self.settings.appearance.show_avatars,
+            view: cx.entity().downgrade(),
             time: commit.time,
             hash: commit.id.chars().take(10).collect(),
             parents: commit.parents.clone(),
@@ -1260,7 +1264,7 @@ impl RepoView {
                     .child(
                         hstack()
                             .gap_2()
-                            .when(self.settings.appearance.show_avatars, |row| row.child(commit_author_avatar(&d.author, &d.email, px(22.), cx)))
+                            .when(self.settings.appearance.show_avatars, |row| row.child(commit_author_avatar(&d.author, &d.email, px(22.), self.settings.appearance.load_gravatar, cx)))
                             .child(div().font_weight(FontWeight::MEDIUM).child(d.author.clone()))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(full_time(d.author_time))),
                     )

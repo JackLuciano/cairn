@@ -9,9 +9,13 @@ use std::time::{Duration, Instant};
 const MAX_IMAGE_BYTES: u64 = 256 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const REDRAW_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Default)]
-struct Avatars(HashMap<String, Avatar>);
+struct Avatars {
+    entries: HashMap<String, Avatar>,
+    redraw_pending: bool,
+}
 
 impl Global for Avatars {}
 
@@ -23,9 +27,10 @@ struct Avatar {
 
 type AvatarImage = Option<Arc<RenderImage>>;
 
+/// Returns the current photo and schedules a lookup if its cache entry is due.
 pub(crate) fn image(email: &str, cx: &mut App) -> Option<Arc<RenderImage>> {
     let hash = gravatar_hash(email)?;
-    let entries = &mut cx.default_global::<Avatars>().0;
+    let entries = &mut cx.default_global::<Avatars>().entries;
     let mut read_disk = false;
     let entry = entries.entry(hash.clone()).or_insert_with(|| {
         read_disk = true;
@@ -75,27 +80,46 @@ pub(crate) fn image(email: &str, cx: &mut App) -> Option<Arc<RenderImage>> {
     image
 }
 
-// An absent result means a transient error, so leave the last image in place.
+/// Updates the cached photo and expiry, preserving the photo after a transient error.
 fn publish(cx: &mut AsyncApp, hash: &str, image: Option<AvatarImage>, delay: Duration) {
     cx.update(|cx| {
         let entry = cx
             .global_mut::<Avatars>()
-            .0
+            .entries
             .get_mut(hash)
             .expect("requested avatar");
         if let Some(image) = image {
             entry.image = image;
         }
         entry.refresh_at = (!delay.is_zero()).then(|| Instant::now() + delay);
-        cx.refresh_windows();
+        queue_redraw(cx);
     });
 }
 
-async fn redraw_after(cx: &mut AsyncApp, delay: Duration) {
-    cx.background_executor().timer(delay).await;
-    cx.update(|cx| cx.refresh_windows());
+/// Groups avatar updates that arrive within the same short interval into one redraw.
+fn queue_redraw(cx: &mut App) {
+    let avatars = cx.global_mut::<Avatars>();
+    if avatars.redraw_pending {
+        return;
+    }
+    avatars.redraw_pending = true;
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(REDRAW_INTERVAL).await;
+        cx.update(|cx| {
+            cx.global_mut::<Avatars>().redraw_pending = false;
+            cx.refresh_windows();
+        });
+    })
+    .detach();
 }
 
+/// Schedules a redraw when an avatar becomes eligible for another lookup.
+async fn redraw_after(cx: &mut AsyncApp, delay: Duration) {
+    cx.background_executor().timer(delay).await;
+    cx.update(queue_redraw);
+}
+
+/// Normalizes a nonempty email address and hashes it for the Gravatar lookup.
 fn gravatar_hash(email: &str) -> Option<String> {
     let email = email.trim().to_lowercase();
     let (local, domain) = email.split_once('@')?;
@@ -105,6 +129,7 @@ fn gravatar_hash(email: &str) -> Option<String> {
     Some(format!("{:x}", Sha256::digest(email.as_bytes())))
 }
 
+/// Reads a cached photo or an empty record for a Gravatar 404, with its remaining lifetime.
 fn read_cached(path: &Path, renderer: &SvgRenderer) -> Option<(AvatarImage, Duration)> {
     let file = std::fs::File::open(path).ok()?;
     let modified = file.metadata().ok()?.modified().ok()?;
@@ -114,7 +139,7 @@ fn read_cached(path: &Path, renderer: &SvgRenderer) -> Option<(AvatarImage, Dura
         .read_to_end(&mut record)
         .ok()?;
     if record.is_empty() {
-        return Some((None, remaining)); // An empty record represents a Gravatar 404.
+        return Some((None, remaining));
     }
     let separator = record.iter().position(|&byte| byte == b'\n')?;
     let mime = std::str::from_utf8(&record[..separator]).ok()?;
@@ -129,6 +154,7 @@ fn read_cached(path: &Path, renderer: &SvgRenderer) -> Option<(AvatarImage, Dura
     Some((Some(image), remaining))
 }
 
+/// Fetches and caches a photo or a confirmed 404. Transient errors leave the cache intact.
 fn download(hash: &str, path: &Path, renderer: &SvgRenderer) -> Option<AvatarImage> {
     static CLIENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         ureq::Agent::config_builder()
@@ -161,6 +187,7 @@ fn download(hash: &str, path: &Path, renderer: &SvgRenderer) -> Option<AvatarIma
     Some(Some(image))
 }
 
+/// Accepts the raster image formats supported by the avatar cache.
 fn image_format(mime: &str) -> Option<ImageFormat> {
     let format = ImageFormat::from_mime_type(mime)?;
     matches!(
@@ -170,6 +197,7 @@ fn image_format(mime: &str) -> Option<ImageFormat> {
     .then_some(format)
 }
 
+/// Atomically writes a photo or an empty record for a Gravatar 404.
 fn write_cached(path: &Path, image: Option<(ImageFormat, &[u8])>) -> io::Result<()> {
     let parent = path.parent().expect("avatar cache directory");
     std::fs::create_dir_all(parent)?;
