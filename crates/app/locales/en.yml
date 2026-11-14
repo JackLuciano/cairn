@@ -579,6 +579,7 @@ settings:
   merge_tool_desc: "Git's name for it, such as bc, meld or kdiff3. Empty uses merge.tool from your git config."
   startup: "When Cairn starts"
   language: "Language"
+  language_system: "System language"
   language_desc: "Takes effect right after saving."
   confirm_quit: "Warn before closing during an operation"
   confirm_quit_desc: "For example while a push or rebase is still running."

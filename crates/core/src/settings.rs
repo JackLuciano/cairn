@@ -41,19 +41,46 @@ pub enum Density {
 #[serde(rename_all = "snake_case")]
 pub enum Language {
     #[default]
+    System,
     English,
     Hungarian,
+    EnglishUk,
 }
 
 impl Language {
+    // Alphabetical by English language name, with the English variants together.
+    pub const ALL: [Self; 3] = [
+        Self::EnglishUk,
+        Self::English,
+        Self::Hungarian,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::English => "English (US)",
+            Self::EnglishUk => "English (UK)",
+            Self::Hungarian => "Hungarian · Magyar",
+        }
+    }
+
     /// The locale code used by the translation files.
-    ///
-    /// # Returns
-    /// `"en"` or `"hu"`.
     pub fn code(self) -> &'static str {
         match self {
+            Self::System => "en",
             Self::English => "en",
             Self::Hungarian => "hu",
+            Self::EnglishUk => "en-GB",
+        }
+    }
+
+    pub fn from_locale(locale: &str) -> Self {
+        let locale = locale.to_ascii_lowercase().replace('_', "-");
+        let mut parts = locale.split(['-', '.', '@']);
+        match parts.next() {
+            Some("en") if parts.any(|part| part == "gb") => Self::EnglishUk,
+            Some("hu") => Self::Hungarian,
+            _ => Self::English,
         }
     }
 }
@@ -187,7 +214,7 @@ impl Default for General {
     fn default() -> Self {
         Self {
             startup: StartupMode::RestoreTabs,
-            language: Language::English,
+            language: Language::default(),
             clone_dir: dirs::home_dir().map(|h| h.join("repos").to_string_lossy().into_owned()).unwrap_or_default(),
             confirm_quit_during_operation: true,
             watch_files: true,
@@ -677,6 +704,7 @@ mod tests {
         assert_eq!(back, s);
         let partial: Settings = toml::from_str("[appearance]\ntheme = \"light\"\n").unwrap();
         assert_eq!(partial.appearance.theme, ThemeMode::Light);
+        assert_eq!(partial.general.language, Language::System);
         assert_eq!(partial.git.pull_mode, PullMode::Rebase);
         assert_eq!(partial.ai.provider, AiProvider::Automatic);
     }
@@ -686,5 +714,31 @@ mod tests {
         let settings: Settings = toml::from_str("[ai]\nprovider = \"claude_code\"\n").unwrap();
         assert_eq!(settings.ai.provider, AiProvider::ClaudeCode);
         assert!(settings.ai.codex_model_fast.is_empty());
+    }
+
+    #[test]
+    fn language_selection_round_trips_and_preserves_legacy_english() {
+        let legacy: Settings = toml::from_str("[general]\nlanguage = \"english\"\n").unwrap();
+        assert_eq!(legacy.general.language, Language::English);
+
+        for language in std::iter::once(Language::System).chain(Language::ALL) {
+            let mut settings = Settings::default();
+            settings.general.language = language;
+            let saved = toml::to_string(&settings).unwrap();
+            let restored: Settings = toml::from_str(&saved).unwrap();
+            assert_eq!(restored.general.language, language);
+        }
+    }
+
+    #[test]
+    fn system_locale_maps_to_supported_languages() {
+        for (locale, language) in [
+            ("en_GB.UTF-8", Language::EnglishUk),
+            ("en-US", Language::English),
+            ("hu-HU", Language::Hungarian),
+            ("", Language::English),
+        ] {
+            assert_eq!(Language::from_locale(locale), language, "{locale}");
+        }
     }
 }

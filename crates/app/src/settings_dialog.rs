@@ -5,6 +5,7 @@ use cairn_core::settings::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,6 +26,7 @@ type SetS = fn(&mut Settings, String);
 
 #[derive(Clone, Copy)]
 enum Control {
+    Language,
     Toggle(GetB, SetB),
     Choice(&'static [&'static str], GetI, SetI),
     Number(GetN, SetN, f64, f64, f64, &'static str),
@@ -89,7 +91,7 @@ fn schema() -> Vec<Category> {
                     label: "settings.group.startup",
                     rows: vec![
                         row("startup", "settings.startup", None, Control::Choice(&["opt.restore_tabs", "opt.home"], |s| (s.general.startup == StartupMode::Home) as usize, |s, i| s.general.startup = if i == 1 { StartupMode::Home } else { StartupMode::RestoreTabs })),
-                        row("language", "settings.language", Some("settings.language_desc"), Control::Choice(&["opt.english", "opt.hungarian"], |s| (s.general.language == Language::Hungarian) as usize, |s, i| s.general.language = if i == 1 { Language::Hungarian } else { Language::English })),
+                        row("language", "settings.language", Some("settings.language_desc"), Control::Language),
                         row("confirm_quit", "settings.confirm_quit", Some("settings.confirm_quit_desc"), Control::Toggle(|s| s.general.confirm_quit_during_operation, |s, v| s.general.confirm_quit_during_operation = v)),
                     ],
                 },
@@ -552,6 +554,30 @@ impl SettingsPanel {
     fn render_control(&mut self, r: RowDef, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         match r.control {
+            Control::Language => {
+                let current = self.draft.general.language;
+                let panel = cx.entity();
+                Button::new(r.id)
+                    .small()
+                    .outline()
+                    .label(language_label(current))
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for language in std::iter::once(Language::System).chain(Language::ALL) {
+                            let panel = panel.clone();
+                            menu = menu.item(PopupMenuItem::new(language_label(language))
+                                .checked(language == current)
+                                .on_click(move |_, window, cx| {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.draft.general.language = language;
+                                        panel.after_change(window, cx);
+                                    });
+                                }));
+                        }
+                        menu
+                    })
+                    .into_any_element()
+            }
             Control::Toggle(get, set) => {
                 let v = get(&self.draft);
                 Switch::new(r.id)
@@ -918,8 +944,13 @@ impl SettingsPanel {
     }
 }
 
+fn language_label(language: Language) -> SharedString {
+    if language == Language::System { tr("settings.language_system") } else { language.label().into() }
+}
+
 fn is_modified(r: &RowDef, a: &Settings, defaults: &Settings) -> bool {
     match r.control {
+        Control::Language => a.general.language != defaults.general.language,
         Control::Toggle(get, _) => get(a) != get(defaults),
         Control::Choice(_, get, _) => get(a) != get(defaults),
         Control::Number(get, _, _, _, _, _) => (get(a) - get(defaults)).abs() > f64::EPSILON,
@@ -931,6 +962,7 @@ fn is_modified(r: &RowDef, a: &Settings, defaults: &Settings) -> bool {
 fn reset_row(r: &RowDef, s: &mut Settings) {
     let d = Settings::default();
     match r.control {
+        Control::Language => s.general.language = d.general.language,
         Control::Toggle(get, set) => set(s, get(&d)),
         Control::Choice(_, get, set) => set(s, get(&d)),
         Control::Number(get, set, ..) => set(s, get(&d)),

@@ -267,8 +267,9 @@ impl CairnApp {
             window.push_notification(Notification::error(e.to_string()), cx);
         }
         if language_changed {
-            rust_i18n::set_locale(settings.general.language.code());
-            gpui_kit::component::set_locale(settings.general.language.code());
+            let locale = crate::platform::resolve_language(settings.general.language).code();
+            rust_i18n::set_locale(locale);
+            gpui_kit::component::set_locale(locale);
         }
         crate::theme::apply(&settings, Some(window), cx);
         for tab in &self.tabs {
