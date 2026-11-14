@@ -34,6 +34,9 @@ What that means in practice:
   you configured, through your own `git` and GitHub CLI (`gh`) installations.
 - **Updates.** Cairn checks this repository's GitHub Releases for new versions. Turn off
   automatic updates in Settings → Updates; "Check now" then only runs when you press it.
+- **Gravatar.** Off until you enable "Load author photos from Gravatar" in Settings →
+  Appearance. When "Show author avatars" is also on, Cairn sends a SHA-256 hash of each
+  displayed commit author's email address to gravatar.com to look up their photo.
 - **AI.** Off until you turn it on in Settings → AI. It then sends the text you ask about
   (such as a diff or a commit) to the provider you chose: Anthropic's API, your Claude Code
   login, or your own endpoint. Paths you exclude are never sent, and anything that looks like a
