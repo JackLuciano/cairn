@@ -180,60 +180,12 @@ impl RepoView {
                                 crate::dialogs::new_branch(v3.clone(), Some(n3.clone()), window, cx);
                             }))
                             .item(PopupMenuItem::new(t!("branches.rename").to_string()).icon(icon(IconName::Pencil)).on_click(move |_, window, cx| {
-                                let old = n4.clone();
-                                let v = v4.clone();
-                                crate::dialogs::text_prompt(tr("branches.rename_title"), SharedString::default(), tr("branch.name_placeholder"), old.clone(), tr("dialog.save"), window, cx, move |new, window, cx| {
-                                    let old = old.clone();
-                                    v.update(cx, |v, cx| v.run_op(tr("op.rename_branch"), Some(t!("undo.rename_branch").to_string()), move |git| cairn_core::refs::rename_branch(git, &old, &new).map(|_| String::new()), window, cx));
-                                });
+                                crate::branch_actions::rename(v4.clone(), n4.clone(), window, cx);
                             }))
                         })
                         .separator()
                         .item(PopupMenuItem::new(t!("branches.delete").to_string()).icon(icon(IconName::Trash)).on_click(move |_, window, cx| {
-                            let n = n5.clone();
-                            let v = v5.clone();
-                            let (ahead, pr) = {
-                                let view = v.read(cx);
-                                let short = n.split_once('/').filter(|_| remote).map(|(_, b)| b.to_string()).unwrap_or_else(|| n.clone());
-                                (view.branch_stats.1.get(&n).map(|(a, _)| *a), view.prs.iter().find(|p| p.head == short).map(|p| p.number))
-                            };
-                            let mut loses = Vec::new();
-                            match ahead {
-                                Some(0) => {}
-                                Some(a) => loses.push(crate::widgets::plural("safe.branch_unmerged", a as usize)),
-                                None if !remote => loses.push(t!("safe.branch_maybe_unmerged").to_string()),
-                                None => {}
-                            }
-                            if let Some(num) = pr {
-                                loses.push(t!("safe.branch_pr", n = num).to_string());
-                            }
-                            let spec = crate::dialogs::SafeAction {
-                                icon: IconName::Trash,
-                                title: t!("branches.delete_title", name = n.clone()).to_string(),
-                                happens: vec![if remote { t!("safe.branch_remote_happens", name = n.clone()).to_string() } else { t!("safe.branch_happens", name = n.clone()).to_string() }],
-                                loses,
-                                recovery: if remote { crate::dialogs::Recovery::Never } else { crate::dialogs::Recovery::Undo },
-                                ok: tr("branches.delete"),
-                                danger: true,
-                            };
-                            crate::dialogs::safe_action(
-                                spec,
-                                move |window, cx| {
-                                    let n = n.clone();
-                                    v.update(cx, |v, cx| {
-                                        v.run_op(tr("op.delete_branch"), Some(t!("undo.delete_branch", name = n.clone()).to_string()), move |git| {
-                                            if remote {
-                                                let (r, b) = n.split_once('/').unwrap_or(("origin", n.as_str()));
-                                                cairn_core::refs::delete_remote_branch(git, r, b).map(|_| String::new())
-                                            } else {
-                                                cairn_core::refs::delete_branch(git, &n, true).map(|_| String::new())
-                                            }
-                                        }, window, cx)
-                                    });
-                                },
-                                window,
-                                cx,
-                            );
+                            crate::branch_actions::delete(v5.clone(), n5.clone(), remote, window, cx);
                         }))
                     })
     }
@@ -280,7 +232,8 @@ impl RepoView {
             .cloned()
             .collect();
         let theme = cx.theme().clone();
-        let filter_pill = |id: &'static str, label: SharedString, f: BranchFilter, n: usize, this: &Self, cx: &mut Context<Self>| {
+        let cleanable = self.cleanup_candidates().len();
+        let filter_pill =|id: &'static str, label: SharedString, f: BranchFilter, n: usize, this: &Self, cx: &mut Context<Self>| {
             let on = this.branch_filter == f;
             let theme = cx.theme().clone();
             hstack()
@@ -313,7 +266,22 @@ impl RepoView {
                 .child(spacer())
                 .child(filter_pill("bf-all", tr("branches.filter_all"), BranchFilter::All, local.len(), self, cx))
                 .child(filter_pill("bf-active", tr("branches.filter_active"), BranchFilter::Active, local.len() - merged_n, self, cx))
-                .child(filter_pill("bf-merged", tr("branches.filter_merged"), BranchFilter::Merged, merged_n, self, cx)),
+                .child(filter_pill("bf-merged", tr("branches.filter_merged"), BranchFilter::Merged, merged_n, self, cx))
+                .child({
+                    let view = cx.entity();
+                    crate::widgets::framed_if(Button::new("branches-cleanup"), Tone::Plain, cleanable > 0 && self.busy.is_none(), cx)
+                        .ml_2()
+                        .h(px(28.))
+                        .icon(icon(IconName::BrushCleaning))
+                        .label(tr("cleanup.button"))
+                        .when(cleanable > 0, |b| b.child(count_chip(cleanable.to_string(), theme.primary.opacity(0.15), theme.primary)))
+                        .tooltip(if cleanable > 0 { tr("cleanup.button_tip") } else { tr("cleanup.none") })
+                        .on_click(move |_, window, cx| {
+                            if cleanable > 0 {
+                                crate::branch_actions::clean_up(view.clone(), window, cx);
+                            }
+                        })
+                }),
         );
         let mut grid = h_flex().flex_wrap().items_stretch().gap_3();
         for b in &shown {

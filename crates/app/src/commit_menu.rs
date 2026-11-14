@@ -86,6 +86,13 @@ pub(crate) fn build(menu: PopupMenu, view: Entity<RepoView>, id: String, pr_head
     .item(item(t!("commit_menu.new_tag").to_string(), IconName::Tag).on_click(move |_, window, cx| {
         crate::dialogs::new_tag(v3.clone(), i3.clone(), window, cx);
     }))
+    .item({
+        let (v, i) = (view.clone(), id.clone());
+        item(t!("commit_menu.browse").to_string(), IconName::FolderTree).on_click(move |_, _, cx| {
+            let id = i.clone();
+            v.update(cx, |v, cx| v.open_browse(id, cx));
+        })
+    })
     .when(!pr_heads.is_empty(), |mut m| {
         m = m.separator();
         for (head, name) in pr_heads {

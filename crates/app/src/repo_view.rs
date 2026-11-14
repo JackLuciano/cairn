@@ -40,12 +40,18 @@ pub(crate) enum Page {
     Submodules,
     Lfs,
     PullRequests,
+    Checks,
+    Browse,
+    Releases,
 }
 
 impl Page {
     /// Pages reached from the "Tools" panel instead of a tab of their own, each with a one-line
     /// explanation for people who do not know the git term.
-    pub(crate) const TOOLS: [(Page, &'static str, IconName, &'static str); 10] = [
+    pub(crate) const TOOLS: [(Page, &'static str, IconName, &'static str); 13] = [
+        (Page::Checks, "page.checks", IconName::Workflow, "page_bar.checks_desc"),
+        (Page::Releases, "page.releases", IconName::Rocket, "page_bar.releases_desc"),
+        (Page::Browse, "page.browse", IconName::FolderTree, "page_bar.browse_desc"),
         (Page::Rebase, "page.rebase", IconName::GitPullRequestArrow, "page_bar.rebase_desc"),
         (Page::Absorb, "page.absorb", IconName::Scissors, "page_bar.absorb_desc"),
         (Page::Conflicts, "page.conflicts", IconName::TriangleAlert, "page_bar.conflicts_desc"),
@@ -248,6 +254,9 @@ pub(crate) struct RepoView {
     pub submodules: crate::pages::submodules::SubmoduleState,
     pub lfs: crate::pages::lfs::LfsPageState,
     pub pulls: crate::pages::pulls::PullsState,
+    pub checks: crate::pages::checks::ChecksState,
+    pub browse: crate::pages::browse::BrowseState,
+    pub releases: crate::pages::releases::ReleasesState,
     focus: FocusHandle,
     watcher: Option<crate::watcher::RepoWatcher>,
     pub(crate) _tasks: Vec<Task<()>>,
@@ -357,6 +366,9 @@ impl RepoView {
             submodules: Default::default(),
             lfs: Default::default(),
             pulls: crate::pages::pulls::PullsState::new(window, cx),
+            checks: Default::default(),
+            browse: crate::pages::browse::BrowseState::new(window, cx),
+            releases: crate::pages::releases::ReleasesState::new(window, cx),
             focus: cx.focus_handle(),
             watcher: None,
             _tasks: Vec::new(),
@@ -488,6 +500,9 @@ impl RepoView {
             "submodules" => Page::Submodules,
             "lfs" => Page::Lfs,
             "pulls" => Page::PullRequests,
+            "checks" => Page::Checks,
+            "browse" => Page::Browse,
+            "releases" => Page::Releases,
             _ => Page::History,
         };
         match self.page {
@@ -517,6 +532,7 @@ impl RepoView {
             Page::Submodules => self.load_submodules(cx),
             Page::Lfs => self.load_lfs(cx),
             Page::PullRequests => self.load_pulls(cx),
+            Page::Browse => self.browse.file = std::env::var("CAIRN_DEBUG_FILE").ok(),
             _ => {}
         }
         if self.page == Page::Changes {
@@ -592,6 +608,14 @@ impl RepoView {
             Page::Submodules => self.load_submodules(cx),
             Page::Lfs => self.load_lfs(cx),
             Page::PullRequests => self.load_pulls(cx),
+            Page::Checks => {
+                self.checks.loaded = false;
+                self.load_checks(cx);
+            }
+            Page::Releases => {
+                self.releases.loaded = false;
+                self.load_releases(cx);
+            }
             _ => {}
         }
         let _ = window;
@@ -1884,6 +1908,9 @@ impl Render for RepoView {
                 Page::Submodules => self.render_submodules(window, cx).into_any_element(),
                 Page::Lfs => self.render_lfs(window, cx).into_any_element(),
                 Page::PullRequests => self.render_pulls(window, cx).into_any_element(),
+                Page::Checks => self.render_checks(window, cx).into_any_element(),
+                Page::Browse => self.render_browse(window, cx).into_any_element(),
+                Page::Releases => self.render_releases(window, cx).into_any_element(),
             }
         };
         v_flex()

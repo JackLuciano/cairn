@@ -577,18 +577,65 @@ impl Default for Performance {
     }
 }
 
+/// How Cairn looks for, downloads and installs new versions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateMode {
+    /// Check and download in the background, install when Cairn closes.
+    #[default]
+    Automatic,
+    /// Check and download in the background, install only when the user says so.
+    AskFirst,
+    /// Only check when the user presses "Check now", install only when the user says so.
+    Manual,
+}
+
+impl UpdateMode {
+    /// Every mode in the order Settings lists them.
+    pub const ALL: [Self; 3] = [Self::Automatic, Self::AskFirst, Self::Manual];
+
+    /// Whether Cairn checks for updates on its own.
+    pub fn checks_in_background(self) -> bool {
+        self != Self::Manual
+    }
+
+    /// Whether a downloaded update is installed when Cairn closes, without asking.
+    pub fn installs_on_close(self) -> bool {
+        self == Self::Automatic
+    }
+}
+
 /// Updates and privacy.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Updates {
+    pub mode: UpdateMode,
+    /// The setting from before update modes existed; `false` means manual updates.
+    #[serde(skip_serializing)]
     pub auto_update: bool,
     pub show_release_notes: bool,
     pub last_seen_version: String,
 }
 
+impl Updates {
+    /// The update mode in effect, honouring the older on/off setting.
+    pub fn effective_mode(&self) -> UpdateMode {
+        if self.auto_update { self.mode } else { UpdateMode::Manual }
+    }
+
+    /// Chooses an update mode and retires the older on/off setting.
+    ///
+    /// # Arguments
+    /// * `mode` - the new mode
+    pub fn set_mode(&mut self, mode: UpdateMode) {
+        self.mode = mode;
+        self.auto_update = true;
+    }
+}
+
 impl Default for Updates {
     fn default() -> Self {
-        Self { auto_update: true, show_release_notes: true, last_seen_version: String::new() }
+        Self { mode: UpdateMode::Automatic, auto_update: true, show_release_notes: true, last_seen_version: String::new() }
     }
 }
 
@@ -719,6 +766,18 @@ mod tests {
         let settings: Settings = toml::from_str("[ai]\nprovider = \"claude_code\"\n").unwrap();
         assert_eq!(settings.ai.provider, AiProvider::ClaudeCode);
         assert!(settings.ai.codex_model_fast.is_empty());
+    }
+
+    #[test]
+    fn update_mode_honours_the_old_switch() {
+        let legacy: Settings = toml::from_str("[updates]\nauto_update = false\n").unwrap();
+        assert_eq!(legacy.updates.effective_mode(), UpdateMode::Manual);
+        let fresh: Settings = toml::from_str("").unwrap();
+        assert_eq!(fresh.updates.effective_mode(), UpdateMode::Automatic);
+        let mut s = legacy.clone();
+        s.updates.set_mode(UpdateMode::AskFirst);
+        let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.updates.effective_mode(), UpdateMode::AskFirst);
     }
 
     #[test]

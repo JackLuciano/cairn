@@ -250,6 +250,7 @@ pub(crate) fn mock_prs() -> Vec<MockPr> {
         reviewers: vec![reviewer("ann", "APPROVED"), reviewer(ME, "PENDING")],
         assignees: vec!["leo".into()],
         merge_state: "BLOCKED".into(),
+        auto_merge: false,
     };
     let offline_inline = vec![
         inline("ann", "src/sync/queue.ts", 22, "If `send` throws halfway, the items already sent are sent again next time. Can we remove them one by one?"),
@@ -278,6 +279,7 @@ pub(crate) fn mock_prs() -> Vec<MockPr> {
         reviewers: vec![reviewer("leo", "APPROVED")],
         assignees: vec![ME.into()],
         merge_state: "CLEAN".into(),
+        auto_merge: false,
     };
 
     let settings = PrDetails {
@@ -291,6 +293,7 @@ pub(crate) fn mock_prs() -> Vec<MockPr> {
         reviewers: Vec::new(),
         assignees: vec!["ann".into()],
         merge_state: "DRAFT".into(),
+        auto_merge: false,
     };
 
     let bump = PrDetails {
@@ -315,6 +318,7 @@ pub(crate) fn mock_prs() -> Vec<MockPr> {
         reviewers: vec![reviewer(ME, "PENDING")],
         assignees: Vec::new(),
         merge_state: "BEHIND".into(),
+        auto_merge: false,
     };
 
     vec![

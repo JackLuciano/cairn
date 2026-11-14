@@ -80,6 +80,8 @@ enum Act {
     Compare,
     Highlight,
     NewPr,
+    Rename,
+    Delete,
 }
 
 /// The branch switcher: search every branch, see what each one is about and how it stands,
@@ -170,6 +172,8 @@ impl BranchPicker {
                 v.set_focus_branch((!e.head).then(|| e.name.clone()), cx);
             }),
             Act::NewPr => crate::new_pr::open_for(repo, e.name.clone(), window, cx),
+            Act::Rename => crate::branch_actions::rename(repo, e.name.clone(), window, cx),
+            Act::Delete => crate::branch_actions::delete(repo, e.name.clone(), e.remote, window, cx),
         }
     }
 
@@ -324,7 +328,13 @@ impl BranchPicker {
                     .when(!e.head, |d| d.child(framed(Button::new("bp-checkout"), if self.mode == Mode::Switch { Tone::Accent } else { Tone::Plain }, cx).w_full().icon(icon(IconName::LogIn)).label(checkout_label).on_click(cx.listener(|this, _, window, cx| this.act(Act::Checkout, window, cx)))))
                     .when(!e.head, |d| d.child(framed(Button::new("bp-compare"), Tone::Plain, cx).w_full().icon(icon(IconName::GitCompareArrows)).label(tr("branch_picker.compare")).on_click(cx.listener(|this, _, window, cx| this.act(Act::Compare, window, cx)))))
                     .when(self.mode == Mode::Switch, |d| d.child(framed(Button::new("bp-highlight"), Tone::Plain, cx).w_full().icon(icon(IconName::Highlighter)).label(tr("branch_picker.highlight")).on_click(cx.listener(|this, _, window, cx| this.act(Act::Highlight, window, cx)))))
-                    .when(can_pr, |d| d.child(framed(Button::new("bp-pr"), Tone::Plain, cx).w_full().icon(icon(IconName::GitPullRequestCreate)).label(tr("branch_picker.new_pr")).on_click(cx.listener(|this, _, window, cx| this.act(Act::NewPr, window, cx))))),
+                    .when(can_pr, |d| d.child(framed(Button::new("bp-pr"), Tone::Plain, cx).w_full().icon(icon(IconName::GitPullRequestCreate)).label(tr("branch_picker.new_pr")).on_click(cx.listener(|this, _, window, cx| this.act(Act::NewPr, window, cx)))))
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .when(!e.remote, |d| d.child(framed(Button::new("bp-rename"), Tone::Plain, cx).flex_1().icon(icon(IconName::Pencil)).label(tr("branches.rename")).on_click(cx.listener(|this, _, window, cx| this.act(Act::Rename, window, cx)))))
+                            .when(!e.head, |d| d.child(framed(Button::new("bp-delete"), Tone::Plain, cx).flex_1().text_color(theme.red).icon(icon(IconName::Trash)).label(tr("branches.delete")).on_click(cx.listener(|this, _, window, cx| this.act(Act::Delete, window, cx))))),
+                    ),
             )
     }
 }

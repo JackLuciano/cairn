@@ -1,4 +1,5 @@
 pub mod absorb;
+pub mod actions;
 pub mod bisect;
 pub mod blame;
 pub mod changelog;
@@ -19,14 +20,17 @@ pub mod ops;
 pub mod oplog;
 pub mod patch;
 pub mod paths;
+pub mod people;
 pub mod rebase;
 pub mod recover;
 pub mod refs;
+pub mod release;
 pub mod repo;
 pub mod settings;
 pub mod stack;
 pub mod status;
 pub mod submodule;
+pub mod tree;
 pub mod viewed;
 pub mod workspace;
 

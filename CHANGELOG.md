@@ -10,6 +10,22 @@ window after an update.
 - Opt in to Gravatar photos for commit authors in Settings → Appearance.
   History shows initials when Gravatar is off or no image is available.
   Cached images are available offline and refresh in the background after 24 hours.
+- Checks page (Tools → Checks): every GitHub Actions run with the log of its failed steps,
+  re-run failed jobs, stop a run, start a workflow by hand, and let AI explain why it failed.
+- Releases page (Tools → Releases): Cairn suggests the next version, writes the notes from merged
+  pull requests or with AI, and publishes the release, as a draft or pre-release if you like.
+- Browse the files of any commit, branch or tag (Tools → Browse files, or right-click a commit),
+  and save any file as it was then.
+- Add co-authors to a commit from everyone who has worked in the repository.
+- Turn on auto-merge for a pull request: GitHub merges it once its reviews and checks pass.
+- Clean up branches that are merged or were deleted on the server, from the Branches page.
+- Rename and delete branches from the branch switcher and by right-clicking them in the sidebar.
+- Choose how updates arrive in Settings → Updates: automatically, ask before installing, or
+  manually. A download shows its progress, and Cairn says when an update is ready or installing.
+
+### Fixed
+
+- Cairn no longer installs a downloaded update on close after automatic updates were turned off.
 
 ## [0.6.0] - 2026-11-14
 
