@@ -2,17 +2,19 @@ name: Build (macOS and Linux)
 
 on:
   pull_request:
+    types: [labeled]
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
-  group: unix-${{ github.head_ref || github.ref }}
+  group: unix-${{ github.head_ref || github.ref }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:
   build:
     name: ${{ matrix.name }}
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-builds'
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     timeout-minutes: 60
