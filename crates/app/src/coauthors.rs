@@ -90,7 +90,7 @@ fn show(view: Entity<RepoView>, people: Vec<Person>, window: &mut Window, cx: &m
                     .child(Input::new(&search).prefix(icon(IconName::Search).small()))
                     .child(div().id("coauthor-list").h(px(320.)).overflow_y_scroll().rounded(px(8.)).border_1().border_color(theme.border).p_1().child(list)),
             )
-            .footer(crate::dialogs::footer(crate::widgets::plural("coauthors.ok", count).into(), false, move |window, cx| {
+            .footer(crate::dialogs::footer(if count == 0 { tr("coauthors.ok_zero") } else { crate::widgets::plural("coauthors.ok", count).into() }, false, move |window, cx| {
                 let chosen: Vec<Person> = people.iter().filter(|p| picked.borrow().contains(&p.email.to_lowercase())).cloned().collect();
                 view.update(cx, |v, cx| {
                     let text = cairn_core::people::set_co_authors(&v.body.read(cx).value(), &chosen);

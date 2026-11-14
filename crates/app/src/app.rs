@@ -160,6 +160,22 @@ impl CairnApp {
                     .detach();
                 }
             }
+            Ok(kind @ ("cleanup" | "coauthors")) => {
+                let kind = kind.to_string();
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(4000)).await;
+                        let _ = cx.update(|window, cx| {
+                            if kind == "cleanup" {
+                                crate::branch_actions::clean_up(tab, window, cx);
+                            } else {
+                                tab.update(cx, |v, cx| v.open_coauthors(window, cx));
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
             Ok("issue_branch") => {
                 if let Some(tab) = self.active_tab() {
                     crate::issue_branch::open(tab, window, cx);

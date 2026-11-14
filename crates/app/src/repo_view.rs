@@ -532,6 +532,7 @@ impl RepoView {
             Page::Submodules => self.load_submodules(cx),
             Page::Lfs => self.load_lfs(cx),
             Page::PullRequests => self.load_pulls(cx),
+            Page::Browse => self.browse.file = std::env::var("CAIRN_DEBUG_FILE").ok(),
             _ => {}
         }
         if self.page == Page::Changes {

@@ -202,8 +202,8 @@ fn clean_up_now(view: Entity<RepoView>, window: &mut Window, cx: &mut App) {
                             window.refresh();
                         }))
                     })
-                    .when(risky > 0, |d| d.child(hstack().gap_2().p_2p5().rounded(px(8.)).bg(theme.red.opacity(0.08)).text_sm().text_color(theme.red).child(icon(IconName::TriangleAlert).small()).child(div().flex_1().whitespace_normal().child(crate::widgets::plural("cleanup.risky", risky)))))
-                    .child(hstack().gap_2().p_2p5().rounded(px(8.)).bg(theme.green.opacity(0.1)).text_sm().text_color(theme.green).child(icon(IconName::Undo2).small()).child(div().flex_1().whitespace_normal().child(tr("cleanup.undo")))),
+                    .when(risky > 0, |d| d.child(hstack().w_full().items_start().gap_2().p_2p5().rounded(px(8.)).bg(theme.red.opacity(0.08)).text_sm().text_color(theme.red).child(div().flex_none().pt(px(2.)).child(icon(IconName::TriangleAlert).small())).child(div().flex_1().min_w_0().whitespace_normal().child(crate::widgets::plural("cleanup.risky", risky)))))
+                    .child(hstack().w_full().items_start().gap_2().p_2p5().rounded(px(8.)).bg(theme.green.opacity(0.1)).text_sm().text_color(theme.green).child(div().flex_none().pt(px(2.)).child(icon(IconName::Undo2).small())).child(div().flex_1().min_w_0().whitespace_normal().child(tr("cleanup.undo")))),
             )
             .footer(crate::dialogs::footer(crate::widgets::plural("cleanup.ok", count).into(), true, move |window, cx| {
                 if chosen.is_empty() {

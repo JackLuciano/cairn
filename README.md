@@ -116,6 +116,20 @@ branches.
 </tr>
 </table>
 
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/browse.png" alt="Browse files at a commit"></td>
+<td width="50%"><img src="docs/screenshots/dark/cleanup.png" alt="Clean up branches"></td>
+</tr>
+<tr>
+<td><b>Browse any commit.</b> The files of any commit, branch or tag, ready to read or save.</td>
+<td><b>Clean up branches.</b> Merged branches and branches deleted on the server go in one step,
+with a warning for any that still hold unmerged work.</td>
+</tr>
+</table>
+
+<img src="docs/screenshots/dark/coauthors.png" alt="Add co-authors to a commit" width="100%">
+
 ### Pull requests, submodules and large files
 
 <img src="docs/screenshots/dark/pull-requests.png" alt="Pull request ready to merge" width="100%">
@@ -144,6 +158,19 @@ branches.
 <img src="docs/screenshots/dark/ai-review.png" alt="AI review of a pull request" width="100%">
 
 <img src="docs/screenshots/dark/new-pr.png" alt="New pull request" width="100%">
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/checks.png" alt="CI checks with failed logs and re-runs"></td>
+<td width="50%"><img src="docs/screenshots/dark/releases.png" alt="Releases"></td>
+</tr>
+<tr>
+<td><b>CI checks.</b> Every GitHub Actions run, the log of the failed steps, re-runs, manual
+workflow runs and an AI explanation of what broke.</td>
+<td><b>Releases.</b> The next version is suggested for you, the notes come from merged pull
+requests or AI, and one click publishes it.</td>
+</tr>
+</table>
 
 - **Submodules.** See which are missing or on a different commit, download and update them, add
   new ones and open them as their own tab.

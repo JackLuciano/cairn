@@ -1068,7 +1068,7 @@ impl RepoView {
             v_flex()
                 .w_full()
                 .gap_2()
-                .child(hstack().gap_2().p_2p5().rounded(px(8.)).bg(theme.green.opacity(0.1)).text_sm().text_color(theme.green).child(icon(IconName::Clock).small()).child(div().flex_1().whitespace_normal().child(tr("pulls.auto_merge_on"))))
+                .child(hstack().gap_2().p_2p5().rounded(px(8.)).bg(theme.green.opacity(0.1)).text_sm().text_color(theme.green).child(icon(IconName::Clock).small()).child(div().flex_1().min_w_0().whitespace_normal().child(tr("pulls.auto_merge_on"))))
                 .child(framed_if(Button::new("pr-auto-off"), Tone::Plain, !busy, cx).w_full().icon(icon(IconName::X)).label(tr("pulls.auto_merge_cancel")).on_click(cx.listener(move |this, _, window, cx| {
                     this.send_pr_action(move |git| stack::pr_cancel_auto_merge(git, number), tr("pulls.auto_merge_cancelled"), window, cx);
                 })))

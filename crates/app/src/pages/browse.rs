@@ -74,6 +74,7 @@ impl RepoView {
                     match root {
                         Ok(entries) => {
                             this.browse.dirs.insert(String::new(), entries);
+                            this.reveal_browse_file(cx);
                         }
                         Err(e) => this.browse.error = Some(crate::repo_view::friendly_error(&e)),
                     }
@@ -83,6 +84,19 @@ impl RepoView {
             cx,
         );
         cx.notify();
+    }
+
+    /// Opens the folders that lead to the shown file, so it can be seen in the tree.
+    fn reveal_browse_file(&mut self, cx: &mut Context<Self>) {
+        let Some(file) = self.browse.file.clone() else { return };
+        let parts: Vec<&str> = file.split('/').collect();
+        let mut dir = String::new();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            dir = if dir.is_empty() { (*part).to_string() } else { format!("{dir}/{part}") };
+            if !self.browse.open.contains(&dir) {
+                self.toggle_browse_dir(dir.clone(), cx);
+            }
+        }
     }
 
     fn toggle_browse_dir(&mut self, dir: String, cx: &mut Context<Self>) {

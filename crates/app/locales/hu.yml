@@ -731,7 +731,7 @@ settings:
   fsmonitor: "A git fájlrendszer-figyelőjének használata"
   fsmonitor_desc: "Felgyorsítja az állapotlekérést nagyon nagy munkakönyvtárakban."
   check_updates: "Frissítések keresése"
-  check_updates_desc: "Újabb verziót keres a GitHubon, és letölti. A Cairn újraindításakor települ."
+  check_updates_desc: "Újabb verziót keres a GitHubon, és letölti. Te döntöd el, mikor települ."
   check_updates_button: "Keresés most"
   update_mode: "Frissítések"
   update_mode_desc: "Automatikus: az új verzió a Cairn bezárásakor települ. Kérdezzen előbb: letölti, de megvárja, amíg te döntesz. Kézi: csak akkor keres, ha a Keresés most gombot nyomod meg."
@@ -1021,6 +1021,7 @@ coauthors:
   commits_one: "1 commit"
   ok: "%{n} társszerző hozzáadása"
   ok_one: "1 társszerző hozzáadása"
+  ok_zero: "Nincs társszerző"
 
 checks:
   subtitle: "CI futások a GitHubon minden ágra"

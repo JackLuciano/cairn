@@ -731,7 +731,7 @@ settings:
   fsmonitor: "Use git's file system monitor"
   fsmonitor_desc: "Speeds up status in very large working trees."
   check_updates: "Check for updates"
-  check_updates_desc: "Looks for a newer version on GitHub and downloads it. It installs when you restart Cairn."
+  check_updates_desc: "Looks for a newer version on GitHub and downloads it. You choose when it installs."
   check_updates_button: "Check now"
   update_mode: "Updates"
   update_mode_desc: "Automatic installs new versions when you close Cairn. Ask first downloads them but waits for you. Manual only checks when you press Check now."
@@ -1021,6 +1021,7 @@ coauthors:
   commits_one: "1 commit"
   ok: "Add %{n} co-authors"
   ok_one: "Add 1 co-author"
+  ok_zero: "No co-authors"
 
 checks:
   subtitle: "CI runs on GitHub for every branch"
