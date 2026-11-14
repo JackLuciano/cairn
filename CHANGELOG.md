@@ -3,7 +3,9 @@
 All notable changes to Cairn are listed here. Each section is shown in the app's "What's new"
 window after an update.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-14
+
+Codex CLI for AI features, British English, and Cairn follows your system language.
 
 ### Added
 
