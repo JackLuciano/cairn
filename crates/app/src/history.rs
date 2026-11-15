@@ -322,7 +322,11 @@ impl HistoryLayout {
         let hot = crate::repo_view::focus_hot(commits, focus, searching);
         let owners = if searching { vec![None; commits.len()] } else { cairn_core::graph::branch_owners(commits) };
         let (palette, owner_colors) = cairn_core::graph::owner_colors(&owners);
-        let rows = cairn_core::graph::layout_focused(commits, hot.as_deref(), (!searching).then_some(palette.as_slice()));
+        let rows = if searching {
+            cairn_core::graph::layout_filtered(commits)
+        } else {
+            cairn_core::graph::layout_focused(commits, hot.as_deref(), Some(&palette))
+        };
         Self { rows, owners, palette, owner_colors }
     }
 
@@ -793,6 +797,7 @@ impl RepoView {
         let row = self.rows[ix].clone();
         let theme = cx.theme().clone();
         let selected = if self.multi_select.is_empty() { self.selected_commit.as_deref() == Some(commit.id.as_str()) } else { self.multi_select.contains(&commit.id) };
+        let left_padding = if selected { 10. } else { 12. };
         let is_head = commit.refs.iter().any(|r| r.is_head);
         let graph_w = self.graph_w;
         let lane_w = self.graph_lane_w;
@@ -858,7 +863,7 @@ impl RepoView {
                 let target = commit.id.clone();
                 move |this, d: &crate::drag::DragCommits, window, cx| this.drop_commits(d.ids.clone(), target.clone(), window, cx)
             }))
-            .pl_3()
+            .pl(px(left_padding))
             .pr_4()
             .gap(px(10.))
             .when(show_graph, |d| {
@@ -938,7 +943,7 @@ impl RepoView {
         if fresh {
             let tint = theme.primary;
             row_el
-                .with_animation(SharedString::from(format!("fresh-{}", commit.id)), Animation::new(std::time::Duration::from_millis(520)).with_easing(ease_out_quint()), move |d, t| d.opacity(0.2 + 0.8 * t).pl(px(12. + 18. * (1. - t))).bg(tint.opacity(0.18 * (1. - t))))
+                .with_animation(SharedString::from(format!("fresh-{}", commit.id)), Animation::new(std::time::Duration::from_millis(520)).with_easing(ease_out_quint()), move |d, t| d.opacity(0.2 + 0.8 * t).pl(px(left_padding + 18. * (1. - t))).bg(tint.opacity(0.18 * (1. - t))))
                 .into_any_element()
         } else {
             row_el.into_any_element()
