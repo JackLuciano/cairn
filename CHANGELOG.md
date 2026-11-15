@@ -36,6 +36,21 @@ window after an update.
 - "Update branch" on a pull request that is behind its base, with a merge or a rebase.
 - The New pull request dialog suggests reviewers: the people who last worked on the files you
   changed.
+- Split into commits (Changes page): AI sorts your uncommitted work into logical commits with
+  messages. Move blocks between commits, edit the messages, and Cairn makes them in order.
+  Without AI the changes are grouped by folder.
+- "While you were away": after a few hours away, History shows what others put on the main branch,
+  which pull requests merged, and warns when it touches files you are changing. AI can summarize it.
+- Cairn warns on the Changes page when someone else's recent branch changes the same files as you.
+- Try a pull request without leaving your branch: "Try it" checks it out into its own worktree and
+  opens it in a new tab, your editor or a terminal.
+- Review heat map on a pull request's Files tab: files ranked by review risk, with the reasons.
+- Backport a pull request onto release branches, one new pull request per branch, made in separate
+  worktrees.
+- When the pull request at the bottom of a stack merges, Cairn moves the branches built on it onto
+  the main branch, pushes them and retargets their pull requests (Settings → Accounts & remotes).
+- Timeline on the File history page: scrub through a file's versions, with the lines each version
+  added highlighted, or play them back.
 
 ### Fixed
 

@@ -429,11 +429,12 @@ pub struct Remotes {
     pub ci_refresh_seconds: u32,
     pub draft_prs: bool,
     pub link_stacked_prs: bool,
+    pub auto_restack: bool,
 }
 
 impl Default for Remotes {
     fn default() -> Self {
-        Self { show_prs_in_graph: true, ci_refresh_seconds: 120, draft_prs: true, link_stacked_prs: true }
+        Self { show_prs_in_graph: true, ci_refresh_seconds: 120, draft_prs: true, link_stacked_prs: true, auto_restack: true }
     }
 }
 
@@ -569,11 +570,13 @@ pub struct Notifications {
     pub review_requests: bool,
     pub mentions: bool,
     pub state_changes: bool,
+    pub overlaps: bool,
+    pub away: bool,
 }
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { ci_finished: true, reviews: true, branch_behind: false, fetch_found_commits: false, sound: false, desktop: true, review_requests: true, mentions: true, state_changes: true }
+        Self { ci_finished: true, reviews: true, branch_behind: false, fetch_found_commits: false, sound: false, desktop: true, review_requests: true, mentions: true, state_changes: true, overlaps: true, away: true }
     }
 }
 

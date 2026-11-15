@@ -182,6 +182,22 @@ impl CairnApp {
                     crate::issue_branch::open(tab, window, cx);
                 }
             }
+            Ok(kind @ ("split" | "backport")) => {
+                let kind = kind.to_string();
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(3500)).await;
+                        let _ = cx.update(|window, cx| {
+                            if kind == "split" {
+                                crate::split_changes::open(tab, window, cx);
+                            } else {
+                                crate::backport::open(tab, 44, "Bump date-fns from 4.1.0 to 4.2.0".into(), Vec::new(), window, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
             Ok("inbox") => {
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(std::time::Duration::from_millis(3000)).await;

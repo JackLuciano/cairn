@@ -257,6 +257,7 @@ fn schema() -> Vec<Category> {
                     row("ci_refresh", "settings.ci_refresh", None, Control::Number(|s| f64::from(s.remotes.ci_refresh_seconds), |s, v| s.remotes.ci_refresh_seconds = v as u32, 30., 900., 30., "unit.seconds")),
                     row("draft_prs", "settings.draft_prs", None, Control::Toggle(|s| s.remotes.draft_prs, |s, v| s.remotes.draft_prs = v)),
                     row("link_stack", "settings.link_stack", None, Control::Toggle(|s| s.remotes.link_stacked_prs, |s, v| s.remotes.link_stacked_prs = v)),
+                    row("auto_restack", "settings.auto_restack", Some("settings.auto_restack_desc"), Control::Toggle(|s| s.remotes.auto_restack, |s, v| s.remotes.auto_restack = v)),
                 ],
             }],
         },
@@ -380,6 +381,8 @@ fn schema() -> Vec<Category> {
                 Group {
                     label: "settings.group.notify_when",
                     rows: vec![
+                        row("n_overlaps", "settings.n_overlaps", Some("settings.n_overlaps_desc"), Control::Toggle(|s| s.notifications.overlaps, |s, v| s.notifications.overlaps = v)),
+                        row("n_away", "settings.n_away", Some("settings.n_away_desc"), Control::Toggle(|s| s.notifications.away, |s, v| s.notifications.away = v)),
                         row("n_ci", "settings.n_ci", None, Control::Toggle(|s| s.notifications.ci_finished, |s, v| s.notifications.ci_finished = v)),
                         row("n_review", "settings.n_review", None, Control::Toggle(|s| s.notifications.reviews, |s, v| s.notifications.reviews = v)),
                         row("n_behind", "settings.n_behind", None, Control::Toggle(|s| s.notifications.branch_behind, |s, v| s.notifications.branch_behind = v)),
