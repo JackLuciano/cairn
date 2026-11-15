@@ -275,6 +275,7 @@ pub(crate) struct RepoView {
     pub releases: crate::pages::releases::ReleasesState,
     pub search_page: crate::pages::search::SearchState,
     pub issues: crate::pages::issues::IssuesState,
+    pub aware: crate::awareness::Awareness,
     focus: FocusHandle,
     watcher: Option<crate::watcher::RepoWatcher>,
     pub(crate) _tasks: Vec<Task<()>>,
@@ -405,6 +406,7 @@ impl RepoView {
             releases: crate::pages::releases::ReleasesState::new(window, cx),
             search_page: crate::pages::search::SearchState::new(window, cx),
             issues: crate::pages::issues::IssuesState::new(window, cx),
+            aware: Default::default(),
             focus: cx.focus_handle(),
             watcher: None,
             _tasks: Vec::new(),
@@ -486,13 +488,50 @@ impl RepoView {
     fn start_pr_polling(&mut self, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
             let mut last: std::collections::HashMap<u64, (String, String)> = std::collections::HashMap::new();
+            let mut open_before: Vec<(u64, String)> = Vec::new();
             let mut first = true;
             loop {
                 let Ok((git, settings)) = this.read_with(cx, |v, _| (v.git(), v.settings.clone())) else { return };
-                let wanted = settings.remotes.show_prs_in_graph || settings.notifications.ci_finished || settings.notifications.reviews;
+                let wanted = settings.remotes.show_prs_in_graph || settings.notifications.ci_finished || settings.notifications.reviews || settings.remotes.auto_restack;
                 if wanted {
-                    let prs = cx.background_executor().spawn(async move { cairn_core::stack::list_prs(&git).ok() }).await;
+                    let g = git.clone();
+                    let prs = cx.background_executor().spawn(async move { cairn_core::stack::list_prs(&g).ok() }).await;
                     let Some(prs) = prs else { return };
+                    let vanished: Vec<(u64, String)> = if first { Vec::new() } else { open_before.iter().filter(|(n, _)| !prs.iter().any(|p| p.number == *n)).cloned().collect() };
+                    open_before = prs.iter().map(|p| (p.number, p.head.clone())).collect();
+                    if settings.remotes.auto_restack && !vanished.is_empty() {
+                        let Ok((remote, trunk, dir)) = this.read_with(cx, |v, _| (v.default_remote().unwrap_or_else(|| "origin".into()), v.trunk.clone().unwrap_or_else(|| "main".into()), v.worktree_base().join("restack"))) else { return };
+                        let open_prs = prs.clone();
+                        let notes = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let mut notes = Vec::new();
+                                for (number, head) in vanished {
+                                    if cairn_core::stack::children_of(&git, &head).is_empty() || !cairn_core::stack::pr_merged(&git, number) {
+                                        continue;
+                                    }
+                                    for r in cairn_core::stack::restack_after_merge(&git, &remote, &trunk, &head, &open_prs, &dir) {
+                                        notes.push(match r {
+                                            cairn_core::stack::Restacked::Moved(b) => t!("restack.moved", branch = b, n = number, trunk = trunk.clone()).to_string(),
+                                            cairn_core::stack::Restacked::Conflict(b) => t!("restack.conflict", branch = b, n = number).to_string(),
+                                            cairn_core::stack::Restacked::Skipped(b) => t!("restack.skipped", branch = b, n = number).to_string(),
+                                        });
+                                    }
+                                }
+                                notes
+                            })
+                            .await;
+                        if !notes.is_empty()
+                            && this
+                                .update(cx, |v, cx| {
+                                    v.pending_notice = Some(notes.join("\n"));
+                                    v.reload(cx);
+                                })
+                                .is_err()
+                        {
+                            return;
+                        }
+                    }
                     let mut notices = Vec::new();
                     for p in &prs {
                         let done = !p.checks.is_empty() && p.checks.iter().all(|c| matches!(c.state(), "passed" | "failed" | "skipped"));
@@ -593,6 +632,7 @@ impl RepoView {
             }
             Page::FileHistory => {
                 self.load_blame_files(cx);
+                self.file_history.timeline = std::env::var("CAIRN_DEBUG_TIMELINE").is_ok();
                 if let Ok(f) = std::env::var("CAIRN_DEBUG_FILE") {
                     self.open_file_history(f, cx);
                 }
@@ -663,6 +703,32 @@ impl RepoView {
 
     pub(crate) fn git(&self) -> Git {
         self.repo.git.clone()
+    }
+
+    /// The folder new worktrees of this repository go in: the one set in Settings → Workspace,
+    /// or a `<name>-worktrees` folder next to the repository.
+    ///
+    /// # Returns
+    /// The folder, which may not exist yet.
+    pub(crate) fn worktree_base(&self) -> std::path::PathBuf {
+        if self.settings.workspace.worktree_dir.trim().is_empty() {
+            self.repo.root.parent().map(|p| p.join(format!("{}-worktrees", self.name))).unwrap_or_else(|| self.repo.root.join("..worktrees"))
+        } else {
+            std::path::PathBuf::from(self.settings.workspace.worktree_dir.trim()).join(self.name.to_string())
+        }
+    }
+
+    /// The worktree a pull request is tried out in.
+    ///
+    /// # Arguments
+    /// * `number` - the pull request
+    ///
+    /// # Returns
+    /// The folder, and whether that worktree exists now.
+    pub(crate) fn try_dir(&self, number: u64) -> (std::path::PathBuf, bool) {
+        let dir = self.worktree_base().join(format!("pr-{number}"));
+        let exists = self.worktrees.iter().any(|w| crate::app::same(&w.path, &dir));
+        (dir, exists)
     }
 
     pub(crate) fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
@@ -996,6 +1062,7 @@ impl RepoView {
             }
         }
         self.check_conflicts(cx);
+        self.after_loaded(cx);
     }
 
     /// Finds branches and pull requests that would conflict with the branch they go into, in the

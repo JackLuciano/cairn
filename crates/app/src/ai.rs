@@ -464,11 +464,61 @@ pub(crate) fn commit_message(settings: &Settings, staged_diff: &str, repo_instru
     Ok((summary, body))
 }
 
+/// Asks AI to sort blocks of uncommitted work into logical commits.
+///
+/// # Arguments
+/// * `settings` - provider, model and commit message style
+/// * `units` - the blocks, each with its id, file and diff
+/// * `repo_instructions` - the repository's own commit message rules, if any
+///
+/// # Returns
+/// Each commit's message and the ids of its blocks, in the order to commit them.
+pub(crate) fn split_changes(settings: &Settings, units: &[cairn_core::split::Unit], repo_instructions: Option<&str>) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let style = if settings.commits.conventional { "Use Conventional Commits: type(scope): summary." } else { "Write plain, imperative summaries." };
+    let mut system = format!(
+        "You split a developer's uncommitted work into a few logical, self-contained commits. Each block has an id. Put blocks that belong to the same change together, keep unrelated changes apart, and order the commits so each one builds on the ones before. Use as few commits as make sense. {style} Each summary must be at most {} characters. Reply with only JSON: an array of objects with \"message\" (the summary) and \"units\" (the block ids). Every block id must appear exactly once.",
+        settings.commits.summary_limit
+    );
+    let own = settings.commits.ai_instructions.trim();
+    if !own.is_empty() {
+        system.push_str("\n\nThe user's commit message instructions:\n");
+        system.push_str(own);
+    }
+    if let Some(repo) = repo_instructions.map(str::trim).filter(|r| !r.is_empty()) {
+        system.push_str("\n\nThis repository's commit message rules:\n");
+        system.push_str(repo);
+    }
+    let mut user = String::new();
+    for u in units {
+        let body: String = u.body.lines().take(60).collect::<Vec<_>>().join("\n");
+        user.push_str(&format!("### Block {} · {}\n{}\n\n", u.id, u.path, body));
+    }
+    let text = complete(settings, Tier::Deep, &system, &sanitize_diff(settings, &user))?;
+    let text = strip_fences(&text);
+    let json = text.find('[').and_then(|a| text.rfind(']').map(|b| &text[a..=b])).ok_or_else(|| rust_i18n::t!("split_work.ai_bad").to_string())?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|_| rust_i18n::t!("split_work.ai_bad").to_string())?;
+    let mut seen = std::collections::HashSet::new();
+    let groups: Vec<(String, Vec<usize>)> = raw
+        .iter()
+        .map(|g| {
+            let message = g.get("message").and_then(|m| m.as_str()).unwrap_or_default().trim().to_string();
+            let ids = g.get("units").and_then(|u| u.as_array()).map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as usize).filter(|x| *x < units.len() && seen.insert(*x)).collect()).unwrap_or_default();
+            (message, ids)
+        })
+        .filter(|(_, ids): &(String, Vec<usize>)| !ids.is_empty())
+        .collect();
+    if groups.is_empty() {
+        return Err(rust_i18n::t!("split_work.ai_bad").to_string());
+    }
+    Ok(groups)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Question {
     ExplainCommit,
     WhatCouldBreak,
     SummarizeToday,
+    SinceAway,
 }
 
 pub(crate) fn explain(settings: &Settings, question: Question, context: &str) -> Result<String, String> {
@@ -476,6 +526,7 @@ pub(crate) fn explain(settings: &Settings, question: Question, context: &str) ->
         Question::ExplainCommit => "You explain git commits to a developer in plain language. Start with one sentence on what changed and why it matters, then up to five short bullet points. No headings.",
         Question::WhatCouldBreak => "You review a branch for risk. Say in one sentence what is most likely to break, then up to five short bullet points with concrete scenarios. No headings.",
         Question::SummarizeToday => "You summarize a developer's recent commits for a standup. One sentence overview, then up to six bullet points grouped by topic. No headings.",
+        Question::SinceAway => "A developer was away and others committed to the main branch. Tell them what changed in one sentence, then up to five short bullet points grouped by topic, most important first. Mention it if their own files were touched. No headings.",
     };
     complete(settings, Tier::Fast, system, &sanitize_diff(settings, context))
 }

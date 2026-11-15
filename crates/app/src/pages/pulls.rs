@@ -1,4 +1,5 @@
 use cairn_core::diff::FileDiff;
+use cairn_core::risk::{FileRisk, RiskLevel, RiskReason};
 use cairn_core::stack::{self, MergeMethod, PrComment, PrDetails, PullRequest, ReviewComment, ReviewVerdict};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -13,7 +14,7 @@ use rust_i18n::t;
 
 use crate::diff_view::DiffSource;
 use crate::repo_view::RepoView;
-use crate::widgets::{Tone, avatar, count_chip, empty_state, framed, framed_if, hstack, icon, icon_tile, lane_color, relative_time, spacer, tr};
+use crate::widgets::{Tone, avatar, count_chip, empty_state, framed, framed_if, hstack, icon, icon_tile, lane_color, relative_time, spacer, toggle_pill, tr};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PrTab {
@@ -57,6 +58,8 @@ pub(crate) struct PullsState {
     pub commit_loading: bool,
     pub commit_error: Option<String>,
     pub full_diffs: Option<Vec<FileDiff>>,
+    pub risk: std::collections::HashMap<String, cairn_core::risk::FileRisk>,
+    pub by_risk: bool,
     _sub: Subscription,
 }
 
@@ -95,6 +98,8 @@ impl PullsState {
             commit_loading: false,
             commit_error: None,
             full_diffs: None,
+            risk: Default::default(),
+            by_risk: cfg!(debug_assertions) && std::env::var("CAIRN_DEBUG_BY_RISK").is_ok(),
             _sub: sub,
         }
     }
@@ -196,6 +201,48 @@ pub(crate) fn markdown(id: impl Into<ElementId>, text: &str) -> Option<AnyElemen
 
 fn hash_color(text: &str, cx: &App) -> Hsla {
     lane_color(text.bytes().fold(7usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)), cx)
+}
+
+fn risk_reason(r: &RiskReason) -> String {
+    match r {
+        RiskReason::BigChange(n) => t!("risk.big", n = n).to_string(),
+        RiskReason::Hotspot(n) => t!("risk.hot", n = n).to_string(),
+        RiskReason::ManyAuthors(n) => t!("risk.authors", n = n).to_string(),
+        RiskReason::NoTests => t!("risk.no_tests").to_string(),
+        RiskReason::Sensitive => t!("risk.sensitive").to_string(),
+    }
+}
+
+/// A small flame for a file that deserves a careful review, with the reasons in its tooltip.
+///
+/// # Arguments
+/// * `id` - element id, unique on the page
+/// * `r` - the file's risk
+///
+/// # Returns
+/// The chip.
+fn risk_chip(id: impl Into<ElementId>, r: &FileRisk, cx: &App) -> AnyElement {
+    let t = cx.theme();
+    let color = if r.level == RiskLevel::High { t.red } else { t.yellow };
+    let label = if r.level == RiskLevel::High { tr("risk.high") } else { tr("risk.medium") };
+    let mut tip = vec![t!("risk.score", n = r.score).to_string()];
+    tip.extend(r.reasons.iter().map(risk_reason));
+    let tip = tip.join("\n");
+    hstack()
+        .id(id)
+        .flex_none()
+        .gap_0p5()
+        .px_1p5()
+        .h(px(18.))
+        .rounded(px(9.))
+        .bg(color.opacity(0.14))
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(icon(IconName::Flame).xsmall())
+        .child(label)
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        .into_any_element()
 }
 
 pub(crate) fn label_chip(name: &str, cx: &App) -> Div {
@@ -492,6 +539,40 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Scores the pull request's files by review risk in the background, for the heat map.
+    fn load_pr_risk(&mut self, cx: &mut Context<Self>) {
+        self.pulls.risk.clear();
+        let Some(base) = self.pulls.details.as_ref().map(|d| d.pr.base.clone()) else { return };
+        let markers = ["#[test]", "#[cfg(test)]", "@Test", "def test_", "describe(", "it(\"", "it('", "test(\"", "test('", "func Test"];
+        let files: Vec<(String, u32, u32, bool)> = self
+            .pulls
+            .diffs
+            .iter()
+            .map(|f| {
+                let (a, r) = f.stats();
+                let inline = f.hunks.iter().flat_map(|h| h.lines.iter()).any(|l| l.kind != cairn_core::diff::LineKind::Context && markers.iter().any(|m| l.text.contains(m)));
+                let grow = if self.pulls.mock { 8 } else { 1 };
+                (f.path.clone(), a * grow, r * grow, inline)
+            })
+            .collect();
+        let git = self.git();
+        let number = self.pulls.selected;
+        self.spawn_bg(
+            move || {
+                let remote = format!("origin/{base}");
+                let base = if git.succeeds(["rev-parse", "--verify", "-q", &remote]) { remote } else { base };
+                cairn_core::risk::score(&git, &base, &files)
+            },
+            move |this, scored, cx| {
+                if this.pulls.selected == number {
+                    this.pulls.risk = scored.into_iter().map(|r| (r.path.clone(), r)).collect();
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+    }
+
     pub(crate) fn select_pull(&mut self, number: u64, cx: &mut Context<Self>) {
         if self.pulls.selected != Some(number) {
             self.pulls.ai = PrAiReview::default();
@@ -513,6 +594,7 @@ impl RepoView {
                 self.pulls.diffs = m.diffs;
                 self.pulls.inline = m.inline;
                 self.refresh_fingerprints();
+                self.load_pr_risk(cx);
             }
             cx.notify();
             return;
@@ -532,6 +614,7 @@ impl RepoView {
                         this.pulls.diffs = diffs;
                         this.pulls.inline = inline;
                         this.refresh_fingerprints();
+                        this.load_pr_risk(cx);
                         if let Some(oid) = debug_commit {
                             this.open_pr_commit(oid, cx);
                         }
@@ -995,9 +1078,77 @@ impl RepoView {
                     .child(framed_if(Button::new("pr-checkout"), Tone::Plain, !on_branch && self.busy.is_none(), cx).icon(icon(IconName::LogIn)).label(if on_branch { tr("pulls.checked_out") } else { tr("pulls.checkout") }).on_click(cx.listener(move |this, _, window, cx| {
                         this.run_op(tr("op.checkout_pr"), Some(t!("undo.checkout", name = format!("#{number}")).to_string()), move |git| stack::pr_checkout(git, number), window, cx);
                     })))
+                    .child(self.render_try_button(number, cx))
+                    .child({
+                        let (title, skip) = (d.pr.title.clone(), vec![d.pr.head.clone(), d.pr.base.clone()]);
+                        framed(Button::new("pr-backport"), Tone::Plain, cx).icon(icon(IconName::GitBranchPlus)).label(tr("backport.button")).tooltip(tr("backport.tip")).on_click(cx.listener(move |_, _, window, cx| {
+                            crate::backport::open(cx.entity(), number, title.clone(), skip.clone(), window, cx);
+                        }))
+                    })
                     .child(framed(Button::new("pr-web"), Tone::Plain, cx).icon(icon(IconName::ExternalLink)).label(tr("pulls.open_web")).on_click(move |_, _, cx| cx.open_url(&url))),
             )
             .into_any_element()
+    }
+
+    /// "Try it": the pull request in its own worktree, or the menu for the one already there.
+    ///
+    /// # Arguments
+    /// * `number` - the pull request
+    ///
+    /// # Returns
+    /// The button.
+    fn render_try_button(&mut self, number: u64, cx: &mut Context<Self>) -> AnyElement {
+        let (dir, exists) = self.try_dir(number);
+        let exists = exists || (self.pulls.mock && std::env::var("CAIRN_DEBUG_TRYING").is_ok());
+        if !exists {
+            return framed_if(Button::new("pr-try"), Tone::Plain, self.busy.is_none(), cx)
+                .icon(icon(IconName::FlaskConical))
+                .label(tr("try.button"))
+                .tooltip(tr("try.tip"))
+                .on_click(cx.listener(move |this, _, window, cx| this.try_pr(number, window, cx)))
+                .into_any_element();
+        }
+        let view = cx.entity();
+        framed(Button::new("pr-trying"), Tone::Accent, cx)
+            .icon(icon(IconName::FlaskConical))
+            .label(tr("try.trying"))
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let (v1, v2, v4) = (view.clone(), view.clone(), view.clone());
+                let (d1, d2, d3, d4) = (dir.clone(), dir.clone(), dir.clone(), dir.clone());
+                menu.item(PopupMenuItem::new(t!("try.open_tab").to_string()).icon(icon(IconName::FolderOpen)).on_click(move |_, _, cx| v1.update(cx, |_, cx| cx.emit(crate::repo_view::OpenRepoEvent(d1.clone())))))
+                    .item(PopupMenuItem::new(t!("try.open_editor").to_string()).icon(icon(IconName::Code)).on_click(move |_, _, cx| v2.update(cx, |v, cx| v.open_in_editor(&d2, cx))))
+                    .item(PopupMenuItem::new(t!("try.open_terminal").to_string()).icon(icon(IconName::SquareTerminal)).on_click(move |_, _, _| crate::platform::open_terminal(&d3)))
+                    .separator()
+                    .item(PopupMenuItem::new(t!("try.remove").to_string()).icon(icon(IconName::Trash)).on_click(move |_, window, cx| {
+                        let d = d4.clone();
+                        v4.update(cx, |v, cx| {
+                            v.run_op(tr("op.end_try"), None, move |git| stack::end_try(git, number, &d, false).map(|_| String::new()), window, cx);
+                        });
+                    }))
+            })
+            .into_any_element()
+    }
+
+    /// Checks a pull request out into its own worktree and opens it as a new tab, so it can be
+    /// run without leaving the current branch.
+    ///
+    /// # Arguments
+    /// * `number` - the pull request
+    pub(crate) fn try_pr(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pulls.mock {
+            window.push_notification(Notification::success(t!("try.ready", n = number).to_string()), cx);
+            return;
+        }
+        let (dest, _) = self.try_dir(number);
+        let d2 = dest.clone();
+        let patterns = cairn_core::refs::worktree_patterns(&self.settings.git.worktree_copy);
+        self.run_op(t!("op.try_pr", n = number).to_string().into(), None, move |git| {
+            stack::try_pr(git, number, &d2)?;
+            let _ = cairn_core::refs::copy_ignored_files(git, &d2, &patterns);
+            Ok(t!("try.ready", n = number).to_string())
+        }, window, cx);
+        cx.emit(crate::repo_view::OpenRepoEvent(dest));
     }
 
     fn render_tabs(&mut self, d: &PrDetails, cx: &mut Context<Self>) -> AnyElement {
@@ -1716,11 +1867,20 @@ impl RepoView {
         let biggest = self.pulls.diffs.iter().map(|f| f.stats().0 + f.stats().1).max().unwrap_or(1).max(1);
         let mut tree = v_flex().gap_0p5().p_1p5();
         let mut last_dir = String::new();
-        for (i, f) in self.pulls.diffs.iter().enumerate() {
+        let by_risk = self.pulls.by_risk && !self.pulls.risk.is_empty();
+        let mut order: Vec<usize> = (0..self.pulls.diffs.len()).collect();
+        if by_risk {
+            order.sort_by_key(|i| std::cmp::Reverse(self.pulls.risk.get(&self.pulls.diffs[*i].path).map(|r| r.score).unwrap_or(0)));
+        }
+        let high = self.pulls.risk.values().filter(|r| r.level == RiskLevel::High).count();
+        for i in order {
+            let f = &self.pulls.diffs[i];
             let (dir, name) = match f.path.rsplit_once('/') {
                 Some((d, n)) => (d.to_string(), n.to_string()),
                 None => (String::new(), f.path.clone()),
             };
+            let risk = self.pulls.risk.get(&f.path).filter(|r| r.level != RiskLevel::Low).cloned();
+            let (dir, name) = if by_risk { (String::new(), f.path.clone()) } else { (dir, name) };
             if dir != last_dir && !dir.is_empty() {
                 tree = tree.child(hstack().gap_1p5().px_2().pt_2p5().pb_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(icon(IconName::FolderOpen).xsmall().text_color(theme.yellow)).child(div().truncate().child(dir.clone())));
             }
@@ -1760,6 +1920,7 @@ impl RepoView {
                             })
                             .child(ext_badge(&f.path, cx))
                             .child(div().flex_1().min_w_0().truncate().text_sm().when(seen, |d| d.text_color(theme.muted_foreground).line_through()).child(name))
+                            .children(risk.map(|r| risk_chip(("pr-risk", i), &r, cx)))
                             .when(ai_notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.magenta).child(icon(IconName::Sparkles).xsmall()).child(ai_notes.to_string())))
                             .when(notes > 0, |d| d.child(hstack().gap_0p5().text_xs().text_color(theme.blue).child(icon(IconName::MessageSquare).xsmall()).child(notes.to_string())))
                             .child(div().text_xs().text_color(theme.green).child(format!("+{a}")))
@@ -1864,7 +2025,29 @@ impl RepoView {
                     .border_r_1()
                     .border_color(theme.border)
                     .when(!in_commit, |el| {
-                        el.child(v_flex().gap_1p5().px_3().py_3().border_b_1().border_color(theme.border).child(hstack().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(t!("pulls.viewed_progress", n = viewed_n, total = total).to_string())).child(spacer()).child(diffstat(d.pr.additions, d.pr.deletions, cx))).child(progress))
+                        el.child(
+                            v_flex()
+                                .gap_1p5()
+                                .px_3()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(hstack().text_xs().child(div().font_weight(FontWeight::SEMIBOLD).child(t!("pulls.viewed_progress", n = viewed_n, total = total).to_string())).child(spacer()).child(diffstat(d.pr.additions, d.pr.deletions, cx)))
+                                .child(progress)
+                                .when(!self.pulls.risk.is_empty(), |el| {
+                                    el.child(
+                                        hstack()
+                                            .gap_2()
+                                            .pt_1()
+                                            .child(toggle_pill("pr-by-risk", tr("risk.sort"), self.pulls.by_risk, cx).on_click(cx.listener(|this, _, _, cx| {
+                                                this.pulls.by_risk = !this.pulls.by_risk;
+                                                cx.notify();
+                                            })))
+                                            .child(spacer())
+                                            .when(high > 0, |d| d.child(hstack().gap_1().text_xs().text_color(theme.red).child(icon(IconName::Flame).xsmall()).child(crate::widgets::plural("risk.high_count", high)))),
+                                    )
+                                }),
+                        )
                             .child(ai_panel)
                     })
                     .child(div().id("pr-tree").flex_1().min_h_0().overflow_y_scroll().child(tree)),

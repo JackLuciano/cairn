@@ -823,6 +823,7 @@ impl RepoView {
 
         let card = self.card_info(ix, cx);
         let fresh = self.fresh.contains(&commit.id);
+        let landed = !selected && self.landed_while_away(&commit.id);
         let row_el = div()
             .id(("commit", ix))
             .h(px(ROW_H))
@@ -831,6 +832,7 @@ impl RepoView {
             .items_center()
             .bg(bg)
             .when(selected, |d| d.bg(linear_gradient(90., linear_color_stop(theme.primary.opacity(0.22), 0.), linear_color_stop(bg, 0.45))).border_l_2().border_color(theme.primary))
+            .when(landed, |d| d.bg(linear_gradient(90., linear_color_stop(theme.blue.opacity(0.1), 0.), linear_color_stop(bg, 0.3))).border_l_2().border_color(theme.blue.opacity(0.8)))
             .when_some(card, |row, card| row.tooltip(move |_, cx| cx.new(|cx| CommitCard::new(card.clone(), cx)).into()))
             .on_mouse_down(MouseButton::Right, {
                 let id = commit.id.clone();
@@ -1196,6 +1198,7 @@ impl RepoView {
                                 }))),
                         )
                     })
+                    .children(self.render_away_card(cx))
                     .children(legend)
                     .child(
                         hstack()

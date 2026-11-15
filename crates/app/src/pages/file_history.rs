@@ -1,6 +1,7 @@
 use cairn_core::diff::FileDiff;
 use cairn_core::log::FileVersion;
 use cairn_core::ops::ToolDiff;
+use cairn_core::tree::FileContent;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -20,7 +21,15 @@ pub(crate) struct FileHistoryState {
     pub loading: bool,
     pub selected: usize,
     pub diff: Option<FileDiff>,
+    pub timeline: bool,
+    pub content: Option<(String, Option<FileContent>)>,
+    pub playing: bool,
+    pub jump: bool,
+    pub scroll: ScrollHandle,
 }
+
+const TIMELINE_MAX: usize = 300;
+const TIMELINE_LINES: usize = 5000;
 
 impl RepoView {
     /// Shows every commit that changed a file, newest first, and opens the latest change.
@@ -30,12 +39,13 @@ impl RepoView {
     pub(crate) fn open_file_history(&mut self, path: String, cx: &mut Context<Self>) {
         self.page = Page::FileHistory;
         self.load_blame_files(cx);
-        self.file_history = FileHistoryState { path: Some(path.clone()), loading: true, ..Default::default() };
+        self.file_history = FileHistoryState { path: Some(path.clone()), loading: true, timeline: self.file_history.timeline, ..Default::default() };
         let git = self.git();
-        self.spawn_bg(move || cairn_core::log::file_history(&git, &path, 2000).unwrap_or_default(), |this, versions, cx| {
+        let start = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_TIMELINE_IX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) } else { 0 };
+        self.spawn_bg(move || cairn_core::log::file_history(&git, &path, 2000).unwrap_or_default(), move |this, versions, cx| {
             this.file_history.versions = versions;
             this.file_history.loading = false;
-            this.select_file_version(0, cx);
+            this.select_file_version(start.min(this.file_history.versions.len().saturating_sub(1)), cx);
         }, cx);
         cx.notify();
     }
@@ -44,6 +54,9 @@ impl RepoView {
         self.file_history.selected = ix;
         self.file_history.diff = None;
         let Some(v) = self.file_history.versions.get(ix).cloned() else { return };
+        if self.file_history.timeline {
+            self.load_version_content(&v, cx);
+        }
         self.page_revs = Some((v.parent.clone(), v.id.clone()));
         let git = self.git();
         let opts = self.diff_options();
@@ -58,6 +71,160 @@ impl RepoView {
             cx,
         );
         cx.notify();
+    }
+
+    fn load_version_content(&mut self, v: &FileVersion, cx: &mut Context<Self>) {
+        let git = self.git();
+        let (id, path, gone) = (v.id.clone(), v.path.clone(), v.status == 'D');
+        let want = id.clone();
+        self.spawn_bg(
+            move || if gone { None } else { cairn_core::tree::read_file(&git, &id, &path).ok() },
+            move |this, content, _| {
+                if this.file_history.versions.get(this.file_history.selected).is_some_and(|s| s.id == want) {
+                    this.file_history.content = Some((want, content));
+                    this.file_history.jump = true;
+                }
+            },
+            cx,
+        );
+    }
+
+    fn toggle_timeline(&mut self, cx: &mut Context<Self>) {
+        self.file_history.timeline = !self.file_history.timeline;
+        self.file_history.playing = false;
+        if self.file_history.timeline
+            && let Some(v) = self.file_history.versions.get(self.file_history.selected).cloned()
+        {
+            self.load_version_content(&v, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if self.file_history.playing {
+            self.file_history.playing = false;
+            cx.notify();
+            return;
+        }
+        if self.file_history.selected == 0 {
+            self.select_file_version(self.file_history.versions.len().min(TIMELINE_MAX).saturating_sub(1), cx);
+        }
+        self.file_history.playing = true;
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(1100)).await;
+                let go = this.update(cx, |this, cx| {
+                    if !this.file_history.playing || this.page != Page::FileHistory || this.file_history.selected == 0 {
+                        this.file_history.playing = false;
+                        cx.notify();
+                        return false;
+                    }
+                    let next = this.file_history.selected - 1;
+                    this.select_file_version(next, cx);
+                    true
+                });
+                if !matches!(go, Ok(true)) {
+                    return;
+                }
+            }
+        });
+        self._tasks.push(task);
+        cx.notify();
+    }
+
+    /// The timeline scrubber: every version of the file from oldest to newest, the file as it
+    /// was at the picked one, and the lines that version added.
+    fn render_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let total = self.file_history.versions.len().min(TIMELINE_MAX);
+        let selected = self.file_history.selected;
+        let mut track = h_flex().id("fh-track").flex_1().h(px(28.)).gap(px(2.)).items_end();
+        for ix in (0..total).rev() {
+            let on = ix == selected;
+            let v = &self.file_history.versions[ix];
+            let (a, r) = (v.status == 'A', v.status == 'D');
+            let color = if on { theme.primary } else if a { theme.green } else if r { theme.red } else { theme.muted_foreground.opacity(0.45) };
+            track = track.child(
+                div()
+                    .id(("fh-tick", ix))
+                    .flex_1()
+                    .min_w(px(2.))
+                    .h_full()
+                    .flex()
+                    .items_end()
+                    .cursor_pointer()
+                    .child(div().w_full().h(if on { px(28.) } else { px(14.) }).rounded(px(2.)).bg(color))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        this.file_history.playing = false;
+                        this.select_file_version(ix, cx);
+                    }))
+                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                        if e.pressed_button == Some(MouseButton::Left) && this.file_history.selected != ix {
+                            this.select_file_version(ix, cx);
+                        }
+                    })),
+            );
+        }
+        let added: std::collections::HashSet<u32> = self.file_history.diff.as_ref().map(|d| d.hunks.iter().flat_map(|h| h.lines.iter()).filter(|l| l.kind == cairn_core::diff::LineKind::Added).filter_map(|l| l.new_no).collect()).unwrap_or_default();
+        let want = self.file_history.versions.get(selected).map(|v| v.id.clone()).unwrap_or_default();
+        let content: AnyElement = match &self.file_history.content {
+            Some((id, Some(FileContent::Text(text)))) if *id == want => {
+                let mut lines = v_flex().id("fh-lines").size_full().overflow_y_scroll().track_scroll(&self.file_history.scroll).py_2().font_family(theme.mono_font_family.clone()).text_size(px(12.5));
+                let mut first_added = None;
+                for (i, line) in text.lines().take(TIMELINE_LINES).enumerate() {
+                    let no = i as u32 + 1;
+                    let new = added.contains(&no);
+                    if new && first_added.is_none() {
+                        first_added = Some(i);
+                    }
+                    lines = lines.child(
+                        h_flex()
+                            .w_full()
+                            .when(new, |d| d.bg(theme.green.opacity(0.13)))
+                            .child(div().flex_none().w(px(52.)).pr_3().text_right().text_color(if new { theme.green } else { theme.muted_foreground.opacity(0.7) }).child(no.to_string()))
+                            .child(div().flex_none().w(px(3.)).h_full().when(new, |d| d.bg(theme.green)))
+                            .child(div().pl_2().whitespace_nowrap().child(line.to_string())),
+                    );
+                }
+                if self.file_history.jump && !added.is_empty() {
+                    self.file_history.jump = false;
+                    self.file_history.scroll.scroll_to_item(first_added.unwrap_or(0).saturating_sub(4));
+                }
+                lines.into_any_element()
+            }
+            Some((id, Some(FileContent::Binary(size)))) if *id == want => empty_state(IconName::File, tr("browse.binary_title"), t!("browse.binary_body", size = crate::widgets::human_size(*size)).to_string(), cx).into_any_element(),
+            Some((id, None)) if *id == want => empty_state(IconName::Trash, tr("timeline.deleted_title"), tr("timeline.deleted_body"), cx).into_any_element(),
+            _ => crate::skeleton::diff(cx).into_any_element(),
+        };
+        let pos = total.saturating_sub(selected);
+        v_flex()
+            .size_full()
+            .child(
+                hstack()
+                    .gap_2()
+                    .px_4()
+                    .py_2p5()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .bg(theme.sidebar)
+                    .child(Button::new("fh-older").small().ghost().icon(icon(IconName::StepBack)).tooltip(tr("timeline.older")).on_click(cx.listener(move |this, _, _, cx| {
+                        this.file_history.playing = false;
+                        if selected + 1 < total {
+                            this.select_file_version(selected + 1, cx);
+                        }
+                    })))
+                    .child(framed(Button::new("fh-play"), Tone::Accent, cx).h(px(28.)).icon(icon(if self.file_history.playing { IconName::Pause } else { IconName::Play })).tooltip(if self.file_history.playing { tr("timeline.pause") } else { tr("timeline.play") }).on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx))))
+                    .child(Button::new("fh-newer").small().ghost().icon(icon(IconName::StepForward)).tooltip(tr("timeline.newer")).on_click(cx.listener(move |this, _, _, cx| {
+                        this.file_history.playing = false;
+                        if selected > 0 {
+                            this.select_file_version(selected - 1, cx);
+                        }
+                    })))
+                    .child(track)
+                    .child(div().flex_none().w(px(120.)).text_right().text_xs().text_color(theme.muted_foreground).child(t!("timeline.position", n = pos, total = total).to_string())),
+            )
+            .child(div().flex_1().min_h_0().child(content))
+            .into_any_element()
     }
 
     fn render_file_picker(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -190,12 +357,18 @@ impl RepoView {
                                     .child(Button::new("fh-ext").small().ghost().icon(icon(IconName::ArrowLeftRight)).tooltip(tr("tools.open_difftool")).on_click(cx.listener(move |this, _, window, cx| {
                                         let what = ToolDiff::Revisions(parent.clone().unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()), id2.clone());
                                         this.open_difftool(what, file2.clone(), window, cx);
-                                    }))),
+                                    })))
+                                    .child(spacer())
+                                    .child(crate::widgets::toggle_pill("fh-timeline", tr("timeline.toggle"), self.file_history.timeline, cx).on_click(cx.listener(|this, _, _, cx| this.toggle_timeline(cx)))),
                             ),
                     )
-                    .child(div().flex_1().min_h_0().child(match diff {
-                        Some(d) => self.render_file_diff(DiffSource::Page, &d, cx),
-                        None => crate::skeleton::diff(cx).into_any_element(),
+                    .child(div().flex_1().min_h_0().child(if self.file_history.timeline {
+                        self.render_timeline(cx)
+                    } else {
+                        match diff {
+                            Some(d) => self.render_file_diff(DiffSource::Page, &d, cx),
+                            None => crate::skeleton::diff(cx).into_any_element(),
+                        }
                     }))
                     .into_any_element()
             }
