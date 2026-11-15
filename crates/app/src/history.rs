@@ -1176,6 +1176,7 @@ impl RepoView {
                                 }))),
                         )
                     })
+                    .children(self.render_away_card(cx))
                     .children(legend)
                     .child(
                         hstack()

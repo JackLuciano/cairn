@@ -354,12 +354,7 @@ impl RepoView {
                         let v = view.clone();
                         crate::dialogs::text_prompt(tr("branches.new_worktree"), tr("branches.new_worktree_body"), tr("branch.name_placeholder"), String::new(), tr("branches.create_worktree"), window, cx, move |branch, window, cx| {
                             v.update(cx, |this, cx| {
-                                let base_dir = if this.settings.workspace.worktree_dir.trim().is_empty() {
-                                    this.repo.root.parent().map(|p| p.join(format!("{}-worktrees", this.name))).unwrap_or_else(|| this.repo.root.join("..worktrees"))
-                                } else {
-                                    std::path::PathBuf::from(this.settings.workspace.worktree_dir.trim()).join(this.name.to_string())
-                                };
-                                let dest = base_dir.join(branch.replace('/', "-"));
+                                let dest = this.worktree_base().join(branch.replace('/', "-"));
                                 let d2 = dest.clone();
                                 let patterns = cairn_core::refs::worktree_patterns(&this.settings.git.worktree_copy);
                                 this.run_op(tr("op.add_worktree"), None, move |git| {
