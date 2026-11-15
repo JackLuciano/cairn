@@ -1166,14 +1166,11 @@ notify:
   review: "Új átnézés: #%{n} %{title}"
 
 git_setup:
-  checking: "Git beállítása…"
-  unavailable: "A Git nem érhető el"
+  checking: "Git keresése a háttérben…"
   invalid_path: "Válassz egy működő Git futtatható fájlt a Beállítások → Haladó menüben."
   missing: "Telepítsd a Git-et, vagy válassz ki egy meglévő Git futtatható fájlt a beállításokban."
   winget_missing: "A WinGet nem érhető el. Telepítsd kézzel a Git for Windowst, vagy válassz ki egy meglévő Git futtatható fájlt a beállításokban."
   install_failed: "A WinGet nem tudta beállítani a Git-et. Próbáld újra, telepítsd kézzel a Git for Windowst, vagy válassz ki egy meglévő Git futtatható fájlt a beállításokban."
-  retry: "Újrapróbálás"
-  settings: "Beállítások megnyitása"
 quit:
   title: "Még fut egy művelet"
   body: "Ha most bezárod a Cairnt, egy push, pull vagy rebase félbemaradhat."

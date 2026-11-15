@@ -59,7 +59,7 @@ impl CairnApp {
     /// Reads the status of every repository and the review queue in the background, at most
     /// once a minute.
     pub(crate) fn load_home(&mut self, force: bool, cx: &mut Context<Self>) {
-        if self.home.loading || (!force && self.home.loaded.is_some_and(|t| t.elapsed() < REFRESH_AFTER)) {
+        if !self.git_ready() || self.home.loading || (!force && self.home.loaded.is_some_and(|t| t.elapsed() < REFRESH_AFTER)) {
             return;
         }
         self.home.loading = true;

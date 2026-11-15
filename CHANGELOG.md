@@ -7,7 +7,7 @@ window after an update.
 
 ### Added
 
-- Cairn automatically installs Git for Windows through WinGet if it cannot find Git.
+- Cairn detects Git in the background and installs Git for Windows through WinGet if needed.
   Settings → Advanced shows the detected executable and lets you browse for another,
   detect Git again, or retry installation when Git is unavailable.
 - Opt in to Gravatar photos for commit authors in Settings → Appearance.

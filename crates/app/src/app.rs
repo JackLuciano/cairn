@@ -110,7 +110,10 @@ impl CairnApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(path) => this.finish_git_setup(path, window, cx),
-                    Err(error) => this.git_setup = Some(Err(error)),
+                    Err(error) => {
+                        window.push_notification(Notification::warning(tr(error.message_key())), cx);
+                        this.git_setup = Some(Err(error));
+                    }
                 }
                 cx.notify();
             });
@@ -141,7 +144,7 @@ impl CairnApp {
         cx.defer_in(window, |this, window, cx| this.debug_hooks(window, cx));
     }
 
-    fn git_ready(&self) -> bool {
+    pub(crate) fn git_ready(&self) -> bool {
         self.git_executable().is_some()
     }
 
@@ -178,33 +181,12 @@ impl CairnApp {
         true
     }
 
-    fn render_git_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let error = self.git_setup.as_ref().and_then(|result| result.as_ref().err());
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .p_6()
-            .gap_4()
-            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr(
-                if error.is_some() { "git_setup.unavailable" } else { "git_setup.checking" },
-            )))
-            .when_some(error, |panel, error| {
-                panel
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(tr(error.message_key())))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Button::new("retry-git-setup").primary().label(tr("git_setup.retry"))
-                                .on_click(cx.listener(|this, _, window, cx| this.start_git_setup(window, cx))))
-                            .child(Button::new("configure-git").label(tr("git_setup.settings"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    crate::settings_dialog::request_category("advanced");
-                                    crate::settings_dialog::open(cx.entity(), this.settings.clone(), window, cx);
-                                }))),
-                    )
-            })
+    fn require_git(&self, window: &mut Window, cx: &mut App) -> bool {
+        if let Some(message) = self.git_setup_message() {
+            window.push_notification(Notification::warning(tr(message)), cx);
+            return false;
+        }
+        true
     }
 
     #[cfg(debug_assertions)]
@@ -400,8 +382,10 @@ impl CairnApp {
     }
 
     pub(crate) fn save_library(&mut self, cx: &mut Context<Self>) {
-        self.library.open_tabs = self.tabs.iter().map(|t| t.read(cx).repo.root.clone()).collect();
-        self.library.active_tab = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.read(cx).repo.root.clone());
+        if !self.restore_session {
+            self.library.open_tabs = self.tabs.iter().map(|t| t.read(cx).repo.root.clone()).collect();
+            self.library.active_tab = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.read(cx).repo.root.clone());
+        }
         if let Err(e) = self.library.save() {
             crate::repo_view::log_error(&format!("saving library: {e}"));
         }
@@ -556,6 +540,9 @@ impl CairnApp {
     }
 
     pub(crate) fn open_repo(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_git(window, cx) {
+            return;
+        }
         if self.open_repo_inner(path, true, window, cx) {
             self.save_library(cx);
         }
@@ -641,6 +628,9 @@ impl CairnApp {
     }
 
     pub(crate) fn clone_repository(&mut self, category: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_git(window, cx) {
+            return;
+        }
         let view = cx.entity();
         let base = self.settings.general.clone_dir.clone();
         crate::dialogs::text_prompt(
@@ -686,6 +676,9 @@ impl CairnApp {
     }
 
     pub(crate) fn init_repository(&mut self, category: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_git(window, cx) {
+            return;
+        }
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1371,7 +1364,7 @@ impl CairnApp {
                         .gap(px(6.))
                         .pr_2()
                         .children(crate::updater::update_pill(self, cx))
-                        .when(self.git_ready() && self.active.is_none(), |d| {
+                        .when(self.active.is_none(), |d| {
                             d.child(
                                 crate::widgets::framed(Button::new("open-palette"), crate::widgets::Tone::Plain, cx)
                                     .h(px(28.))
@@ -1728,13 +1721,9 @@ impl Render for CairnApp {
                 self.workspace = Some((id, panel));
             }
         }
-        let main = if git_ready {
-            match self.active.and_then(|i| self.tabs.get(i)).cloned() {
-                Some(tab) => tab.into_any_element(),
-                None => self.render_home(cx).into_any_element(),
-            }
-        } else {
-            self.render_git_setup(cx).into_any_element()
+        let main = match self.active.and_then(|i| self.tabs.get(i)).cloned() {
+            Some(tab) => tab.into_any_element(),
+            None => self.render_home(cx).into_any_element(),
         };
         let _ = window;
         use crate::palette as p;
@@ -1742,11 +1731,7 @@ impl Render for CairnApp {
             .size_full()
             .key_context("CairnApp")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &p::OpenPalette, window, cx| {
-                if this.git_ready() {
-                    p::open(cx.entity(), window, cx);
-                }
-            }))
+            .on_action(cx.listener(|_, _: &p::OpenPalette, window, cx| p::open(cx.entity(), window, cx)))
             .on_action(cx.listener(|this, _: &p::OpenSettings, window, cx| crate::settings_dialog::open(cx.entity(), this.settings.clone(), window, cx)))
             .on_action(cx.listener(|this, _: &p::Fetch, window, cx| this.with_tab(window, cx, |v, w, cx| v.fetch_action(w, cx))))
             .on_action(cx.listener(|this, _: &p::Pull, window, cx| this.with_tab(window, cx, |v, w, cx| v.pull_action(w, cx))))
@@ -1803,7 +1788,7 @@ impl Render for CairnApp {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(git_ready && self.sidebar_open, |d| d.child(div().flex_none().w(px(260.)).h_full().child(self.render_sidebar(cx))))
+                    .when(self.sidebar_open, |d| d.child(div().flex_none().w(px(260.)).h_full().child(self.render_sidebar(cx))))
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
     }

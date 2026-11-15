@@ -1166,14 +1166,11 @@ notify:
   review: "New review on #%{n} %{title}"
 
 git_setup:
-  checking: "Setting up Git…"
-  unavailable: "Git is unavailable"
+  checking: "Checking for Git in the background…"
   invalid_path: "Choose a working Git executable in Settings → Advanced."
   missing: "Install Git or select an existing Git executable in Settings."
   winget_missing: "WinGet is unavailable. Install Git for Windows manually or choose an existing Git executable in Settings."
   install_failed: "WinGet could not set up Git. Retry, install Git for Windows manually, or choose an existing Git executable in Settings."
-  retry: "Retry"
-  settings: "Open settings"
 quit:
   title: "An operation is still running"
   body: "Closing Cairn now could leave a push, pull or rebase half done."

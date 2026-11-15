@@ -1378,6 +1378,9 @@ fn render_preview(s: &Settings, cx: &App) -> AnyElement {
 }
 
 pub(crate) fn open(app: Entity<CairnApp>, settings: Settings, window: &mut Window, cx: &mut App) {
-    let panel = cx.new(|cx| SettingsPanel::new(app, settings, window, cx));
-    window.open_dialog(cx, move |dialog, _, cx| dialog.w(px(1040.)).bg(cx.theme().popover.opacity(1.)).close_button(true).child(panel.clone()));
+    // Settings can be opened from a CairnApp update. Build the panel after that update releases the app.
+    window.defer(cx, move |window, cx| {
+        let panel = cx.new(|cx| SettingsPanel::new(app, settings, window, cx));
+        window.open_dialog(cx, move |dialog, _, cx| dialog.w(px(1040.)).bg(cx.theme().popover.opacity(1.)).close_button(true).child(panel.clone()));
+    });
 }
