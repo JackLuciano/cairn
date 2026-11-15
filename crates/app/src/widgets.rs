@@ -56,6 +56,21 @@ pub(crate) fn plural_with(key: &str, n: usize, who: &str) -> String {
     t!(key.as_str(), n = n, who = who).to_string()
 }
 
+/// Writes a file size the way people read it, such as `2.4 MB`.
+///
+/// # Arguments
+/// * `bytes` - the size
+///
+/// # Returns
+/// The size in B, KB or MB.
+pub(crate) fn human_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
+        b if b >= 1 << 10 => format!("{:.1} KB", b as f64 / 1024.),
+        b => format!("{b} B"),
+    }
+}
+
 pub(crate) fn icon(name: IconName) -> Icon {
     Icon::new(name)
 }

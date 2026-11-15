@@ -35,6 +35,7 @@ enum Control {
     Secret(&'static str),
     TestAi,
     CheckUpdates,
+    TestNotification,
 }
 
 #[derive(Clone, Copy)]
@@ -332,6 +333,8 @@ fn schema() -> Vec<Category> {
                         row("checks_timeout", "settings.checks_timeout", None, Control::Number(|s| f64::from(s.checks.timeout_seconds), |s, v| s.checks.timeout_seconds = v as u32, 10., 1800., 10., "unit.seconds")),
                         row("secret_scan", "settings.secret_scan", None, Control::Toggle(|s| s.checks.secret_scan, |s, v| s.checks.secret_scan = v)),
                         row("block_secret", "settings.block_secret", None, Control::Toggle(|s| s.checks.block_on_secret, |s, v| s.checks.block_on_secret = v)),
+                        row("file_guard", "settings.file_guard", Some("settings.file_guard_desc"), Control::Toggle(|s| s.checks.file_guard, |s, v| s.checks.file_guard = v)),
+                        RowDef { visible: Some(|s| s.checks.file_guard), ..row("large_file", "settings.large_file", None, Control::Number(|s| f64::from(s.checks.large_file_mb), |s, v| s.checks.large_file_mb = v as u32, 1., 2000., 5., "unit.mb")) },
                     ],
                 },
                 Group {
@@ -340,6 +343,9 @@ fn schema() -> Vec<Category> {
                         row("snapshots", "settings.snapshots", Some("settings.snapshots_desc"), Control::Toggle(|s| s.checks.snapshots, |s, v| s.checks.snapshots = v)),
                         row("undo_days", "settings.undo_days", None, Control::Number(|s| f64::from(s.checks.undo_days), |s, v| s.checks.undo_days = v as u32, 1., 365., 1., "unit.days")),
                         row("protect_main", "settings.protect_main", None, Control::Toggle(|s| s.checks.protect_main, |s, v| s.checks.protect_main = v)),
+                        row("autosave", "settings.autosave", Some("settings.autosave_desc"), Control::Toggle(|s| s.checks.autosave, |s, v| s.checks.autosave = v)),
+                        RowDef { visible: Some(|s| s.checks.autosave), ..row("autosave_minutes", "settings.autosave_minutes", None, Control::Number(|s| f64::from(s.checks.autosave_minutes), |s, v| s.checks.autosave_minutes = v as u32, 1., 120., 1., "unit.minutes")) },
+                        RowDef { visible: Some(|s| s.checks.autosave), ..row("autosave_days", "settings.autosave_days", None, Control::Number(|s| f64::from(s.checks.autosave_days), |s, v| s.checks.autosave_days = v as u32, 1., 90., 1., "unit.days")) },
                     ],
                 },
             ],
@@ -360,16 +366,28 @@ fn schema() -> Vec<Category> {
             id: "notifications",
             label: "settings.cat.notifications",
             desc: "settings.cat.notifications_desc",
-            groups: vec![Group {
-                label: "settings.group.notify_when",
-                rows: vec![
-                    row("n_ci", "settings.n_ci", None, Control::Toggle(|s| s.notifications.ci_finished, |s, v| s.notifications.ci_finished = v)),
-                    row("n_review", "settings.n_review", None, Control::Toggle(|s| s.notifications.reviews, |s, v| s.notifications.reviews = v)),
-                    row("n_behind", "settings.n_behind", None, Control::Toggle(|s| s.notifications.branch_behind, |s, v| s.notifications.branch_behind = v)),
-                    row("n_fetch", "settings.n_fetch", None, Control::Toggle(|s| s.notifications.fetch_found_commits, |s, v| s.notifications.fetch_found_commits = v)),
-                    row("n_sound", "settings.n_sound", None, Control::Toggle(|s| s.notifications.sound, |s, v| s.notifications.sound = v)),
-                ],
-            }],
+            groups: vec![
+                Group {
+                    label: "settings.group.notify_github",
+                    rows: vec![
+                        row("n_desktop", "settings.n_desktop", Some("settings.n_desktop_desc"), Control::Toggle(|s| s.notifications.desktop, |s, v| s.notifications.desktop = v)),
+                        RowDef { visible: Some(|s| s.notifications.desktop), ..row("n_requests", "settings.n_requests", None, Control::Toggle(|s| s.notifications.review_requests, |s, v| s.notifications.review_requests = v)) },
+                        RowDef { visible: Some(|s| s.notifications.desktop), ..row("n_mentions", "settings.n_mentions", Some("settings.n_mentions_desc"), Control::Toggle(|s| s.notifications.mentions, |s, v| s.notifications.mentions = v)) },
+                        RowDef { visible: Some(|s| s.notifications.desktop), ..row("n_states", "settings.n_states", None, Control::Toggle(|s| s.notifications.state_changes, |s, v| s.notifications.state_changes = v)) },
+                        RowDef { visible: Some(|s| s.notifications.desktop), ..row("n_test", "settings.test_notification", Some("settings.test_notification_desc"), Control::TestNotification) },
+                    ],
+                },
+                Group {
+                    label: "settings.group.notify_when",
+                    rows: vec![
+                        row("n_ci", "settings.n_ci", None, Control::Toggle(|s| s.notifications.ci_finished, |s, v| s.notifications.ci_finished = v)),
+                        row("n_review", "settings.n_review", None, Control::Toggle(|s| s.notifications.reviews, |s, v| s.notifications.reviews = v)),
+                        row("n_behind", "settings.n_behind", None, Control::Toggle(|s| s.notifications.branch_behind, |s, v| s.notifications.branch_behind = v)),
+                        row("n_fetch", "settings.n_fetch", None, Control::Toggle(|s| s.notifications.fetch_found_commits, |s, v| s.notifications.fetch_found_commits = v)),
+                        row("n_sound", "settings.n_sound", None, Control::Toggle(|s| s.notifications.sound, |s, v| s.notifications.sound = v)),
+                    ],
+                },
+            ],
         },
         Category {
             id: "performance",
@@ -831,6 +849,13 @@ impl SettingsPanel {
                     .children(status)
                     .into_any_element()
             }
+            Control::TestNotification => crate::widgets::framed(Button::new("test-notification"), crate::widgets::Tone::Plain, cx)
+                .icon(icon(IconName::BellRing))
+                .label(tr("settings.test_notification_button"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.app.update(cx, |a, cx| a.test_notification(window, cx));
+                }))
+                .into_any_element(),
             Control::Secret(name) => {
                 let Some(input) = self.secrets.get(name).cloned() else { return div().into_any_element() };
                 let status = self.secret_status.get(name).cloned();
@@ -950,7 +975,7 @@ fn is_modified(r: &RowDef, a: &Settings, defaults: &Settings) -> bool {
         Control::Choice(_, get, _) => get(a) != get(defaults),
         Control::Number(get, _, _, _, _, _) => (get(a) - get(defaults)).abs() > f64::EPSILON,
         Control::Text(get, _) | Control::LongText(get, _) => get(a) != get(defaults),
-        Control::Secret(_) | Control::TestAi | Control::CheckUpdates => false,
+        Control::Secret(_) | Control::TestAi | Control::CheckUpdates | Control::TestNotification => false,
     }
 }
 
@@ -962,7 +987,7 @@ fn reset_row(r: &RowDef, s: &mut Settings) {
         Control::Choice(_, get, set) => set(s, get(&d)),
         Control::Number(get, set, ..) => set(s, get(&d)),
         Control::Text(get, set) | Control::LongText(get, set) => set(s, get(&d)),
-        Control::Secret(_) | Control::TestAi | Control::CheckUpdates => {}
+        Control::Secret(_) | Control::TestAi | Control::CheckUpdates | Control::TestNotification => {}
     }
 }
 

@@ -106,6 +106,13 @@ branches.
   the file itself.
 - **Browse any commit.** Look through the files of any commit, branch or tag and save a file as
   it was then.
+- **Search commits.** Find commits by message, author, changed file or folder, date, and the code
+  they added or removed, so you can see when something appeared or disappeared.
+- **Auto-saved work.** Every few minutes Cairn keeps a hidden copy of your uncommitted changes.
+  After a crash or a bad discard, bring them back from Lost & found.
+- **A second look before you commit.** `.env` files, private keys, credentials and big files get
+  flagged before they go into a commit, with one-click fixes: leave the file out, add it to
+  `.gitignore` or store it with Git LFS.
 - **Conflicts before they happen.** Cairn checks quietly in the background whether your branches
   and open pull requests would conflict with `main`, and names the files.
 
@@ -130,6 +137,19 @@ with a warning for any that still hold unmerged work.</td>
 
 <img src="docs/screenshots/dark/coauthors.png" alt="Add co-authors to a commit" width="100%">
 
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/search.png" alt="Search commits"></td>
+<td width="50%"><img src="docs/screenshots/dark/autosave.png" alt="Auto-saved work in Lost & found"></td>
+</tr>
+<tr>
+<td><b>Search commits.</b> By message, author, file, date, or the code a commit added or removed.</td>
+<td><b>Auto-saved work.</b> Hidden copies of your uncommitted changes, ready to bring back.</td>
+</tr>
+</table>
+
+<img src="docs/screenshots/dark/file-guard.png" alt="Private and big files flagged before a commit" width="100%">
+
 ### Pull requests, submodules and large files
 
 <img src="docs/screenshots/dark/pull-requests.png" alt="Pull request ready to merge" width="100%">
@@ -140,7 +160,13 @@ with a warning for any that still hold unmerged work.</td>
   on a line, approve or request changes, check it out locally and merge it. Uses the GitHub CLI.
 - **Open pull requests from Cairn.** Pick the base branch, reviewers and labels, and let AI write
   the title and description from your commits. Branches that were never pushed are published
-  for you.
+  for you. Cairn suggests reviewers: the people who last worked on the files you changed.
+- **Update branch.** When a pull request falls behind its base, bring it up to date with a merge
+  or a rebase in one click.
+- **Issues.** Read, filter, comment on, assign, close and reopen issues, open new ones, see the
+  pull requests and branches linked to each, and start a branch for one.
+- **GitHub notifications.** Review requests, mentions, CI results and merged pull requests show
+  up as Windows notifications. Click one to open it in Cairn.
 - **AI review.** One click and your AI provider reads the whole pull request and drafts review comments on
   the exact lines. Untick what you don't want to say and post the rest as one review.
 - **Branches from issues.** Pick an open issue and get a branch named after it, linked to the
@@ -169,6 +195,19 @@ with a warning for any that still hold unmerged work.</td>
 workflow runs and an AI explanation of what broke.</td>
 <td><b>Releases.</b> The next version is suggested for you, the notes come from merged pull
 requests or AI, and one click publishes it.</td>
+</tr>
+</table>
+
+<img src="docs/screenshots/dark/issues.png" alt="Issues" width="100%">
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/reviewers.png" alt="Suggested reviewers"></td>
+<td width="50%"><img src="docs/screenshots/dark/update-branch.png" alt="Update a pull request branch"></td>
+</tr>
+<tr>
+<td><b>Suggested reviewers.</b> The people who last worked on the files you changed come first.</td>
+<td><b>Update branch.</b> A pull request behind its base catches up with a merge or a rebase.</td>
 </tr>
 </table>
 

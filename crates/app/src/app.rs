@@ -87,6 +87,7 @@ impl CairnApp {
             false
         });
         crate::updater::start(window, cx);
+        crate::inbox::start(window, cx);
         crate::whats_new::show_after_update(&mut app, window, cx);
         cx.on_app_quit(|this, _| {
             let (status, mode) = (this.update.clone(), this.settings.updates.effective_mode());
@@ -179,6 +180,43 @@ impl CairnApp {
             Ok("issue_branch") => {
                 if let Some(tab) = self.active_tab() {
                     crate::issue_branch::open(tab, window, cx);
+                }
+            }
+            Ok("inbox") => {
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(3000)).await;
+                    let notice = |id: &str, kind, subject, title: &str, number| cairn_core::inbox::Notice { id: id.into(), kind, subject, title: title.into(), repo: "aurora/aurora".into(), number, updated: String::new() };
+                    let list = vec![
+                        notice("1", cairn_core::inbox::NoticeKind::ReviewRequested, cairn_core::inbox::Subject::PullRequest, "Refresh the forecast when the app resumes", Some(48)),
+                        notice("2", cairn_core::inbox::NoticeKind::Ci, cairn_core::inbox::Subject::Workflow, "CI workflow run failed for fix/units-toggle branch", None),
+                    ];
+                    let _ = this.update_in(cx, |_, window, cx| crate::inbox::show(list, false, window, cx));
+                })
+                .detach();
+            }
+            Ok("guard") => {
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(3000)).await;
+                        let _ = cx.update(|window, cx| tab.update(cx, |v, cx| v.guarded_with(cairn_core::checks::Stage::Commit, false, |_, _, _| {}, window, cx)));
+                    })
+                    .detach();
+                }
+            }
+            Ok("search") => {
+                if let Some(tab) = self.active_tab() {
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                        let _ = cx.update(|window, cx| {
+                            tab.update(cx, |v, cx| {
+                                if let Ok(code) = std::env::var("CAIRN_DEBUG_SEARCH_CODE") {
+                                    v.search_page.code.update(cx, |s, cx| s.set_value(code, window, cx));
+                                }
+                                v.open_search(std::env::var("CAIRN_DEBUG_SEARCH").unwrap_or_default(), window, cx);
+                            })
+                        });
+                    })
+                    .detach();
                 }
             }
             Ok(kind @ ("force_push" | "reset_hard")) => {

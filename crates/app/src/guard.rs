@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use cairn_core::checks::{self, CheckResult, CheckStatus, SecretFinding, Stage};
+use cairn_core::checks::{self, CheckResult, CheckStatus, FileFinding, FileRisk, SecretFinding, SensitiveKind, Stage};
 use cairn_core::settings::{ChecksWhen, Settings};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -14,6 +14,7 @@ use crate::widgets::{badge, hstack, icon, spacer, tr};
 pub(crate) struct Report {
     pub results: Vec<CheckResult>,
     pub secrets: Vec<SecretFinding>,
+    pub files: Vec<FileFinding>,
 }
 
 impl Report {
@@ -22,7 +23,70 @@ impl Report {
     }
 
     fn clean(&self) -> bool {
-        self.results.iter().all(|r| r.status == CheckStatus::Passed) && self.secrets.is_empty()
+        self.results.iter().all(|r| r.status == CheckStatus::Passed) && self.secrets.is_empty() && self.files.is_empty()
+    }
+}
+
+fn guards_files(settings: &Settings, stage: Stage) -> bool {
+    stage == Stage::Commit && settings.checks.file_guard
+}
+
+fn risk_title(risk: FileRisk) -> String {
+    match risk {
+        FileRisk::Sensitive(SensitiveKind::EnvFile) => tr("guard.file_env").to_string(),
+        FileRisk::Sensitive(SensitiveKind::PrivateKey) => tr("guard.file_key").to_string(),
+        FileRisk::Sensitive(SensitiveKind::SshKey) => tr("guard.file_ssh").to_string(),
+        FileRisk::Sensitive(SensitiveKind::Credentials) => tr("guard.file_credentials").to_string(),
+        FileRisk::Sensitive(SensitiveKind::TerraformState) => tr("guard.file_tfstate").to_string(),
+        FileRisk::Large(size) => rust_i18n::t!("guard.file_large", size = crate::widgets::human_size(size)).to_string(),
+    }
+}
+
+fn ignore_pattern(f: &FileFinding) -> String {
+    match f.risk {
+        FileRisk::Sensitive(SensitiveKind::EnvFile) => f.path.rsplit('/').next().unwrap_or(&f.path).to_string(),
+        _ => format!("/{}", f.path),
+    }
+}
+
+fn lfs_pattern(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => format!("*.{ext}"),
+        _ => path.to_string(),
+    }
+}
+
+/// What a fix button in the guard dialog does with a file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileFix {
+    LeaveOut,
+    Ignore,
+    Lfs,
+    Fine,
+}
+
+fn apply_fix(git: &cairn_core::Git, f: &FileFinding, fix: FileFix) -> cairn_core::Result<String> {
+    match fix {
+        FileFix::LeaveOut => cairn_core::ops::unstage_files(git, std::slice::from_ref(&f.path)).map(|_| rust_i18n::t!("guard.left_out", path = f.path.clone()).to_string()),
+        FileFix::Ignore => {
+            if f.staged {
+                git.run(["rm", "--cached", "-q", "--", f.path.as_str()])?;
+            }
+            let pattern = ignore_pattern(f);
+            cairn_core::ignore::add(git.dir(), &pattern)?;
+            Ok(rust_i18n::t!("actions.ignored", pattern = pattern).to_string())
+        }
+        FileFix::Lfs => {
+            let pattern = lfs_pattern(&f.path);
+            cairn_core::lfs::track(git, &pattern)?;
+            git.run(["add", "--", ".gitattributes"])?;
+            if f.staged {
+                git.run(["add", "--renormalize", "--", f.path.as_str()])?;
+            }
+            Ok(rust_i18n::t!("guard.lfs_tracked", pattern = pattern).to_string())
+        }
+        FileFix::Fine => checks::allow(git, &f.fingerprint).map(|_| String::new()),
     }
 }
 
@@ -35,11 +99,12 @@ pub(crate) fn should_run(settings: &Settings, stage: Stage) -> bool {
     }
 }
 
-pub(crate) fn run(git: &cairn_core::Git, settings: &Settings, stage: Stage, upstream: Option<&str>) -> Report {
-    let defs = checks::load(git, &settings.checks.config_file).unwrap_or_default();
+pub(crate) fn run(git: &cairn_core::Git, settings: &Settings, stage: Stage, upstream: Option<&str>, all_files: bool) -> Report {
+    let full = should_run(settings, stage);
+    let defs = if full { checks::load(git, &settings.checks.config_file).unwrap_or_default() } else { Vec::new() };
     let timeout = Duration::from_secs(u64::from(settings.checks.timeout_seconds.max(5)));
     let results = defs.iter().filter(|d| d.on.contains(&stage)).map(|d| checks::run_check(git, d, timeout)).collect();
-    let secrets = if settings.checks.secret_scan {
+    let secrets = if full && settings.checks.secret_scan {
         match stage {
             Stage::Commit => checks::scan_staged(git).unwrap_or_default(),
             Stage::Push => checks::scan_push(git, upstream).unwrap_or_default(),
@@ -47,7 +112,8 @@ pub(crate) fn run(git: &cairn_core::Git, settings: &Settings, stage: Stage, upst
     } else {
         Vec::new()
     };
-    Report { results, secrets }
+    let files = if guards_files(settings, stage) { checks::scan_files(git, u64::from(settings.checks.large_file_mb.max(1)) * 1024 * 1024, all_files).unwrap_or_default() } else { Vec::new() };
+    Report { results, secrets, files }
 }
 
 impl RepoView {
@@ -55,7 +121,20 @@ impl RepoView {
     where
         F: Fn(&mut RepoView, &mut Window, &mut Context<RepoView>) + 'static,
     {
-        if !should_run(&self.settings, stage) {
+        self.guarded_with(stage, false, then, window, cx);
+    }
+
+    /// Runs the checks for a commit or push, then `then` once they pass or the user goes on.
+    ///
+    /// # Arguments
+    /// * `stage` - commit or push
+    /// * `all_files` - the commit will stage every change first, so look at unstaged files too
+    /// * `then` - what to run afterwards
+    pub(crate) fn guarded_with<F>(&mut self, stage: Stage, all_files: bool, then: F, window: &mut Window, cx: &mut Context<Self>)
+    where
+        F: Fn(&mut RepoView, &mut Window, &mut Context<RepoView>) + 'static,
+    {
+        if !should_run(&self.settings, stage) && !guards_files(&self.settings, stage) {
             then(self, window, cx);
             return;
         }
@@ -66,7 +145,7 @@ impl RepoView {
         cx.notify();
         let task = cx.spawn_in(window, async move |this, cx| {
             let s2 = settings.clone();
-            let report = cx.background_executor().spawn(async move { run(&git, &s2, stage, upstream.as_deref()) }).await;
+            let report = cx.background_executor().spawn(async move { run(&git, &s2, stage, upstream.as_deref(), all_files) }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 if report.clean() {
@@ -87,9 +166,57 @@ fn open_report(view: Entity<RepoView>, report: Report, settings: Settings, stage
     let blocking = report.blocking(&settings);
     let results = report.results;
     let secrets = std::rc::Rc::new(std::cell::RefCell::new(report.secrets));
+    let files = std::rc::Rc::new(std::cell::RefCell::new(report.files));
     window.open_dialog(cx, move |dialog, _, cx| {
         let theme = cx.theme().clone();
         let mut list = v_flex().gap_2();
+        for (i, f) in files.borrow().iter().enumerate() {
+            let large = matches!(f.risk, FileRisk::Large(_));
+            let fix = |id: &'static str, label: SharedString, kind: FileFix| {
+                let (view, files, f) = (view.clone(), files.clone(), f.clone());
+                Button::new((id, i)).xsmall().ghost().label(label).on_click(move |_, window, cx| {
+                    let git = view.read(cx).git();
+                    match apply_fix(&git, &f, kind) {
+                        Ok(msg) => {
+                            files.borrow_mut().retain(|x| x.path != f.path);
+                            if !msg.is_empty() {
+                                window.push_notification(gpui_kit::component::notification::Notification::success(msg), cx);
+                            }
+                            view.update(cx, |v, cx| v.reload(cx));
+                        }
+                        Err(e) => window.push_notification(gpui_kit::component::notification::Notification::error(crate::repo_view::friendly_error(&e)), cx),
+                    }
+                    window.refresh();
+                })
+            };
+            let color = if large { theme.yellow } else { theme.red };
+            list = list.child(
+                v_flex()
+                    .gap_1p5()
+                    .p_2()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(color.opacity(0.6))
+                    .child(
+                        hstack()
+                            .gap_2()
+                            .child(icon(if large { IconName::HardDrive } else { IconName::FileLock }).small().text_color(color))
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(risk_title(f.risk)))
+                            .child(div().min_w_0().truncate().text_xs().font_family(theme.mono_font_family.clone()).text_color(theme.link).child(f.path.clone())),
+                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(if large { tr("guard.file_large_body") } else { tr("guard.file_private_body") }))
+                    .child(
+                        hstack()
+                            .gap_1()
+                            .flex_wrap()
+                            .child(spacer())
+                            .when(f.staged, |d| d.child(fix("file-leave", tr("guard.leave_out"), FileFix::LeaveOut)))
+                            .when(f.new, |d| d.child(fix("file-ignore", tr("guard.add_ignore"), FileFix::Ignore)))
+                            .when(large, |d| d.child(fix("file-lfs", tr("guard.use_lfs"), FileFix::Lfs)))
+                            .child(fix("file-fine", tr("guard.file_fine"), FileFix::Fine)),
+                    ),
+            );
+        }
         for r in &results {
             let (label, color) = match r.status {
                 CheckStatus::Passed => (tr("guard.passed"), theme.green),
@@ -136,7 +263,13 @@ fn open_report(view: Entity<RepoView>, report: Report, settings: Settings, stage
         dialog
             .title(title)
             .w(px(640.))
-            .child(v_flex().gap_3().child(div().text_sm().text_color(theme.muted_foreground).child(if still_blocked { tr("guard.blocked") } else { tr("guard.warnings") })).child(div().id("guard-list").max_h(px(420.)).overflow_y_scroll().child(list)))
+            .child(v_flex().gap_3().child(div().text_sm().text_color(theme.muted_foreground).child(if still_blocked {
+                tr("guard.blocked")
+            } else if results.is_empty() && secrets.borrow().is_empty() {
+                tr("guard.files_only")
+            } else {
+                tr("guard.warnings")
+            })).child(div().id("guard-list").max_h(px(420.)).overflow_y_scroll().child(list)))
             .footer(
                 h_flex()
                     .w_full()

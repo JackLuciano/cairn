@@ -10,6 +10,7 @@ mod coauthors;
 mod guard;
 mod gravatar;
 mod home;
+mod inbox;
 mod live_op;
 mod pages;
 mod palette;
@@ -50,7 +51,9 @@ fn main() {
     let locale = platform::resolve_language(settings.general.language).code();
     rust_i18n::set_locale(locale);
 
+    let app_id = platform::app_user_model_id();
     gpui_kit::application().with_assets(AllAssets).run(move |cx| {
+        cx.set_app_identity(&app_id, "Cairn");
         let _ = cx.text_system().add_fonts(vec![
             std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
             std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),

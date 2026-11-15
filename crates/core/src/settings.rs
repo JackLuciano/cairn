@@ -515,6 +515,11 @@ pub struct Checks {
     pub snapshots: bool,
     pub undo_days: u32,
     pub protect_main: bool,
+    pub file_guard: bool,
+    pub large_file_mb: u32,
+    pub autosave: bool,
+    pub autosave_minutes: u32,
+    pub autosave_days: u32,
 }
 
 impl Default for Checks {
@@ -528,6 +533,11 @@ impl Default for Checks {
             snapshots: true,
             undo_days: 30,
             protect_main: true,
+            file_guard: true,
+            large_file_mb: 50,
+            autosave: true,
+            autosave_minutes: 5,
+            autosave_days: 7,
         }
     }
 }
@@ -555,11 +565,15 @@ pub struct Notifications {
     pub branch_behind: bool,
     pub fetch_found_commits: bool,
     pub sound: bool,
+    pub desktop: bool,
+    pub review_requests: bool,
+    pub mentions: bool,
+    pub state_changes: bool,
 }
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { ci_finished: true, reviews: true, branch_behind: false, fetch_found_commits: false, sound: false }
+        Self { ci_finished: true, reviews: true, branch_behind: false, fetch_found_commits: false, sound: false, desktop: true, review_requests: true, mentions: true, state_changes: true }
     }
 }
 

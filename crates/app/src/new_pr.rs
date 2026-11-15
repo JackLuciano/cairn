@@ -26,6 +26,7 @@ pub(crate) struct NewPrPanel {
     draft: bool,
     commits: Vec<String>,
     people: Vec<String>,
+    suggested: Vec<(String, usize)>,
     reviewers: Vec<String>,
     labels_all: Vec<String>,
     labels: Vec<String>,
@@ -46,23 +47,30 @@ impl NewPrPanel {
         let base = self.base.clone();
         self.loading = true;
         cx.spawn(async move |this, cx| {
-            let (commits, people, labels) = cx
+            let (commits, mut people, suggested, labels) = cx
                 .background_executor()
                 .spawn(async move {
-                    let range = format!("{}..{head}", remote_base(&git, &base));
+                    let from = remote_base(&git, &base);
+                    let range = format!("{from}..{head}");
                     let commits: Vec<String> = git.run(["log", "--reverse", "--format=%s", &range]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
                     if mock {
                         let people = ["kai", "noor", "sam", "alex"].map(String::from).to_vec();
                         let labels = ["bug", "enhancement", "offline", "ui"].map(String::from).to_vec();
-                        return (commits, people, labels);
+                        return (commits, people, vec![("kai".to_string(), 3), ("noor".to_string(), 1)], labels);
                     }
-                    (commits, stack::reviewer_candidates(&git), stack::repo_labels(&git))
+                    let files: Vec<String> = git.run(["diff", "--name-only", "--no-renames", &format!("{from}...{head}")]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
+                    (commits, stack::reviewer_candidates(&git), stack::suggest_reviewers(&git, &base, &files), stack::repo_labels(&git))
                 })
                 .await;
+            for (login, _) in suggested.iter().rev() {
+                people.retain(|p| p != login);
+                people.insert(0, login.clone());
+            }
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 this.commits = commits;
                 this.people = people;
+                this.suggested = suggested;
                 this.labels_all = labels;
                 cx.notify();
             });
@@ -175,6 +183,43 @@ impl NewPrPanel {
         }
         row
     }
+
+    fn suggestions(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme().clone();
+        let mut row = h_flex().flex_wrap().gap_1p5().child(hstack().gap_1().text_xs().text_color(theme.muted_foreground).child(icon(IconName::Users).xsmall()).child(tr("new_pr.suggested")));
+        for (i, (login, files)) in self.suggested.iter().enumerate() {
+            let on = self.reviewers.contains(login);
+            let n = login.clone();
+            row = row.child(
+                hstack()
+                    .id(("np-suggest", i))
+                    .gap_1p5()
+                    .pl_1()
+                    .pr_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if on { theme.primary.opacity(0.6) } else { theme.border })
+                    .when(on, |d| d.bg(theme.primary.opacity(0.12)))
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(avatar(login, px(18.), cx))
+                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(login.clone()))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(crate::widgets::plural("new_pr.touched", *files)))
+                    .when(on, |d| d.child(icon(IconName::Check).xsmall().text_color(theme.primary)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match this.reviewers.iter().position(|x| *x == n) {
+                            Some(p) => {
+                                this.reviewers.remove(p);
+                            }
+                            None => this.reviewers.push(n.clone()),
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
 }
 
 /// The ref the new pull request is compared against locally: the remote copy of the base when
@@ -255,6 +300,7 @@ impl Render for NewPrPanel {
                 v_flex()
                     .gap_1p5()
                     .child(label(tr("new_pr.reviewers"), cx))
+                    .when(!self.suggested.is_empty(), |d| d.child(self.suggestions(cx)))
                     .child(if self.people.is_empty() { div().text_xs().text_color(theme.muted_foreground).child(if self.loading { tr("new_pr.loading_people") } else { tr("new_pr.no_people") }).into_any_element() } else { self.chips("rev", &self.people.clone(), &self.reviewers.clone(), cx).into_any_element() }),
             )
             .when(!self.labels_all.is_empty(), |d| d.child(v_flex().gap_1p5().child(label(tr("new_pr.labels"), cx)).child(self.chips("lab", &self.labels_all.clone(), &self.labels.clone(), cx))))
@@ -343,6 +389,7 @@ fn open_now(repo: Entity<RepoView>, chosen: Option<String>, window: &mut Window,
             draft,
             commits: Vec::new(),
             people: Vec::new(),
+            suggested: Vec::new(),
             reviewers: Vec::new(),
             labels_all: Vec::new(),
             labels: Vec::new(),

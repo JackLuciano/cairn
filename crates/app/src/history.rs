@@ -1131,6 +1131,10 @@ impl RepoView {
                                 })
                             })
                             .child(div().flex_1().min_w(px(120.)).max_w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
+                            .child(Button::new("history-deep-search").xsmall().ghost().icon(icon(IconName::SearchCode)).tooltip(tr("search.open_tip")).on_click(cx.listener(|this, _, window, cx| {
+                                let text = this.search.read(cx).value().to_string();
+                                this.open_search(text, window, cx);
+                            })))
                             .child(spacer())
                             .child(toggle_pill("toggle-graph", tr("history.graph"), self.show_graph, cx).on_click(cx.listener(|this, _, _, cx| {
                                 this.show_graph = !this.show_graph;

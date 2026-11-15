@@ -22,6 +22,20 @@ window after an update.
 - Rename and delete branches from the branch switcher and by right-clicking them in the sidebar.
 - Choose how updates arrive in Settings → Updates: automatically, ask before installing, or
   manually. A download shows its progress, and Cairn says when an update is ready or installing.
+- Issues page: read, filter, comment on, assign, close and reopen issues, open new ones, see the
+  pull requests and branches linked to each, and start a branch for one.
+- Search commits (Tools → Search commits, or the button next to the History search box): find
+  commits by message, author, file or folder, date, and the code they added or removed.
+- GitHub notifications as Windows notifications: review requests, mentions and replies, CI
+  results, and merged or closed pull requests. Click one to open it in Cairn. Choose which ones
+  in Settings → Notifications.
+- Cairn keeps a hidden copy of your uncommitted work every few minutes. Bring it back from
+  Lost & found → Auto-saved work. Change how often or turn it off in Settings → Checks & safety.
+- Before a commit, Cairn flags `.env` files, private keys, credentials and big files, with
+  one-click fixes: leave the file out, add it to `.gitignore`, or store it with Git LFS.
+- "Update branch" on a pull request that is behind its base, with a merge or a rebase.
+- The New pull request dialog suggests reviewers: the people who last worked on the files you
+  changed.
 
 ### Fixed
 

@@ -153,6 +153,86 @@ pub fn load_log(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
     Ok(parse_log(&out))
 }
 
+/// What to look for in a commit search. Empty fields are ignored; filled ones must all match.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitQuery {
+    pub message: String,
+    pub author: String,
+    pub path: String,
+    pub code: String,
+    pub code_regex: bool,
+    pub since: String,
+    pub until: String,
+    pub branch: Option<String>,
+    pub limit: usize,
+}
+
+impl CommitQuery {
+    /// Whether nothing was asked for.
+    ///
+    /// # Returns
+    /// `true` when every field is empty.
+    pub fn is_empty(&self) -> bool {
+        [&self.message, &self.author, &self.path, &self.code, &self.since, &self.until].iter().all(|s| s.trim().is_empty())
+    }
+}
+
+/// Searches every branch, or one, for commits by message, author, changed path, added or
+/// removed code, and date.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `q` - what to look for
+///
+/// # Returns
+/// Matching commits, newest first.
+pub fn search(git: &Git, q: &CommitQuery) -> Result<Vec<CommitInfo>> {
+    if q.is_empty() || !git.succeeds(["rev-parse", "--verify", "-q", "HEAD"]) {
+        return Ok(Vec::new());
+    }
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        "--date-order".into(),
+        "--decorate=full".into(),
+        "-i".into(),
+        format!("--format=%H{FIELD}%P{FIELD}%an{FIELD}%ae{FIELD}%at{FIELD}%s{FIELD}%D{RECORD}"),
+        format!("--max-count={}", if q.limit == 0 { 300 } else { q.limit }),
+    ];
+    if !q.message.trim().is_empty() {
+        args.push(format!("--grep={}", q.message.trim()));
+    }
+    if !q.author.trim().is_empty() {
+        args.push(format!("--author={}", q.author.trim()));
+    }
+    if !q.code.is_empty() {
+        args.push(if q.code_regex { format!("-G{}", q.code) } else { format!("-S{}", q.code) });
+    }
+    if !q.since.trim().is_empty() {
+        args.push(format!("--since={}", q.since.trim()));
+    }
+    if !q.until.trim().is_empty() {
+        args.push(format!("--until={}", q.until.trim()));
+    }
+    match &q.branch {
+        Some(b) => args.push(b.clone()),
+        None => {
+            args.push("--exclude=refs/stash".into());
+            args.push("--exclude=refs/cairn/*".into());
+            args.push("--all".into());
+        }
+    }
+    if !q.path.trim().is_empty() {
+        args.push("--".into());
+        let p = q.path.trim();
+        args.push(match (p.contains(['*', '?', '[']), p.contains('/')) {
+            (true, false) => format!(":(glob)**/{p}"),
+            (true, true) => format!(":(glob){p}"),
+            _ => p.to_string(),
+        });
+    }
+    Ok(parse_log(&git.run(&args)?))
+}
+
 /// Parses the record format produced by [`load_log`].
 ///
 /// # Arguments
@@ -449,6 +529,28 @@ mod tests {
         assert_eq!(log[0].refs[1].kind, RefKind::RemoteBranch);
         assert_eq!(log[0].refs[2].kind, RefKind::Tag);
         assert!(log[1].parents.is_empty());
+    }
+
+    #[test]
+    fn searches_by_code_author_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        git.run(["init", "-q"]).unwrap();
+        git.run(["config", "user.email", "ann@example.com"]).unwrap();
+        git.run(["config", "user.name", "Ann"]).unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn start() {}\n").unwrap();
+        git.run(["add", "."]).unwrap();
+        git.run(["commit", "-qm", "Add start"]).unwrap();
+        std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+        git.run(["add", "."]).unwrap();
+        git.run(["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-qm", "Write notes"]).unwrap();
+        let find = |q: CommitQuery| search(&git, &q).unwrap().into_iter().map(|c| c.summary).collect::<Vec<_>>();
+        assert_eq!(find(CommitQuery { code: "start()".into(), ..Default::default() }), vec!["Add start"]);
+        assert_eq!(find(CommitQuery { author: "bob".into(), ..Default::default() }), vec!["Write notes"]);
+        assert_eq!(find(CommitQuery { path: "*.rs".into(), ..Default::default() }), vec!["Add start"]);
+        assert_eq!(find(CommitQuery { message: "NOTES".into(), ..Default::default() }), vec!["Write notes"]);
+        assert!(find(CommitQuery::default()).is_empty());
     }
 
     #[test]

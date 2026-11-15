@@ -35,6 +35,27 @@ fn system_locale() -> Option<String> {
         .find(|locale| !locale.is_empty())
 }
 
+/// The id Windows groups Cairn's windows and notifications under: the one the installer gave
+/// the process, so pinned shortcuts keep matching, or Cairn's own id when run from a build.
+///
+/// # Returns
+/// The AppUserModelID.
+pub(crate) fn app_user_model_id() -> String {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::GetCurrentProcessExplicitAppUserModelID;
+        if let Ok(id) = unsafe { GetCurrentProcessExplicitAppUserModelID() } {
+            let text = unsafe { id.to_string() }.ok();
+            unsafe { CoTaskMemFree(Some(id.0 as *const _)) };
+            if let Some(text) = text.filter(|t| !t.is_empty()) {
+                return text;
+            }
+        }
+    }
+    "dev.cairn.app".into()
+}
+
 /// Opens a file or folder in the editor named in Settings → Tools.
 ///
 /// # Arguments
