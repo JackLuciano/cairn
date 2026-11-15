@@ -1131,7 +1131,13 @@ impl RepoView {
                                     d.child(Button::new("history-focus-clear").xsmall().ghost().icon(icon(IconName::X)).tooltip(tr("history.highlight_clear")).on_click(cx.listener(|this, _, _, cx| this.set_focus_branch(None, cx))))
                                 })
                             })
-                            .child(div().flex_1().min_w(px(200.)).max_w(px(520.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
+                            .child(
+                                div().flex_1().min_w(px(200.)).max_w(px(520.)).ml_2().child(
+                                    gpui_kit::component::input::Input::new(&self.search)
+                                        .prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))
+                                        .cleanable(true),
+                                ),
+                            )
                             .child(Button::new("history-deep-search").xsmall().ghost().icon(icon(IconName::SearchCode)).tooltip(tr("search.open_tip")).on_click(cx.listener(|this, _, window, cx| {
                                 let text = this.search.read(cx).value().to_string();
                                 this.open_search(text, window, cx);

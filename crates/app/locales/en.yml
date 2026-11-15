@@ -345,7 +345,7 @@ history:
   copy_list: "Copy with messages"
   copied_list: "Copied %{n} commits with their messages"
   copied_list_one: "Copied 1 commit with its message"
-  search_placeholder: "Search by commit message or hash"
+  search_placeholder: "Search by message, author, or hash"
   back: "Back"
   commit: "Commit"
   parents: "Parents"

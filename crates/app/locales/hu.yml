@@ -345,7 +345,7 @@ history:
   copy_list: "Másolás üzenetekkel"
   copied_list: "%{n} commit másolva az üzenetével"
   copied_list_one: "1 commit másolva az üzenetével"
-  search_placeholder: "Keresés commitüzenet vagy hash alapján"
+  search_placeholder: "Keresés üzenet, szerző vagy hash alapján"
   back: "Vissza"
   commit: "Commit"
   parents: "Szülők"

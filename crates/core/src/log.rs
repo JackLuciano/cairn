@@ -104,18 +104,33 @@ pub fn load_log(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
     load_log_with_fields(git, opts, "%an", "%ae", "%at")
 }
 
-/// Loads the graph and subjects without the author and date shown in each row.
+/// Loads the graph and subjects, with optional message, author or hash matching.
 pub fn load_log_index(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
-    let Some(hash) = opts.search.as_deref().filter(|s| (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())) else {
+    let Some(search) = opts.search.as_deref().filter(|search| !search.is_empty()) else {
         return load_log_with_fields(git, opts, "", "", "");
     };
-    let hash = hash.to_ascii_lowercase();
-    let matches = load_log_with_fields(git, opts, "", "", "")?.into_iter().map(|commit| commit.id).collect::<std::collections::HashSet<_>>();
-    let mut unfiltered = opts.clone();
-    unfiltered.search = None;
-    let mut commits = load_log_with_fields(git, &unfiltered, "", "", "")?;
-    commits.retain(|commit| commit.id.starts_with(&hash) || matches.contains(&commit.id));
-    Ok(commits)
+    let needle = search.to_lowercase();
+    let hash_search = (4..=64).contains(&search.len()) && search.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut query = LogOptions { limit: None, skip: 0, ..opts.clone() };
+    let message_matches = load_log_with_fields(git, &query, "", "", "")?.into_iter().map(|commit| commit.id).collect::<std::collections::HashSet<_>>();
+    query.search = None;
+    let commits = load_log_with_fields(git, &query, "%an", "%ae", "")?;
+    Ok(commits
+        .into_iter()
+        .filter(|commit| {
+            (hash_search && commit.id.starts_with(&needle))
+                || message_matches.contains(&commit.id)
+                || commit.author.to_lowercase().contains(&needle)
+                || commit.email.to_lowercase().contains(&needle)
+        })
+        .skip(opts.skip)
+        .take(opts.limit.unwrap_or(usize::MAX))
+        .map(|mut commit| {
+            commit.author = String::new();
+            commit.email = String::new();
+            commit
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug)]
@@ -601,19 +616,23 @@ mod tests {
         git.run(["commit", "--allow-empty", "-qm", "First commit"]).unwrap();
         let first = git.run(["rev-parse", "HEAD"]).unwrap().trim().to_string();
         let prefix = first[..10].to_ascii_uppercase();
-        git.run(["commit", "--allow-empty", "-qm", "Second commit", "-m", &prefix]).unwrap();
+        git.run(["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "--allow-empty", "-qm", "Second commit", "-m", &prefix]).unwrap();
         let opts = LogOptions { scope: LogScope::CurrentBranch, limit: None, ..Default::default() };
         let index = load_log_index(&git, &opts).unwrap();
         assert_eq!(index.len(), 2);
         assert_eq!(index[0].summary, "Second commit");
-        assert_eq!(index[0].parents, [first.clone()]);
+        assert_eq!(index[0].parents, std::slice::from_ref(&first));
         assert!(index.iter().all(|commit| commit.author.is_empty() && commit.time == 0));
         let hash_matches = load_log_index(&git, &LogOptions { search: Some(first.clone()), ..opts.clone() }).unwrap();
         assert_eq!(hash_matches.len(), 1);
         assert_eq!(hash_matches[0].id, first);
-        let prefix_matches = load_log_index(&git, &LogOptions { search: Some(prefix), ..opts }).unwrap();
+        let prefix_matches = load_log_index(&git, &LogOptions { search: Some(prefix), ..opts.clone() }).unwrap();
         assert_eq!(prefix_matches, index);
-        let rows = load_log_rows(&git, &[first.clone()]).unwrap();
+        let by_author = |query: &str| load_log_index(&git, &LogOptions { search: Some(query.into()), ..opts.clone() }).unwrap();
+        assert_eq!(by_author("ANN"), index[1..]);
+        assert_eq!(by_author("BOB@EXAMPLE.COM"), index[..1]);
+        assert_eq!(by_author("@example.com"), index);
+        let rows = load_log_rows(&git, std::slice::from_ref(&first)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, first);
         assert_eq!(rows[0].1.author, "Ann");

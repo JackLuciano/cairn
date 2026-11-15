@@ -7,6 +7,9 @@ window after an update.
 
 ### Added
 
+- History shows the total commit count and lets you drag the scrollbar anywhere in the list.
+  Row details load as you scroll. Search by commit message, author name, email, or hash,
+  and use the × in the search field to clear the filter.
 - Opt in to Gravatar photos for commit authors in Settings → Appearance.
   History shows initials when Gravatar is off or no image is available.
   Cached images are available offline and refresh in the background after 24 hours.
