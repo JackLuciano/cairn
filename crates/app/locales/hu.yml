@@ -294,7 +294,7 @@ undo:
 
 history:
   this_branch: "Ez az ág"
-  loading_more: "Régebbi commitok betöltése…"
+  loading_more: "Commitelőzmények betöltése…"
   col_branch: "Ág"
   card_merge: "Merge"
   card_off_branch: "Nincs ezen az ágon"
@@ -345,7 +345,7 @@ history:
   copy_list: "Másolás üzenetekkel"
   copied_list: "%{n} commit másolva az üzenetével"
   copied_list_one: "1 commit másolva az üzenetével"
-  search_placeholder: "Keresés a commit üzenetekben"
+  search_placeholder: "Keresés commitüzenet vagy hash alapján"
   back: "Vissza"
   commit: "Commit"
   parents: "Szülők"
