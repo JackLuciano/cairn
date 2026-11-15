@@ -299,7 +299,7 @@ undo:
 
 history:
   this_branch: "This branch"
-  loading_more: "Loading older commits…"
+  loading_more: "Loading commit history…"
   col_branch: "Branch"
   card_merge: "Merge"
   card_off_branch: "Not on this branch"
@@ -350,7 +350,7 @@ history:
   copy_list: "Copy with messages"
   copied_list: "Copied %{n} commits with their messages"
   copied_list_one: "Copied 1 commit with its message"
-  search_placeholder: "Search commit messages"
+  search_placeholder: "Search by message, author, or hash"
   back: "Back"
   commit: "Commit"
   parents: "Parents"

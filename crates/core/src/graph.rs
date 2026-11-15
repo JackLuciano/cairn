@@ -194,6 +194,15 @@ pub fn layout(commits: &[CommitInfo]) -> Vec<GraphRow> {
 /// # Returns
 /// One row per commit, in the same order.
 pub fn layout_focused(commits: &[CommitInfo], hot: Option<&[bool]>, palette: Option<&[usize]>) -> Vec<GraphRow> {
+    layout_rows(commits, hot, palette, true)
+}
+
+/// Draws the links between commits present in the filtered results.
+pub fn layout_filtered(commits: &[CommitInfo]) -> Vec<GraphRow> {
+    layout_rows(commits, None, None, false)
+}
+
+fn layout_rows(commits: &[CommitInfo], hot: Option<&[bool]>, palette: Option<&[usize]>, continue_missing_first_parent: bool) -> Vec<GraphRow> {
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut colors: Vec<usize> = Vec::new();
     let mut lane_hot: Vec<bool> = Vec::new();
@@ -261,7 +270,7 @@ pub fn layout_focused(commits: &[CommitInfo], hot: Option<&[bool]>, palette: Opt
         }
 
         for (n, parent) in commit.parents.iter().enumerate() {
-            if !known.contains_key(parent.as_str()) && n > 0 {
+            if !known.contains_key(parent.as_str()) && (n > 0 || !continue_missing_first_parent) {
                 continue;
             }
             if n == 0
@@ -328,6 +337,18 @@ mod tests {
         let rows = layout(&[c("c", &["b"]), c("b", &["a"]), c("a", &[])]);
         assert!(rows.iter().all(|r| r.lane == 0));
         assert_eq!(rows[2].lines.len(), 1);
+    }
+
+    #[test]
+    fn filtered_history_uses_lanes_only_for_visible_parent_links() {
+        let commits = [c("d", &["hidden-1"]), c("c", &["b"]), c("b", &["hidden-2"]), c("a", &[])];
+        let rows = layout_filtered(&commits);
+        assert!(rows.iter().all(|row| row.width == 1));
+        assert!(rows[0].lines.is_empty());
+        assert_eq!(rows[1].lines[0].part, LinePart::Bottom);
+        assert_eq!(rows[2].lines.len(), 1);
+        assert_eq!(rows[2].lines[0].part, LinePart::Top);
+        assert!(rows[3].lines.is_empty());
     }
 
     #[test]

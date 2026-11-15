@@ -110,6 +110,26 @@ fn diff_body(k: Ink, cx: &App) -> Div {
 pub(crate) fn history(avatars: bool, cx: &App) -> AnimationElement<Div> {
     let t = cx.theme();
     let k = Ink::new(cx);
+    pulse(
+        "skeleton-history",
+        h_flex()
+            .size_full()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(h_flex().px_4().py(px(10.)).gap_2().border_b_1().border_color(t.border).child(k.bar(px(190.), 30.)).child(k.bar(px(360.), 28.)))
+                    .child(h_flex().h(px(30.)).pl_3().pr_4().gap(px(10.)).border_b_1().border_color(t.border.opacity(0.6)).child(k.bar(px(44.), 8.)).child(k.bar(px(80.), 8.)))
+                    .child(history_rows(avatars, cx)),
+            )
+            .child(div().flex_none().w(px(380.)).h_full().border_l_1().border_color(t.border).bg(t.sidebar).child(details_body(k))),
+    )
+}
+
+pub(crate) fn history_rows(avatars: bool, cx: &App) -> Div {
+    let t = cx.theme();
+    let k = Ink::new(cx);
     let row_h = crate::history::ROW_H;
     let mut rows = v_flex().flex_1().min_h_0().overflow_hidden();
     for i in 0..18 {
@@ -140,21 +160,11 @@ pub(crate) fn history(avatars: bool, cx: &App) -> AnimationElement<Div> {
                 .child(k.bar(px(52.), 9.)),
         );
     }
-    pulse(
-        "skeleton-history",
-        h_flex()
-            .size_full()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(h_flex().px_4().py(px(10.)).gap_2().border_b_1().border_color(t.border).child(k.bar(px(190.), 30.)).child(k.bar(px(80.), 12.)).child(k.bar(px(220.), 28.)))
-                    .child(h_flex().h(px(30.)).pl_3().pr_4().gap(px(10.)).border_b_1().border_color(t.border.opacity(0.6)).child(k.bar(px(44.), 8.)).child(k.bar(px(80.), 8.)))
-                    .child(rows),
-            )
-            .child(div().flex_none().w(px(380.)).h_full().border_l_1().border_color(t.border).bg(t.sidebar).child(details_body(k))),
-    )
+    rows
+}
+
+pub(crate) fn history_cell(width: f32, cx: &App) -> Div {
+    Ink::new(cx).bar(px(width), 8.)
 }
 
 /// Placeholder for the message and changed files of a commit's hover card.

@@ -62,10 +62,10 @@ pub enum LogScope {
 }
 
 /// Options for loading history.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogOptions {
     pub scope: LogScope,
-    pub limit: usize,
+    pub limit: Option<usize>,
     pub skip: usize,
     pub first_parent: bool,
     pub include_remotes: bool,
@@ -78,7 +78,7 @@ impl Default for LogOptions {
     fn default() -> Self {
         Self {
             scope: LogScope::AllRefs,
-            limit: 500,
+            limit: Some(500),
             skip: 0,
             first_parent: false,
             include_remotes: true,
@@ -101,6 +101,57 @@ const RECORD: char = '\u{1e}';
 /// # Returns
 /// Commits newest first, or an empty list for a repository with no commits.
 pub fn load_log(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
+    load_log_with_fields(git, opts, "%an", "%ae", "%at")
+}
+
+/// Loads the graph and subjects, with optional message, author or hash matching.
+pub fn load_log_index(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
+    let Some(search) = opts.search.as_deref().filter(|search| !search.is_empty()) else {
+        return load_log_with_fields(git, opts, "", "", "");
+    };
+    let needle = search.to_lowercase();
+    let hash_search = (4..=64).contains(&search.len()) && search.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut query = LogOptions { limit: None, skip: 0, ..opts.clone() };
+    let message_matches = load_log_with_fields(git, &query, "", "", "")?.into_iter().map(|commit| commit.id).collect::<std::collections::HashSet<_>>();
+    query.search = None;
+    let commits = load_log_with_fields(git, &query, "%an", "%ae", "")?;
+    Ok(commits
+        .into_iter()
+        .filter(|commit| {
+            (hash_search && commit.id.starts_with(&needle))
+                || message_matches.contains(&commit.id)
+                || commit.author.to_lowercase().contains(&needle)
+                || commit.email.to_lowercase().contains(&needle)
+        })
+        .skip(opts.skip)
+        .take(opts.limit.unwrap_or(usize::MAX))
+        .map(|mut commit| {
+            commit.author = String::new();
+            commit.email = String::new();
+            commit
+        })
+        .collect())
+}
+
+#[derive(Clone, Debug)]
+pub struct CommitRowDetails {
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+}
+
+/// Loads the author and date for a window of commit IDs from the graph index.
+pub fn load_log_rows(git: &Git, ids: &[String]) -> Result<Vec<(String, CommitRowDetails)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let format = format!("--format=%H{FIELD}{FIELD}%an{FIELD}%ae{FIELD}%at{RECORD}");
+    let input = ids.join("\n") + "\n";
+    let out = git.run_with_input(["log", "--no-walk=unsorted", "--stdin", "--no-patch", "--no-decorate", "--no-notes", &format], input.as_bytes())?;
+    Ok(parse_log(&out).into_iter().map(|c| (c.id, CommitRowDetails { author: c.author, email: c.email, time: c.time })).collect())
+}
+
+fn load_log_with_fields(git: &Git, opts: &LogOptions, author: &str, email: &str, time: &str) -> Result<Vec<CommitInfo>> {
     if !git.succeeds(["rev-parse", "--verify", "-q", "HEAD"]) && opts.scope == LogScope::CurrentBranch {
         return Ok(Vec::new());
     }
@@ -109,10 +160,12 @@ pub fn load_log(git: &Git, opts: &LogOptions) -> Result<Vec<CommitInfo>> {
         "--topo-order".into(),
         "--date-order".into(),
         "--decorate=full".into(),
-        format!("--format=%H{FIELD}%P{FIELD}%an{FIELD}%ae{FIELD}%at{FIELD}%s{FIELD}%D{RECORD}"),
-        format!("--max-count={}", opts.limit),
+        format!("--format=%H{FIELD}%P{FIELD}{author}{FIELD}{email}{FIELD}{time}{FIELD}%s{FIELD}%D{RECORD}"),
         format!("--skip={}", opts.skip),
     ];
+    if let Some(limit) = opts.limit {
+        args.push(format!("--max-count={limit}"));
+    }
     if opts.first_parent {
         args.push("--first-parent".into());
     }
@@ -551,6 +604,40 @@ mod tests {
         assert_eq!(find(CommitQuery { path: "*.rs".into(), ..Default::default() }), vec!["Add start"]);
         assert_eq!(find(CommitQuery { message: "NOTES".into(), ..Default::default() }), vec!["Write notes"]);
         assert!(find(CommitQuery::default()).is_empty());
+    }
+
+    #[test]
+    fn indexes_history_by_hash_and_loads_only_requested_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        git.run(["init", "-q"]).unwrap();
+        git.run(["config", "user.name", "Ann"]).unwrap();
+        git.run(["config", "user.email", "ann@example.com"]).unwrap();
+        git.run(["commit", "--allow-empty", "-qm", "First commit"]).unwrap();
+        let first = git.run(["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let prefix = first[..10].to_ascii_uppercase();
+        git.run(["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "--allow-empty", "-qm", "Second commit", "-m", &prefix]).unwrap();
+        let opts = LogOptions { scope: LogScope::CurrentBranch, limit: None, ..Default::default() };
+        let index = load_log_index(&git, &opts).unwrap();
+        assert_eq!(index.len(), 2);
+        assert_eq!(index[0].summary, "Second commit");
+        assert_eq!(index[0].parents, std::slice::from_ref(&first));
+        assert!(index.iter().all(|commit| commit.author.is_empty() && commit.time == 0));
+        let hash_matches = load_log_index(&git, &LogOptions { search: Some(first.clone()), ..opts.clone() }).unwrap();
+        assert_eq!(hash_matches.len(), 1);
+        assert_eq!(hash_matches[0].id, first);
+        let prefix_matches = load_log_index(&git, &LogOptions { search: Some(prefix), ..opts.clone() }).unwrap();
+        assert_eq!(prefix_matches, index);
+        let by_author = |query: &str| load_log_index(&git, &LogOptions { search: Some(query.into()), ..opts.clone() }).unwrap();
+        assert_eq!(by_author("ANN"), index[1..]);
+        assert_eq!(by_author("BOB@EXAMPLE.COM"), index[..1]);
+        assert_eq!(by_author("@example.com"), index);
+        let rows = load_log_rows(&git, std::slice::from_ref(&first)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, first);
+        assert_eq!(rows[0].1.author, "Ann");
+        assert_eq!(rows[0].1.email, "ann@example.com");
+        assert!(rows[0].1.time > 0);
     }
 
     #[test]
