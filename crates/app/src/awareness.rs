@@ -10,7 +10,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::repo_view::{Page, RepoView};
-use crate::widgets::{Tone, avatar, framed, framed_if, hstack, icon, relative_time, tr};
+use crate::widgets::{avatar, hstack, icon, relative_time, tr};
 
 const AWAY_AFTER_SECS: i64 = 2 * 3600;
 
@@ -24,6 +24,7 @@ pub(crate) struct Awareness {
     pub away_tip: String,
     pub away_checked: bool,
     pub away_done: bool,
+    pub away_open: bool,
     pub overlaps: Vec<Overlap>,
     pub overlap_sig: u64,
 }
@@ -109,6 +110,7 @@ impl RepoView {
             },
             |this, summary, cx| {
                 this.aware.away = summary;
+                this.aware.away_open |= cfg!(debug_assertions) && std::env::var("CAIRN_DEBUG_AWAY_OPEN").is_ok();
                 cx.notify();
             },
             cx,
@@ -150,24 +152,102 @@ impl RepoView {
         cx.notify();
     }
 
-    /// The "While you were away" card at the top of History.
+    /// Whether a commit landed while the user was away, for the marker in the History list.
+    ///
+    /// # Arguments
+    /// * `id` - the commit
     ///
     /// # Returns
-    /// The card, or nothing when there is nothing new.
+    /// `true` while the "while you were away" strip is shown and lists the commit.
+    pub(crate) fn landed_while_away(&self, id: &str) -> bool {
+        self.aware.away.as_ref().is_some_and(|s| s.commits.iter().any(|c| c.id == id))
+    }
+
+    /// The slim "while you were away" strip at the top of History, with the commits and the AI
+    /// summary one click away.
+    ///
+    /// # Returns
+    /// The strip, or nothing when there is nothing new.
     pub(crate) fn render_away_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let s = self.aware.away.clone()?;
         let theme = cx.theme().clone();
         let now = chrono::Utc::now().timestamp();
-        let trunk = s.trunk.rsplit_once('/').map(|(_, b)| b.to_string()).unwrap_or_else(|| s.trunk.clone());
-        let mut line = t!("away.landed", n = s.commits.len(), who = names(&s.authors), branch = trunk.clone()).to_string();
-        if s.commits.len() == 1 {
-            line = t!("away.landed_one", who = names(&s.authors), branch = trunk).to_string();
-        }
+        let open = self.aware.away_open;
+        let trunk = s.trunk.split_once('/').map(|(_, b)| b.to_string()).unwrap_or_else(|| s.trunk.clone());
+        let headline = if s.commits.len() == 1 { t!("away.new_one", branch = trunk.clone()).to_string() } else { t!("away.new", n = s.commits.len(), branch = trunk.clone()).to_string() };
+        let mut detail = t!("away.since", time = span(now - s.since)).to_string();
+        let who = t!("away.from", who = names(&s.authors)).to_string();
         if !s.prs.is_empty() {
-            line = format!("{line} · {}", crate::widgets::plural("away.prs", s.prs.len()));
+            detail = format!("{detail} · {}", crate::widgets::plural("away.prs", s.prs.len()));
         }
+        let mut faces = h_flex().id("away-faces").flex_none().tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(who.clone()).build(window, cx));
+        for (i, (who, _)) in s.authors.iter().take(3).enumerate() {
+            faces = faces.child(div().when(i > 0, |d| d.ml(px(-7.))).rounded_full().border_2().border_color(theme.background).child(avatar(who, px(22.), cx)));
+        }
+        let overlap_names = s.overlap.iter().take(3).map(|f| f.rsplit('/').next().unwrap_or(f)).collect::<Vec<_>>().join(", ");
+        let overlap_tip = t!("away.overlap", files = overlap_names.clone()).to_string();
+        let strip = hstack()
+            .gap_3()
+            .px_4()
+            .h(px(46.))
+            .child(faces)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_baseline()
+                    .child(div().flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).child(headline))
+                    .child(div().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(detail)),
+            )
+            .when(!s.overlap.is_empty(), |d| {
+                d.child(
+                    hstack()
+                        .id("away-overlap")
+                        .flex_none()
+                        .gap_1()
+                        .px_2()
+                        .h(px(24.))
+                        .rounded(px(12.))
+                        .bg(theme.yellow.opacity(0.12))
+                        .border_1()
+                        .border_color(theme.yellow.opacity(0.35))
+                        .text_xs()
+                        .text_color(theme.yellow)
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme.yellow.opacity(0.2)))
+                        .child(icon(IconName::TriangleAlert).xsmall())
+                        .child(t!("away.touches", files = overlap_names.clone()).to_string())
+                        .child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(tr("away.sync")))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(overlap_tip.clone()).build(window, cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
+                )
+            })
+            .when(self.settings.ai.enabled, |d| {
+                d.child(
+                    Button::new("away-ai")
+                        .small()
+                        .ghost()
+                        .text_color(theme.magenta)
+                        .icon(icon(IconName::Sparkles))
+                        .label(tr("away.summarize"))
+                        .loading(self.aware.away_ai_running)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.aware.away_open = true;
+                            if this.aware.away_ai.is_none() && !this.aware.away_ai_running {
+                                this.summarize_away(cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(Button::new("away-toggle").small().ghost().icon(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })).label(if open { tr("away.hide") } else { tr("away.show") }).on_click(cx.listener(|this, _, _, cx| {
+                this.aware.away_open = !this.aware.away_open;
+                cx.notify();
+            })))
+            .child(Button::new("away-ok").small().ghost().icon(icon(IconName::X)).tooltip(tr("away.got_it")).on_click(cx.listener(|this, _, _, cx| this.dismiss_away(cx))));
         let mut rows = v_flex().gap_0p5();
-        for (i, c) in s.commits.iter().take(4).enumerate() {
+        for (i, c) in s.commits.iter().take(8).enumerate() {
             let id = c.id.clone();
             rows = rows.child(
                 hstack()
@@ -189,54 +269,42 @@ impl RepoView {
                     })),
             );
         }
-        if s.commits.len() > 4 {
-            rows = rows.child(div().px_2().text_xs().text_color(theme.muted_foreground).child(t!("safe.and_more", n = s.commits.len() - 4).to_string()));
+        if s.commits.len() > 8 {
+            rows = rows.child(div().px_2().text_xs().text_color(theme.muted_foreground).child(t!("safe.and_more", n = s.commits.len() - 8).to_string()));
         }
-        let ai_on = self.settings.ai.enabled;
-        Some(
-            v_flex()
-                .mx_4()
-                .mt_3()
-                .gap_2()
-                .p_3()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(theme.blue.opacity(0.35))
-                .bg(linear_gradient(110., linear_color_stop(theme.blue.opacity(0.12), 0.), linear_color_stop(theme.sidebar, 0.85)))
-                .child(
-                    hstack()
-                        .gap_2()
-                        .child(div().flex_none().size(px(30.)).rounded(px(8.)).bg(theme.blue.opacity(0.16)).flex().items_center().justify_center().child(icon(IconName::Coffee).small().text_color(theme.blue)))
-                        .child(v_flex().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("away.title", time = span(now - s.since)).to_string())).child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(line)))
-                        .when(ai_on, |d| {
-                            d.child(framed_if(Button::new("away-ai"), Tone::Ai, !self.aware.away_ai_running && self.aware.away_ai.is_none(), cx).h(px(26.)).icon(icon(IconName::Sparkles)).label(tr("away.summarize")).loading(self.aware.away_ai_running).on_click(cx.listener(|this, _, _, cx| this.summarize_away(cx))))
-                        })
-                        .child(framed(Button::new("away-ok"), Tone::Plain, cx).h(px(26.)).icon(icon(IconName::Check)).label(tr("away.got_it")).on_click(cx.listener(|this, _, _, cx| this.dismiss_away(cx)))),
-                )
-                .when(!s.overlap.is_empty(), |d| {
+        let panel = open.then(|| {
+            h_flex()
+                .items_start()
+                .gap_4()
+                .px_4()
+                .pb_3()
+                .when_some(self.aware.away_ai.clone(), |d, a| {
                     d.child(
-                        hstack()
-                            .w_full()
-                            .items_start()
-                            .gap_2()
-                            .px_2()
-                            .py_1p5()
-                            .rounded(px(8.))
-                            .bg(theme.yellow.opacity(0.1))
-                            .text_sm()
-                            .text_color(theme.yellow)
-                            .child(div().flex_none().pt(px(2.)).child(icon(IconName::TriangleAlert).small()))
-                            .child(div().flex_1().min_w_0().whitespace_normal().child(t!("away.overlap", files = s.overlap.iter().take(4).map(|f| f.rsplit('/').next().unwrap_or(f)).collect::<Vec<_>>().join(", ")).to_string()))
-                            .child(Button::new("away-sync").xsmall().ghost().label(tr("away.sync")).on_click(cx.listener(|this, _, window, cx| this.sync(window, cx)))),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .pl_3()
+                            .border_l_2()
+                            .border_color(theme.magenta.opacity(0.5))
+                            .child(hstack().gap_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.magenta).child(icon(IconName::Sparkles).xsmall()).child(tr("away.summary")))
+                            .child(match a {
+                                Ok(text) => div().text_sm().whitespace_normal().child(crate::pages::pulls::markdown("away-ai-text", &text).unwrap_or_else(|| div().into_any_element())).into_any_element(),
+                                Err(e) => div().text_sm().text_color(theme.red).child(e).into_any_element(),
+                            }),
                     )
                 })
-                .when_some(self.aware.away_ai.clone(), |d, a| {
-                    d.child(match a {
-                        Ok(text) => div().px_2().py_1p5().rounded(px(8.)).bg(theme.magenta.opacity(0.08)).text_sm().whitespace_normal().child(crate::pages::pulls::markdown("away-ai-text", &text).unwrap_or_else(|| div().into_any_element())).into_any_element(),
-                        Err(e) => div().px_2().text_sm().text_color(theme.red).child(e).into_any_element(),
-                    })
-                })
-                .child(rows)
+                .when(self.aware.away_ai.is_none() && self.aware.away_ai_running, |d| d.child(div().flex_1().min_w_0().pl_3().border_l_2().border_color(theme.magenta.opacity(0.5)).text_sm().text_color(theme.muted_foreground).child(tr("away.summarizing"))))
+                .child(div().flex_1().min_w_0().child(rows))
+        });
+        Some(
+            v_flex()
+                .flex_none()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.blue.opacity(0.05))
+                .child(strip)
+                .children(panel)
                 .into_any_element(),
         )
     }
