@@ -667,6 +667,7 @@ pub struct Tools {
 #[serde(default)]
 pub struct Advanced {
     pub log_git_commands: bool,
+    pub git_executable: String,
 }
 
 /// A named git identity applied to repositories whose path matches its folder.

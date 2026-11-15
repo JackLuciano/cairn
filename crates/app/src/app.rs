@@ -25,6 +25,8 @@ pub(crate) struct CairnApp {
     pub sidebar_open: bool,
     pub update: crate::updater::UpdateStatus,
     pub update_message: Option<SharedString>,
+    git_setup: Option<Result<PathBuf, crate::git_setup::SetupError>>,
+    restore_session: bool,
     workspace: Option<(Uuid, Entity<crate::workspace_view::WorkspacePanel>)>,
     side_toggled: std::collections::HashSet<String>,
     focus: FocusHandle,
@@ -55,6 +57,8 @@ impl CairnApp {
             sidebar_open: true,
             update: Default::default(),
             update_message: None,
+            git_setup: None,
+            restore_session: true,
             workspace: None,
             side_toggled: if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SIDE").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default() } else { Default::default() },
             focus: cx.focus_handle(),
@@ -94,21 +98,113 @@ impl CairnApp {
             async move { crate::updater::apply_on_exit(&status, mode) }
         })
         .detach();
-        if app.settings.general.startup == StartupMode::RestoreTabs {
-            let tabs = app.library.open_tabs.clone();
-            let active = app.library.active_tab.clone();
+        app.start_git_setup(window, cx);
+        app
+    }
+
+    fn start_git_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_setup = None;
+        let custom = self.settings.advanced.git_executable.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::git_setup::prepare(&custom) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(path) => this.finish_git_setup(path, window, cx),
+                    Err(error) => this.git_setup = Some(Err(error)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_git_setup(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        cairn_core::git::set_executable(path.clone());
+        self.git_setup = Some(Ok(path));
+        if !std::mem::take(&mut self.restore_session) {
+            return;
+        }
+        if self.settings.general.startup == StartupMode::RestoreTabs {
+            let tabs = self.library.open_tabs.clone();
+            let active = self.library.active_tab.clone();
             for path in tabs {
-                app.open_repo_inner(&path, false, window, cx);
+                self.open_repo_inner(&path, false, window, cx);
             }
             if let Some(active) = active
-                && let Some(ix) = app.tabs.iter().position(|t| same(&t.read(cx).repo.root, &active))
+                && let Some(ix) = self.tabs.iter().position(|t| same(&t.read(cx).repo.root, &active))
             {
-                app.active = Some(ix);
+                self.active = Some(ix);
             }
         }
         #[cfg(debug_assertions)]
         cx.defer_in(window, |this, window, cx| this.debug_hooks(window, cx));
-        app
+    }
+
+    fn git_ready(&self) -> bool {
+        self.git_executable().is_some()
+    }
+
+    pub(crate) fn git_executable(&self) -> Option<&Path> {
+        self.git_setup.as_ref()?.as_ref().ok().map(PathBuf::as_path)
+    }
+
+    pub(crate) fn git_setup_running(&self) -> bool {
+        self.git_setup.is_none()
+    }
+
+    pub(crate) fn git_setup_message(&self) -> Option<&'static str> {
+        match &self.git_setup {
+            None => Some("git_setup.checking"),
+            Some(Err(error)) => Some(error.message_key()),
+            Some(Ok(_)) => None,
+        }
+    }
+
+    pub(crate) fn use_automatic_git(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.git_setup_running() {
+            return false;
+        }
+        if !self.settings.advanced.git_executable.is_empty() {
+            let mut settings = self.settings.clone();
+            settings.advanced.git_executable.clear();
+            if let Err(error) = settings.save() {
+                window.push_notification(Notification::error(error.to_string()), cx);
+                return false;
+            }
+            self.settings = settings;
+        }
+        self.start_git_setup(window, cx);
+        true
+    }
+
+    fn render_git_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let error = self.git_setup.as_ref().and_then(|result| result.as_ref().err());
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .gap_4()
+            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr(
+                if error.is_some() { "git_setup.unavailable" } else { "git_setup.checking" },
+            )))
+            .when_some(error, |panel, error| {
+                panel
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(tr(error.message_key())))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Button::new("retry-git-setup").primary().label(tr("git_setup.retry"))
+                                .on_click(cx.listener(|this, _, window, cx| this.start_git_setup(window, cx))))
+                            .child(Button::new("configure-git").label(tr("git_setup.settings"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    crate::settings_dialog::request_category("advanced");
+                                    crate::settings_dialog::open(cx.entity(), this.settings.clone(), window, cx);
+                                }))),
+                    )
+            })
     }
 
     #[cfg(debug_assertions)]
@@ -311,13 +407,34 @@ impl CairnApp {
         }
     }
 
-    pub(crate) fn apply_settings(&mut self, settings: Settings, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply_settings(&mut self, settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let git_changed = settings.advanced.git_executable != self.settings.advanced.git_executable;
+        let git = if git_changed {
+            if self.git_setup_running() {
+                window.push_notification(Notification::warning(tr("git_setup.checking")), cx);
+                return false;
+            }
+            if settings.advanced.git_executable.is_empty() {
+                crate::git_setup::detect()
+            } else {
+                match crate::git_setup::custom_executable(&settings.advanced.git_executable) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        window.push_notification(Notification::error(tr(error.message_key())), cx);
+                        return false;
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = settings.save() {
+            window.push_notification(Notification::error(e.to_string()), cx);
+            return false;
+        }
         let language_changed = settings.general.language != self.settings.general.language;
         cairn_core::git::set_command_logging(settings.advanced.log_git_commands);
         self.settings = settings.clone();
-        if let Err(e) = settings.save() {
-            window.push_notification(Notification::error(e.to_string()), cx);
-        }
         if language_changed {
             let locale = crate::platform::resolve_language(settings.general.language).code();
             rust_i18n::set_locale(locale);
@@ -328,10 +445,19 @@ impl CairnApp {
             let s = settings.clone();
             tab.update(cx, |v, cx| v.update_settings(s, cx));
         }
+        if let Some(path) = git {
+            self.finish_git_setup(path, window, cx);
+        } else if git_changed {
+            self.start_git_setup(window, cx);
+        }
         cx.notify();
+        true
     }
 
     fn open_repo_inner(&mut self, path: &Path, notify_errors: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.git_ready() {
+            return false;
+        }
         if let Some(ix) = self.tabs.iter().position(|t| same(&t.read(cx).repo.root, path)) {
             self.active = Some(ix);
             return true;
@@ -1245,7 +1371,7 @@ impl CairnApp {
                         .gap(px(6.))
                         .pr_2()
                         .children(crate::updater::update_pill(self, cx))
-                        .when(self.active.is_none(), |d| {
+                        .when(self.git_ready() && self.active.is_none(), |d| {
                             d.child(
                                 crate::widgets::framed(Button::new("open-palette"), crate::widgets::Tone::Plain, cx)
                                     .h(px(28.))
@@ -1590,7 +1716,8 @@ impl Focusable for CairnApp {
 impl Render for CairnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        if let (None, Some(Some(id))) = (self.active, self.open_category) {
+        let git_ready = self.git_ready();
+        if git_ready && let (None, Some(Some(id))) = (self.active, self.open_category) {
             let repos: Vec<(PathBuf, String)> = self.library.repos_in(Some(id)).iter().filter(|r| r.path.exists()).map(|r| (r.path.clone(), r.name.clone())).collect();
             let stale = self.workspace.as_ref().is_none_or(|(wid, p)| *wid != id || p.read(cx).paths.len() != repos.len());
             if repos.len() >= 2 && stale {
@@ -1601,9 +1728,13 @@ impl Render for CairnApp {
                 self.workspace = Some((id, panel));
             }
         }
-        let main = match self.active.and_then(|i| self.tabs.get(i)).cloned() {
-            Some(tab) => tab.into_any_element(),
-            None => self.render_home(cx).into_any_element(),
+        let main = if git_ready {
+            match self.active.and_then(|i| self.tabs.get(i)).cloned() {
+                Some(tab) => tab.into_any_element(),
+                None => self.render_home(cx).into_any_element(),
+            }
+        } else {
+            self.render_git_setup(cx).into_any_element()
         };
         let _ = window;
         use crate::palette as p;
@@ -1611,7 +1742,11 @@ impl Render for CairnApp {
             .size_full()
             .key_context("CairnApp")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|_, _: &p::OpenPalette, window, cx| p::open(cx.entity(), window, cx)))
+            .on_action(cx.listener(|this, _: &p::OpenPalette, window, cx| {
+                if this.git_ready() {
+                    p::open(cx.entity(), window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &p::OpenSettings, window, cx| crate::settings_dialog::open(cx.entity(), this.settings.clone(), window, cx)))
             .on_action(cx.listener(|this, _: &p::Fetch, window, cx| this.with_tab(window, cx, |v, w, cx| v.fetch_action(w, cx))))
             .on_action(cx.listener(|this, _: &p::Pull, window, cx| this.with_tab(window, cx, |v, w, cx| v.pull_action(w, cx))))
@@ -1668,7 +1803,7 @@ impl Render for CairnApp {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.sidebar_open, |d| d.child(div().flex_none().w(px(260.)).h_full().child(self.render_sidebar(cx))))
+                    .when(git_ready && self.sidebar_open, |d| d.child(div().flex_none().w(px(260.)).h_full().child(self.render_sidebar(cx))))
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
     }

@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
@@ -431,10 +431,16 @@ fn schema() -> Vec<Category> {
             id: "advanced",
             label: "settings.cat.advanced",
             desc: "settings.cat.advanced_desc",
-            groups: vec![Group {
-                label: "settings.group.diagnostics",
-                rows: vec![row("log_git", "settings.log_git", Some("settings.log_git_desc"), Control::Toggle(|s| s.advanced.log_git_commands, |s, v| s.advanced.log_git_commands = v))],
-            }],
+            groups: vec![
+                Group {
+                    label: "settings.group.git_installation",
+                    rows: vec![row("git_executable", "settings.git_executable", Some("settings.git_executable_desc"), Control::Text(|s| s.advanced.git_executable.clone(), |s, v| s.advanced.git_executable = v.trim().to_owned()))],
+                },
+                Group {
+                    label: "settings.group.diagnostics",
+                    rows: vec![row("log_git", "settings.log_git", Some("settings.log_git_desc"), Control::Toggle(|s| s.advanced.log_git_commands, |s, v| s.advanced.log_git_commands = v))],
+                },
+            ],
         },
     ]
 }
@@ -489,7 +495,20 @@ pub(crate) fn request_category(category: &'static str) {
 impl SettingsPanel {
     fn new(app: Entity<CairnApp>, settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("settings.search")));
-        let mut subs = vec![cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()), cx.observe(&app, |_, _, cx| cx.notify())];
+        let mut last_git = app.read(cx).git_executable().map(ToOwned::to_owned);
+        let mut subs = vec![
+            cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.observe_in(&app, window, move |this: &mut Self, app, window, cx| {
+                let current = app.read(cx).git_executable();
+                if current != last_git.as_deref() {
+                    last_git = current.map(ToOwned::to_owned);
+                    if this.draft.advanced.git_executable.is_empty() {
+                        this.sync_git_input(window, cx);
+                    }
+                }
+                cx.notify();
+            }),
+        ];
         let mut texts = HashMap::new();
         let mut areas = HashMap::new();
         let mut secrets = HashMap::new();
@@ -498,7 +517,12 @@ impl SettingsPanel {
                 for r in group.rows {
                     match r.control {
                         Control::Text(get, set) => {
-                            let input = cx.new(|cx| InputState::new(window, cx).default_value(get(&settings)));
+                            let value = if r.id == "git_executable" && settings.advanced.git_executable.is_empty() {
+                                app.read(cx).git_executable().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default()
+                            } else {
+                                get(&settings)
+                            };
+                            let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
                             subs.push(cx.subscribe(&input, move |this: &mut Self, input, ev: &InputEvent, cx| {
                                 if matches!(ev, InputEvent::Change) {
                                     let v = input.read(cx).value().to_string();
@@ -568,6 +592,75 @@ impl SettingsPanel {
             }
         }
         n
+    }
+
+    fn sync_git_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let app = self.app.read(cx);
+        let mut value = self.draft.advanced.git_executable.clone();
+        if value.is_empty() && app.settings.advanced.git_executable.is_empty()
+            && let Some(path) = app.git_executable()
+        {
+            value = path.to_string_lossy().into_owned();
+        }
+        let input = &self.texts["git_executable"];
+        if input.read(cx).value().as_ref() != value {
+            input.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
+
+    fn use_automatic_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.app.update(cx, |app, cx| app.use_automatic_git(window, cx)) {
+            self.original.advanced.git_executable.clear();
+            self.draft.advanced.git_executable.clear();
+            self.sync_git_input(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_git_executable(&self, cx: &mut Context<Self>) -> AnyElement {
+        let app = self.app.read(cx);
+        let running = app.git_setup_running();
+        let missing = app.git_executable().is_none();
+        let message = app.git_setup_message();
+        let muted = cx.theme().muted_foreground;
+        let input = &self.texts["git_executable"];
+        v_flex()
+            .w(px(360.))
+            .gap_2()
+            .child(Input::new(input).small())
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Button::new("browse-git-executable").small().outline().label(tr("settings.git_browse"))
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            let picked = cx.prompt_for_paths(PathPromptOptions {
+                                files: true,
+                                directories: false,
+                                multiple: false,
+                                prompt: Some(tr("settings.git_pick")),
+                            });
+                            cx.spawn_in(window, async move |this, cx| {
+                                let Ok(Ok(Some(paths))) = picked.await else { return };
+                                let Some(path) = paths.first() else { return };
+                                let _ = this.update_in(cx, |this, window, cx| {
+                                    this.draft.advanced.git_executable = path.to_string_lossy().into_owned();
+                                    this.sync_git_input(window, cx);
+                                    this.saved = false;
+                                    cx.notify();
+                                });
+                            }).detach();
+                        })))
+                    .child(Button::new("auto-detect-git").small().outline().label(tr("settings.git_auto_detect"))
+                        .disabled(running)
+                        .on_click(cx.listener(|this, _, window, cx| this.use_automatic_git(window, cx))))
+                    .when(cfg!(windows) && missing, |actions| {
+                        actions.child(Button::new("install-git").small().primary().label(tr("settings.git_install"))
+                            .disabled(running)
+                            .on_click(cx.listener(|this, _, window, cx| this.use_automatic_git(window, cx))))
+                    }),
+            )
+            .when_some(message, |d, key| d.child(div().text_xs().text_color(muted).child(tr(key))))
+            .into_any_element()
     }
 
     fn render_control(&mut self, r: RowDef, cx: &mut Context<Self>) -> AnyElement {
@@ -783,6 +876,7 @@ impl SettingsPanel {
                     .child(div().text_xs().text_color(theme.muted_foreground).child(tr(unit)))
                     .into_any_element()
             }
+            Control::Text(_, _) if r.id == "git_executable" => self.render_git_executable(cx),
             Control::Text(_, _) => match self.texts.get(r.id) {
                 Some(input) => div().w(px(300.)).child(Input::new(input).small()).into_any_element(),
                 None => div().into_any_element(),
@@ -1202,9 +1296,11 @@ impl Render for SettingsPanel {
                             .label(tr("dialog.save"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let draft = this.draft.clone();
-                                this.original = draft.clone();
-                                this.saved = true;
-                                this.app.update(cx, |app, cx| app.apply_settings(draft, window, cx));
+                                if this.app.update(cx, |app, cx| app.apply_settings(draft.clone(), window, cx)) {
+                                    this.original = draft;
+                                    this.saved = true;
+                                    this.sync_git_input(window, cx);
+                                }
                                 cx.notify();
                             })),
                     ),
