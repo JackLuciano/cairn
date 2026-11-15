@@ -226,8 +226,10 @@ impl RepoView {
             return;
         }
         let amends_pushed = self.amend && self.status.branch.upstream.is_some() && self.status.branch.ahead == 0;
-        self.guarded(
+        let all_files = plan.stage_all;
+        self.guarded_with(
             cairn_core::checks::Stage::Commit,
+            all_files,
             move |v, window, cx| {
                 if amends_pushed {
                     let plan = plan.clone();

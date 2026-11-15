@@ -204,7 +204,7 @@ impl RepoView {
                 }
                 div().id("browse-text").flex_1().min_h_0().overflow_scroll().child(lines).into_any_element()
             }
-            Some(FileContent::Binary(size)) => empty_state(IconName::File, tr("browse.binary_title"), t!("browse.binary_body", size = format_size(*size)).to_string(), cx).into_any_element(),
+            Some(FileContent::Binary(size)) => empty_state(IconName::File, tr("browse.binary_title"), t!("browse.binary_body", size = crate::widgets::human_size(*size)).to_string(), cx).into_any_element(),
             None => div().into_any_element(),
         };
         v_flex().size_full().child(header).child(body).into_any_element()
@@ -285,13 +285,5 @@ impl RepoView {
                     .child(div().flex_1().min_w_0().h_full().child(self.render_browse_file(cx))),
             )
             .into_any_element()
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    match bytes {
-        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
-        b if b >= 1 << 10 => format!("{:.1} KB", b as f64 / 1024.),
-        b => format!("{b} B"),
     }
 }

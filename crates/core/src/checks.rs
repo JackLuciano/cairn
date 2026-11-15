@@ -271,6 +271,139 @@ pub fn scan_staged(git: &Git) -> Result<Vec<SecretFinding>> {
     Ok(scan_diff(&diff, &allow_list(git)))
 }
 
+/// What kind of private file a path looks like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SensitiveKind {
+    EnvFile,
+    PrivateKey,
+    SshKey,
+    Credentials,
+    TerraformState,
+}
+
+/// Why a file in a commit needs a second look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileRisk {
+    Sensitive(SensitiveKind),
+    Large(u64),
+}
+
+/// A file about to be committed that probably should not be.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileFinding {
+    pub path: String,
+    pub risk: FileRisk,
+    pub staged: bool,
+    pub new: bool,
+    pub fingerprint: String,
+}
+
+/// Recognizes files that usually hold passwords or keys, such as `.env` or `id_rsa`.
+///
+/// # Arguments
+/// * `path` - the file's path in the repository
+///
+/// # Returns
+/// The kind of private file, or `None` for an ordinary file.
+pub fn sensitive_kind(path: &str) -> Option<SensitiveKind> {
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    let examples = [".example", ".sample", ".template", ".dist", ".defaults"];
+    if (name == ".env" || name.starts_with(".env.") || name.ends_with(".env")) && !examples.iter().any(|e| name.ends_with(e)) {
+        return Some(SensitiveKind::EnvFile);
+    }
+    if matches!(name.as_str(), "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519") {
+        return Some(SensitiveKind::SshKey);
+    }
+    if [".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".ppk"].iter().any(|e| name.ends_with(e)) {
+        return Some(SensitiveKind::PrivateKey);
+    }
+    if matches!(name.as_str(), ".npmrc" | ".pypirc" | ".netrc" | "_netrc" | ".git-credentials" | ".htpasswd" | "credentials.json" | "secrets.json" | "secrets.yml" | "secrets.yaml") || (name.starts_with("service-account") && name.ends_with(".json")) {
+        return Some(SensitiveKind::Credentials);
+    }
+    if name.ends_with(".tfstate") || name.ends_with(".tfstate.backup") {
+        return Some(SensitiveKind::TerraformState);
+    }
+    None
+}
+
+fn file_fingerprint(path: &str) -> String {
+    fingerprint("file", path)
+}
+
+fn blob_sizes(git: &Git, specs: &[String]) -> Vec<Option<u64>> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let input: String = specs.iter().map(|s| format!("{s}\n")).collect();
+    let out = git.run_with_input(["cat-file", "--batch-check=%(objectsize)"], input.as_bytes()).unwrap_or_default();
+    let mut sizes: Vec<Option<u64>> = out.lines().map(|l| l.trim().parse().ok()).collect();
+    sizes.resize(specs.len(), None);
+    sizes
+}
+
+fn split_z(out: &str) -> Vec<String> {
+    out.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
+
+/// Looks for private files and big files about to be committed. New private files such as
+/// `.env` are reported, and files bigger than the limit that are new or just grew past it.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `max_bytes` - the size above which a file counts as big
+/// * `unstaged_too` - also look at changed and new files that are not staged yet, for a commit
+///   that stages everything first
+///
+/// # Returns
+/// Findings that are not on the allow list, private files first.
+pub fn scan_files(git: &Git, max_bytes: u64, unstaged_too: bool) -> Result<Vec<FileFinding>> {
+    let allowed = allow_list(git);
+    let added = split_z(&git.run(["diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=A"])?);
+    let modified = split_z(&git.run(["diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=M"])?);
+    let mut found = Vec::new();
+    let push = |path: &str, risk: FileRisk, staged: bool, new: bool, found: &mut Vec<FileFinding>| {
+        let fp = file_fingerprint(path);
+        if !allowed.contains(&fp) && !found.iter().any(|f: &FileFinding| f.path == path) {
+            found.push(FileFinding { path: path.to_string(), risk, staged, new, fingerprint: fp });
+        }
+    };
+    for p in &added {
+        if let Some(kind) = sensitive_kind(p) {
+            push(p, FileRisk::Sensitive(kind), true, true, &mut found);
+        }
+    }
+    let staged_now = blob_sizes(git, &added.iter().chain(&modified).map(|p| format!(":{p}")).collect::<Vec<_>>());
+    let before = blob_sizes(git, &modified.iter().map(|p| format!("HEAD:{p}")).collect::<Vec<_>>());
+    for (i, p) in added.iter().chain(&modified).enumerate() {
+        let Some(size) = staged_now.get(i).copied().flatten() else { continue };
+        let new = i < added.len();
+        let was = if new { None } else { before.get(i - added.len()).copied().flatten() };
+        if size > max_bytes && was.is_none_or(|w| w <= max_bytes) {
+            push(p, FileRisk::Large(size), true, new, &mut found);
+        }
+    }
+    if unstaged_too {
+        let new_files = split_z(&git.run(["ls-files", "--others", "--exclude-standard", "-z"])?);
+        let changed = split_z(&git.run(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=M"])?);
+        let before = blob_sizes(git, &changed.iter().map(|p| format!("HEAD:{p}")).collect::<Vec<_>>());
+        for p in &new_files {
+            if let Some(kind) = sensitive_kind(p) {
+                push(p, FileRisk::Sensitive(kind), false, true, &mut found);
+            }
+        }
+        for (i, p) in new_files.iter().chain(&changed).enumerate() {
+            let Ok(meta) = std::fs::metadata(git.dir().join(p)) else { continue };
+            let new = i < new_files.len();
+            let was = if new { None } else { before.get(i - new_files.len()).copied().flatten() };
+            if meta.len() > max_bytes && was.is_none_or(|w| w <= max_bytes) {
+                push(p, FileRisk::Large(meta.len()), false, new, &mut found);
+            }
+        }
+    }
+    found.sort_by_key(|f| matches!(f.risk, FileRisk::Large(_)));
+    Ok(found)
+}
+
 /// Reads fingerprints of findings marked as not secret.
 ///
 /// # Arguments
@@ -319,6 +452,37 @@ mod tests {
         assert_eq!(f[0].kind, "Tebex secret");
         assert!(!f[0].masked.contains("abcdef1234567890"));
         assert!(scan_diff(diff, &[f[0].fingerprint.clone()]).is_empty());
+    }
+
+    #[test]
+    fn spots_private_files() {
+        assert_eq!(sensitive_kind(".env"), Some(SensitiveKind::EnvFile));
+        assert_eq!(sensitive_kind("web/.env.local"), Some(SensitiveKind::EnvFile));
+        assert_eq!(sensitive_kind(".env.example"), None);
+        assert_eq!(sensitive_kind("keys/id_ed25519"), Some(SensitiveKind::SshKey));
+        assert_eq!(sensitive_kind("certs/server.pem"), Some(SensitiveKind::PrivateKey));
+        assert_eq!(sensitive_kind("infra/prod.tfstate"), Some(SensitiveKind::TerraformState));
+        assert_eq!(sensitive_kind("src/main.rs"), None);
+    }
+
+    #[test]
+    fn scans_staged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        git.run(["init", "-q"]).unwrap();
+        git.run(["config", "user.email", "t@example.com"]).unwrap();
+        git.run(["config", "user.name", "T"]).unwrap();
+        std::fs::write(dir.path().join(".env"), "KEY=1\n").unwrap();
+        std::fs::write(dir.path().join("big.bin"), vec![0u8; 2048]).unwrap();
+        std::fs::write(dir.path().join("small.txt"), "hi\n").unwrap();
+        git.run(["add", ".env", "small.txt"]).unwrap();
+        let staged = scan_files(&git, 1024, false).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].risk, FileRisk::Sensitive(SensitiveKind::EnvFile));
+        let all = scan_files(&git, 1024, true).unwrap();
+        assert!(all.iter().any(|f| f.path == "big.bin" && f.risk == FileRisk::Large(2048) && !f.staged));
+        allow(&git, &all[0].fingerprint).unwrap();
+        assert!(scan_files(&git, 1024, false).unwrap().is_empty());
     }
 
     #[test]

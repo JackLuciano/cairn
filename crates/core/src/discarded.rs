@@ -96,8 +96,22 @@ pub fn list(git: &Git) -> Vec<Discarded> {
 /// # Returns
 /// `Ok(())` once the files are back.
 pub fn restore(git: &Git, item: &Discarded) -> Result<()> {
+    restore_files(git, &item.commit, &item.files)
+}
+
+/// Puts files from a hidden backup commit back into the working tree, after backing up what
+/// is there now. Files missing from the commit are removed.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `commit` - the backup commit
+/// * `files` - the files to bring back
+///
+/// # Returns
+/// `Ok(())` once the files are back.
+pub(crate) fn restore_files(git: &Git, commit: &str, files: &[String]) -> Result<()> {
     let busy: Vec<String> = git
-        .run(["status", "--porcelain", "-z", "--untracked-files=all", "--"].into_iter().map(str::to_string).chain(item.files.iter().cloned()))?
+        .run(["status", "--porcelain", "-z", "--untracked-files=all", "--"].into_iter().map(str::to_string).chain(files.iter().cloned()))?
         .split('\0')
         .filter(|e| e.len() > 3)
         .map(|e| e[3..].to_string())
@@ -106,16 +120,16 @@ pub fn restore(git: &Git, item: &Discarded) -> Result<()> {
         backup(git, &busy)?;
     }
     let present: Vec<String> = git
-        .run(["ls-tree", "-r", "--name-only", &item.commit, "--"].into_iter().map(str::to_string).chain(item.files.iter().cloned()))?
+        .run(["ls-tree", "-r", "--name-only", commit, "--"].into_iter().map(str::to_string).chain(files.iter().cloned()))?
         .lines()
         .map(str::to_string)
         .collect();
     if !present.is_empty() {
-        let mut args = vec!["restore".to_string(), format!("--source={}", item.commit), "--worktree".into(), "--".into()];
+        let mut args = vec!["restore".to_string(), format!("--source={commit}"), "--worktree".into(), "--".into()];
         args.extend(present.iter().cloned());
         git.run(args)?;
     }
-    for f in item.files.iter().filter(|f| !present.contains(f)) {
+    for f in files.iter().filter(|f| !present.contains(f)) {
         let _ = std::fs::remove_file(git.dir().join(f));
     }
     Ok(())

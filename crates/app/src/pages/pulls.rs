@@ -140,7 +140,7 @@ struct Readiness {
     next: SharedString,
 }
 
-fn iso_time(s: &str) -> i64 {
+pub(crate) fn iso_time(s: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(s).map(|d| d.timestamp()).unwrap_or(0)
 }
 
@@ -189,7 +189,7 @@ fn state_color(state: &str, cx: &App) -> Hsla {
 ///
 /// # Returns
 /// The rendered text, or `None` for an empty body.
-fn markdown(id: impl Into<ElementId>, text: &str) -> Option<AnyElement> {
+pub(crate) fn markdown(id: impl Into<ElementId>, text: &str) -> Option<AnyElement> {
     let text = text.trim();
     (!text.is_empty()).then(|| gpui_kit::component::text::TextView::markdown(id, text.to_string()).w_full().into_any_element())
 }
@@ -198,7 +198,7 @@ fn hash_color(text: &str, cx: &App) -> Hsla {
     lane_color(text.bytes().fold(7usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)), cx)
 }
 
-fn label_chip(name: &str, cx: &App) -> Div {
+pub(crate) fn label_chip(name: &str, cx: &App) -> Div {
     let c = hash_color(name, cx);
     div().flex_none().px(px(8.)).h(px(20.)).flex().items_center().rounded(px(10.)).text_xs().font_weight(FontWeight::MEDIUM).bg(c.opacity(0.16)).border_1().border_color(c.opacity(0.4)).text_color(c).child(name.to_string())
 }
@@ -1134,11 +1134,66 @@ impl RepoView {
                     .child(div().text_sm().font_weight(FontWeight::BOLD).child(if r.ready { tr("pulls.ready_title") } else { tr("pulls.status_title") })),
             )
             .child(v_flex().px_4().child(row(&r.review, false, cx)).child(row(&r.checks, false, cx)).child(row(&r.merge, true, cx)))
-            .child(v_flex().gap_2().px_4().py_3().border_t_1().border_color(theme.border).bg(theme.background.opacity(0.5)).child(div().text_sm().child(r.next.clone())).child(action))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .bg(theme.background.opacity(0.5))
+                    .child(div().text_sm().child(r.next.clone()))
+                    .when(d.merge_state == "BEHIND", |el| el.child(self.render_update_branch(d, busy, cx)))
+                    .child(action),
+            )
             .into_any_element()
     }
 
-    fn bubble(&self, id: impl Into<ElementId>, author: &str, when: &str, body: Option<AnyElement>, extra: Option<AnyElement>, cx: &App) -> AnyElement {
+    /// The "Update branch" button for a pull request that is behind its base, with a menu to
+    /// rebase instead of merging.
+    ///
+    /// # Arguments
+    /// * `d` - the pull request
+    /// * `busy` - whether another action is being sent
+    ///
+    /// # Returns
+    /// The button row.
+    fn render_update_branch(&self, d: &PrDetails, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        let number = d.pr.number;
+        let view = cx.entity();
+        h_flex()
+            .w_full()
+            .child(
+                framed_if(Button::new("pr-update"), Tone::Plain, !busy, cx)
+                    .flex_1()
+                    .rounded_r_none()
+                    .icon(icon(IconName::ArrowDownToLine))
+                    .label(t!("pulls.update_branch", base = d.pr.base.clone()).to_string())
+                    .tooltip(tr("pulls.update_branch_tip"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.send_pr_action(move |git| stack::pr_update_branch(git, number, false), tr("pulls.branch_updated"), window, cx);
+                    })),
+            )
+            .child(
+                framed_if(Button::new("pr-update-how"), Tone::Plain, !busy, cx)
+                    .rounded_l_none()
+                    .border_l_1()
+                    .px(px(8.))
+                    .icon(icon(IconName::ChevronDown))
+                    .dropdown_menu(move |menu, _, _| {
+                        let (v1, v2) = (view.clone(), view.clone());
+                        menu.item(PopupMenuItem::new(t!("pulls.update_merge").to_string()).icon(icon(IconName::GitMerge)).on_click(move |_, window, cx| {
+                            v1.update(cx, |this, cx| this.send_pr_action(move |git| stack::pr_update_branch(git, number, false), tr("pulls.branch_updated"), window, cx));
+                        }))
+                        .item(PopupMenuItem::new(t!("pulls.update_rebase").to_string()).icon(icon(IconName::GitPullRequestArrow)).on_click(move |_, window, cx| {
+                            v2.update(cx, |this, cx| this.send_pr_action(move |git| stack::pr_update_branch(git, number, true), tr("pulls.branch_updated"), window, cx));
+                        }))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn bubble(&self, id: impl Into<ElementId>, author: &str, when: &str, body: Option<AnyElement>, extra: Option<AnyElement>, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let mine = self.pulls.me.as_deref() == Some(author);
         let tint = hash_color(author, cx);

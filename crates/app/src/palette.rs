@@ -231,12 +231,17 @@ fn open_now(app: Entity<CairnApp>, window: &mut Window, cx: &mut App) {
     let tab = app.read(cx).active_tab();
     let cmd = |group: &'static str, label: &str, keys: Option<&'static str>, icon: IconName, run: Run| Item { group, label: tr(label), keys, icon, run };
     if let Some(tab) = tab.clone() {
-        let pages: [(&str, Page, IconName, Option<&'static str>); 16] = [
+        let pages: [(&str, Page, IconName, Option<&'static str>); 21] = [
             ("page.history", Page::History, IconName::GitCommitHorizontal, Some("Ctrl 1")),
             ("page.changes", Page::Changes, IconName::FileDiff, Some("Ctrl 2")),
             ("page.branches", Page::Branches, IconName::GitBranch, Some("Ctrl 3")),
             ("page.stashes", Page::Stashes, IconName::Archive, None),
             ("page.pulls", Page::PullRequests, IconName::GitPullRequest, None),
+            ("page.issues", Page::Issues, IconName::CircleDot, None),
+            ("page.search", Page::Search, IconName::TextSearch, None),
+            ("page.checks", Page::Checks, IconName::Workflow, None),
+            ("page.releases", Page::Releases, IconName::Rocket, None),
+            ("page.browse", Page::Browse, IconName::FolderTree, None),
             ("page.stack", Page::Stack, IconName::Layers, None),
             ("page.rebase", Page::Rebase, IconName::GitPullRequestArrow, None),
             ("page.absorb", Page::Absorb, IconName::Combine, None),

@@ -43,12 +43,15 @@ pub(crate) enum Page {
     Checks,
     Browse,
     Releases,
+    Search,
+    Issues,
 }
 
 impl Page {
     /// Pages reached from the "Tools" panel instead of a tab of their own, each with a one-line
     /// explanation for people who do not know the git term.
-    pub(crate) const TOOLS: [(Page, &'static str, IconName, &'static str); 13] = [
+    pub(crate) const TOOLS: [(Page, &'static str, IconName, &'static str); 14] = [
+        (Page::Search, "page.search", IconName::TextSearch, "page_bar.search_desc"),
         (Page::Checks, "page.checks", IconName::Workflow, "page_bar.checks_desc"),
         (Page::Releases, "page.releases", IconName::Rocket, "page_bar.releases_desc"),
         (Page::Browse, "page.browse", IconName::FolderTree, "page_bar.browse_desc"),
@@ -257,6 +260,8 @@ pub(crate) struct RepoView {
     pub checks: crate::pages::checks::ChecksState,
     pub browse: crate::pages::browse::BrowseState,
     pub releases: crate::pages::releases::ReleasesState,
+    pub search_page: crate::pages::search::SearchState,
+    pub issues: crate::pages::issues::IssuesState,
     focus: FocusHandle,
     watcher: Option<crate::watcher::RepoWatcher>,
     pub(crate) _tasks: Vec<Task<()>>,
@@ -369,6 +374,8 @@ impl RepoView {
             checks: Default::default(),
             browse: crate::pages::browse::BrowseState::new(window, cx),
             releases: crate::pages::releases::ReleasesState::new(window, cx),
+            search_page: crate::pages::search::SearchState::new(window, cx),
+            issues: crate::pages::issues::IssuesState::new(window, cx),
             focus: cx.focus_handle(),
             watcher: None,
             _tasks: Vec::new(),
@@ -407,6 +414,44 @@ impl RepoView {
         self.start_watching(cx);
         self.start_pr_polling(cx);
         self.start_worktree_cleanup(cx);
+        self.start_autosave(cx);
+    }
+
+    /// Saves a hidden snapshot of the uncommitted work every few minutes, as set in Settings →
+    /// Checks, so it can be brought back from Lost & found.
+    fn start_autosave(&mut self, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let Ok((on, minutes, days)) = this.read_with(cx, |v, _| (v.settings.checks.autosave, v.settings.checks.autosave_minutes.max(1), v.settings.checks.autosave_days)) else { return };
+                cx.background_executor().timer(std::time::Duration::from_secs(u64::from(minutes) * 60)).await;
+                if !on {
+                    continue;
+                }
+                let Ok((git, idle)) = this.read_with(cx, |v, _| (v.git(), v.busy.is_none())) else { return };
+                if !idle {
+                    continue;
+                }
+                let saved = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let snap = cairn_core::snapshot::take(&git).ok().flatten();
+                        cairn_core::snapshot::prune(&git, days);
+                        snap
+                    })
+                    .await;
+                if let Some(s) = saved
+                    && this.update(cx, |v, cx| {
+                        if v.recover.loaded {
+                            v.recover.snapshots.insert(0, s);
+                            cx.notify();
+                        }
+                    }).is_err()
+                {
+                    return;
+                }
+            }
+        });
+        self._tasks.push(task);
     }
 
     fn start_pr_polling(&mut self, cx: &mut Context<Self>) {
@@ -503,6 +548,8 @@ impl RepoView {
             "checks" => Page::Checks,
             "browse" => Page::Browse,
             "releases" => Page::Releases,
+            "search" => Page::Search,
+            "issues" => Page::Issues,
             _ => Page::History,
         };
         match self.page {
@@ -616,6 +663,11 @@ impl RepoView {
                 self.releases.loaded = false;
                 self.load_releases(cx);
             }
+            Page::Issues => {
+                self.issues.loaded = false;
+                self.load_issues(cx);
+            }
+            Page::Search => self.search_page.message.focus_handle(cx).focus(window, cx),
             _ => {}
         }
         let _ = window;
@@ -1736,6 +1788,7 @@ impl RepoView {
                     .child(
                         group(tr("page_bar.review"), cx)
                             .child(page_tab("page-pulls", Page::PullRequests, IconName::GitPullRequest, tr("page.pulls"), self.prs.len(), cx))
+                            .child(page_tab("page-issues", Page::Issues, IconName::CircleDot, tr("page.issues"), if self.issues.filter == cairn_core::issues::IssueFilter::Open { self.issues.list.len() } else { 0 }, cx))
                             .child(page_tab("page-stack", Page::Stack, IconName::Layers, tr("page.stack"), 0, cx)),
                     )
                     .when(conflict_count > 0, |d| d.child(page_tab("page-conflicts", Page::Conflicts, IconName::TriangleAlert, tr("page.conflicts"), conflict_count, cx)))
@@ -1911,6 +1964,8 @@ impl Render for RepoView {
                 Page::Checks => self.render_checks(window, cx).into_any_element(),
                 Page::Browse => self.render_browse(window, cx).into_any_element(),
                 Page::Releases => self.render_releases(window, cx).into_any_element(),
+                Page::Search => self.render_search(window, cx).into_any_element(),
+                Page::Issues => self.render_issues(window, cx).into_any_element(),
             }
         };
         v_flex()

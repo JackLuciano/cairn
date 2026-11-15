@@ -313,6 +313,69 @@ pub fn pr_cancel_auto_merge(git: &Git, number: u64) -> Result<String> {
     gh(git.dir(), &["pr", "merge", &number.to_string(), "--disable-auto"])
 }
 
+/// Brings a pull request's branch up to date with its base on GitHub, the same as GitHub's
+/// "Update branch" button.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `rebase` - rebase the branch instead of merging the base into it
+///
+/// # Returns
+/// The `gh` output.
+pub fn pr_update_branch(git: &Git, number: u64, rebase: bool) -> Result<String> {
+    let n = number.to_string();
+    let mut args = vec!["pr", "update-branch", n.as_str()];
+    if rebase {
+        args.push("--rebase");
+    }
+    gh(git.dir(), &args)
+}
+
+/// Suggests reviewers for a change: the people whose commits most recently touched the
+/// changed files on the base branch, asked from GitHub in one query.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `base` - the branch the change goes into, such as `main`
+/// * `files` - the changed files; only the first twelve are looked at
+///
+/// # Returns
+/// Up to five login names with how many of the files each one touched, most first. The
+/// logged-in user and bots are left out.
+pub fn suggest_reviewers(git: &Git, base: &str, files: &[String]) -> Vec<(String, usize)> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let fields: String = files.iter().take(12).enumerate().map(|(i, f)| format!("f{i}: history(first: 15, path: \"{}\") {{ nodes {{ author {{ user {{ login }} }} }} }} ", escape(f))).collect();
+    let query = format!("query($owner: String!, $name: String!, $base: String!) {{ repository(owner: $owner, name: $name) {{ object(expression: $base) {{ ... on Commit {{ {fields}}} }} }} }}");
+    let Ok(out) = gh(git.dir(), &["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", &format!("base={base}"), "-f", &format!("query={query}")]) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) else { return Vec::new() };
+    let me = gh_account(git).unwrap_or_default();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for i in 0..files.len().min(12) {
+        let mut seen: Vec<String> = Vec::new();
+        let nodes = v.pointer(&format!("/data/repository/object/f{i}/nodes")).and_then(|n| n.as_array()).cloned().unwrap_or_default();
+        for n in nodes {
+            let Some(login) = n.pointer("/author/user/login").and_then(|l| l.as_str()) else { continue };
+            if login == me || login.ends_with("[bot]") || seen.iter().any(|s| s == login) {
+                continue;
+            }
+            seen.push(login.to_string());
+            match counts.iter_mut().find(|(l, _)| l == login) {
+                Some(c) => c.1 += 1,
+                None => counts.push((login.to_string(), 1)),
+            }
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    counts.truncate(5);
+    counts
+}
+
 /// Marks a draft pull request as ready for review.
 ///
 /// # Arguments
