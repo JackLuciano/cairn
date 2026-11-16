@@ -3,6 +3,14 @@
 All notable changes to Cairn are listed here. Each section is shown in the app's "What's new"
 window after an update.
 
+## [Unreleased]
+
+### Fixed
+
+- Clicking an image in History, Changes or a file page no longer closes Cairn.
+- Cairn no longer reloads a repository over and over after 0.7.0, which could leave History
+  loading forever and keep Git running in the background.
+
 ## [0.7.0] - 2026-11-16
 
 Issues, CI checks and releases inside Cairn, AI split into commits, GitHub notifications, auto-saved

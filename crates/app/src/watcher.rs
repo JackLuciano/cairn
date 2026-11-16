@@ -18,7 +18,7 @@ fn git_relevant(rel: &Path) -> bool {
         Some("refs" | "rebase-merge" | "rebase-apply") => true,
         Some("worktrees") => parts.len() > 2 && git_relevant(&parts[2..].iter().collect::<PathBuf>()),
         Some(name) => parts.len() == 1 && matches!(name, "index" | "HEAD" | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | "packed-refs"),
-        None => true,
+        None => false,
     }
 }
 
@@ -117,6 +117,8 @@ mod tests {
         assert!(hit(".git/packed-refs"));
         assert!(hit(".git/worktrees/fix/HEAD"));
         assert!(hit("src/main.rs"));
+        assert!(!hit(".git"));
+        assert!(!hit(".git/index.lock"));
         assert!(!hit(".git/objects/ab/cdef"));
         assert!(!hit(".git/logs/HEAD"));
         assert!(!hit(".git/worktrees/fix/logs/HEAD"));
