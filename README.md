@@ -113,6 +113,16 @@ branches.
 - **A second look before you commit.** `.env` files, private keys, credentials and big files get
   flagged before they go into a commit, with one-click fixes: leave the file out, add it to
   `.gitignore` or store it with Git LFS.
+- **Split my mess into commits.** A pile of unrelated uncommitted changes? AI sorts the changed
+  blocks into logical commits with messages. Move blocks between them, edit the messages, and
+  Cairn makes the commits in order.
+- **History scrubber.** Drag along a file's timeline to see it at any version, with the lines
+  that version added highlighted, or press play to watch it grow.
+- **While you were away.** After a few hours away, History opens with what others put on `main`,
+  which pull requests merged, and a warning when it touches files you are changing too.
+- **Someone else is changing this too.** Cairn compares your changes with other people's recent
+  branches and tells you when someone is working on the same files, before it becomes a
+  conflict.
 - **Conflicts before they happen.** Cairn checks quietly in the background whether your branches
   and open pull requests would conflict with `main`, and names the files.
 
@@ -150,6 +160,21 @@ with a warning for any that still hold unmerged work.</td>
 
 <img src="docs/screenshots/dark/file-guard.png" alt="Private and big files flagged before a commit" width="100%">
 
+<img src="docs/screenshots/dark/split-commits.png" alt="Split uncommitted work into commits" width="100%">
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/away.png" alt="While you were away"></td>
+<td width="50%"><img src="docs/screenshots/dark/overlap.png" alt="Someone else is changing the same file"></td>
+</tr>
+<tr>
+<td><b>While you were away.</b> What landed on <code>main</code>, who did it, and which of it touches your files.</td>
+<td><b>Overlap warnings.</b> Someone else's branch changes a file you are changing too.</td>
+</tr>
+</table>
+
+<img src="docs/screenshots/dark/timeline.png" alt="File history timeline scrubber" width="100%">
+
 ### Pull requests, submodules and large files
 
 <img src="docs/screenshots/dark/pull-requests.png" alt="Pull request ready to merge" width="100%">
@@ -163,6 +188,16 @@ with a warning for any that still hold unmerged work.</td>
   for you. Cairn suggests reviewers: the people who last worked on the files you changed.
 - **Update branch.** When a pull request falls behind its base, bring it up to date with a merge
   or a rebase in one click.
+- **Try a pull request without leaving your branch.** One click checks it out into its own
+  folder and opens it in a new tab, your editor or a terminal. Your branch and uncommitted work
+  stay as they are.
+- **Review heat map.** Files are ranked by how risky they are to review: big changes, files that
+  change often, many authors, no tests changed with them, and sensitive areas such as auth or
+  migrations.
+- **Backport.** Copy a pull request onto release branches, each with its own branch and pull
+  request. It runs in separate worktrees, so your working tree is never touched.
+- **Stacks that restack themselves.** When the bottom pull request of a stack merges, Cairn moves
+  the branches above it onto `main`, pushes them and points their pull requests at `main`.
 - **Issues.** Read, filter, comment on, assign, close and reopen issues, open new ones, see the
   pull requests and branches linked to each, and start a branch for one.
 - **GitHub notifications.** Review requests, mentions, CI results and merged pull requests show
@@ -208,6 +243,18 @@ requests or AI, and one click publishes it.</td>
 <tr>
 <td><b>Suggested reviewers.</b> The people who last worked on the files you changed come first.</td>
 <td><b>Update branch.</b> A pull request behind its base catches up with a merge or a rebase.</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/dark/heat-map.png" alt="Review heat map and Try it"></td>
+<td width="50%"><img src="docs/screenshots/dark/backport.png" alt="Backport a pull request"></td>
+</tr>
+<tr>
+<td><b>Review heat map and Try it.</b> The riskiest files first, and the pull request running in
+its own folder.</td>
+<td><b>Backport.</b> One pull request per release branch, made in separate worktrees.</td>
 </tr>
 </table>
 

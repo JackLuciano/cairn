@@ -506,6 +506,150 @@ pub fn pr_checkout(git: &Git, number: u64) -> Result<String> {
     gh(git.dir(), &["pr", "checkout", &number.to_string()])
 }
 
+/// The local branch a pull request tried out in its own worktree gets.
+///
+/// # Arguments
+/// * `number` - pull request number
+///
+/// # Returns
+/// A name such as `try/pr-42`.
+pub fn try_branch(number: u64) -> String {
+    format!("try/pr-{number}")
+}
+
+/// Checks a pull request out into a new worktree, so it can be run and tested without leaving
+/// the current branch or touching uncommitted work.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `dest` - the folder for the worktree
+///
+/// # Returns
+/// `Ok(())` once the pull request is checked out there.
+pub fn try_pr(git: &Git, number: u64, dest: &std::path::Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    git.run(["worktree", "add", "-q", "--detach", &dest.to_string_lossy()])?;
+    let branch = try_branch(number);
+    if let Err(e) = gh(dest, &["pr", "checkout", &number.to_string(), "--branch", &branch, "--force"]) {
+        let _ = git.run(["worktree", "remove", "--force", &dest.to_string_lossy()]);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Removes a pull request's try-out worktree and its local branch.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+/// * `dest` - the worktree folder
+/// * `force` - remove it even with uncommitted changes
+///
+/// # Returns
+/// `Ok(())` once it is gone.
+pub fn end_try(git: &Git, number: u64, dest: &std::path::Path, force: bool) -> Result<()> {
+    crate::refs::remove_worktree(git, dest, force)?;
+    let _ = git.run(["branch", "-D", &try_branch(number)]);
+    Ok(())
+}
+
+/// Whether a pull request was merged.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `number` - pull request number
+///
+/// # Returns
+/// `true` once GitHub says it is merged.
+pub fn pr_merged(git: &Git, number: u64) -> bool {
+    gh(git.dir(), &["pr", "view", &number.to_string(), "--json", "state", "--jq", ".state"]).is_ok_and(|s| s.trim() == "MERGED")
+}
+
+/// What happened to one branch that was built on a pull request that merged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Restacked {
+    Moved(String),
+    Conflict(String),
+    Skipped(String),
+}
+
+/// Local branches built on top of `parent`, as recorded when they were created or restacked.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `parent` - the branch below
+///
+/// # Returns
+/// The branch names.
+pub fn children_of(git: &Git, parent: &str) -> Vec<String> {
+    git.run(["config", "--get-regexp", &format!(r"^branch\..*\.{PARENT_KEY}$")])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, p)| p.trim() == parent)
+        .filter_map(|(k, _)| k.strip_prefix("branch.").and_then(|k| k.strip_suffix(&format!(".{PARENT_KEY}"))).map(str::to_string))
+        .collect()
+}
+
+/// Moves the branches that were built on a pull request that just merged onto the main branch,
+/// pushes them and points their pull requests at the main branch. The rebase happens in a
+/// temporary worktree, so the user's working tree is only touched when one of these branches is
+/// checked out, and then only through `git reset --keep`, which keeps uncommitted work.
+///
+/// # Arguments
+/// * `git` - runner for the repository
+/// * `remote` - the remote, such as `origin`
+/// * `trunk` - the main branch name, such as `main`
+/// * `merged` - the branch of the pull request that merged
+/// * `prs` - open pull requests, to retarget the children's ones
+/// * `work_dir` - a folder for the temporary worktree
+///
+/// # Returns
+/// One result per child branch.
+pub fn restack_after_merge(git: &Git, remote: &str, trunk: &str, merged: &str, prs: &[PullRequest], work_dir: &std::path::Path) -> Vec<Restacked> {
+    let _ = git.run(["fetch", "-q", remote, trunk]);
+    let onto = format!("{remote}/{trunk}");
+    let current = git.run(["symbolic-ref", "--short", "-q", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_default();
+    let mut out = Vec::new();
+    for child in children_of(git, merged) {
+        let Ok(old) = git.run(["rev-parse", "--verify", "-q", &child]).map(|s| s.trim().to_string()) else { continue };
+        let upstream = recorded(git, &child, FORK_KEY).filter(|f| is_ancestor(git, f, &child)).unwrap_or_else(|| merged.to_string());
+        let dest = work_dir.join(format!("restack-{}", child.replace('/', "-")));
+        let _ = std::fs::create_dir_all(work_dir);
+        if git.run(["worktree", "add", "-q", "--detach", &dest.to_string_lossy(), &old]).is_err() {
+            out.push(Restacked::Skipped(child));
+            continue;
+        }
+        let wt = Git::new(&dest);
+        let rebased = wt.run(["rebase", "-q", "--onto", &onto, &upstream]).and_then(|_| wt.run(["rev-parse", "HEAD"])).map(|s| s.trim().to_string());
+        if rebased.is_err() {
+            let _ = wt.run(["rebase", "--abort"]);
+        }
+        let _ = git.run(["worktree", "remove", "--force", &dest.to_string_lossy()]);
+        let Ok(new) = rebased else {
+            out.push(Restacked::Conflict(child));
+            continue;
+        };
+        let moved = if child == current { git.run(["reset", "-q", "--keep", &new]) } else { git.run(["update-ref", &format!("refs/heads/{child}"), &new, &old]) };
+        if moved.is_err() {
+            out.push(Restacked::Skipped(child));
+            continue;
+        }
+        remember(git, &child, trunk, &onto);
+        let pushed = git.run(["push", "-q", "--force-with-lease", remote, &format!("refs/heads/{child}:refs/heads/{child}")]).is_ok();
+        if pushed
+            && let Some(pr) = prs.iter().find(|p| p.head == child && p.base != trunk)
+        {
+            let _ = gh(git.dir(), &["pr", "edit", &pr.number.to_string(), "--base", trunk]);
+        }
+        out.push(Restacked::Moved(child));
+    }
+    out
+}
+
 /// Adds a comment to a pull request's conversation.
 ///
 /// # Arguments
@@ -1133,6 +1277,44 @@ pub fn create_pr(git: &Git, base: &str, title: &str, body: &str, draft: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restacks_children_of_a_squash_merged_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let remote_dir = root.path().join("remote.git");
+        let work = root.path().join("work");
+        Git::new(root.path()).run(["init", "-q", "--bare", &remote_dir.to_string_lossy()]).unwrap();
+        Git::new(root.path()).run(["clone", "-q", &remote_dir.to_string_lossy(), &work.to_string_lossy()]).unwrap();
+        let git = Git::new(&work);
+        git.run(["config", "user.email", "t@example.com"]).unwrap();
+        git.run(["config", "user.name", "T"]).unwrap();
+        git.run(["checkout", "-qb", "main"]).unwrap();
+        std::fs::write(work.join("a.txt"), "1\n").unwrap();
+        git.run(["add", "."]).unwrap();
+        git.run(["commit", "-qm", "first"]).unwrap();
+        git.run(["push", "-q", "-u", "origin", "main"]).unwrap();
+        git.run(["checkout", "-qb", "lower"]).unwrap();
+        std::fs::write(work.join("lower.txt"), "lower\n").unwrap();
+        git.run(["add", "."]).unwrap();
+        git.run(["commit", "-qm", "lower work"]).unwrap();
+        git.run(["checkout", "-qb", "upper"]).unwrap();
+        remember(&git, "upper", "lower", "lower");
+        std::fs::write(work.join("upper.txt"), "upper\n").unwrap();
+        git.run(["add", "."]).unwrap();
+        git.run(["commit", "-qm", "upper work"]).unwrap();
+        git.run(["push", "-q", "origin", "upper"]).unwrap();
+        git.run(["checkout", "-q", "main"]).unwrap();
+        git.run(["merge", "-q", "--squash", "lower"]).unwrap();
+        git.run(["commit", "-qm", "lower work (#1)"]).unwrap();
+        git.run(["push", "-q", "origin", "main"]).unwrap();
+        assert_eq!(children_of(&git, "lower"), vec!["upper".to_string()]);
+        let r = restack_after_merge(&git, "origin", "main", "lower", &[], &root.path().join("wts"));
+        assert_eq!(r, vec![Restacked::Moved("upper".into())]);
+        let log = git.run(["log", "--format=%s", "upper"]).unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), vec!["upper work", "lower work (#1)", "first"]);
+        assert_eq!(recorded(&git, "upper", PARENT_KEY).as_deref(), Some("main"));
+        assert_eq!(git.run(["rev-parse", "upper"]).unwrap(), git.run(["rev-parse", "origin/upper"]).unwrap());
+    }
 
     #[test]
     fn issue_titles_become_short_branch_names() {

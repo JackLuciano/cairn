@@ -7,9 +7,12 @@ window after an update.
 
 ### Added
 
-- Cairn detects Git in the background and installs Git for Windows through WinGet if needed.
-  Settings → Advanced shows the detected executable and lets you browse for another,
-  detect Git again, or retry installation when Git is unavailable.
+- Cairn detects Git in the background. When Git is missing, it offers to install Git for Windows
+  through WinGet or to choose an existing Git. Settings → Advanced shows the detected executable
+  and lets you browse for another, detect Git again, or install Git.
+- History shows the total commit count and lets you drag the scrollbar anywhere in the list.
+  Row details load as you scroll. Search by commit message, author name, email, or hash,
+  and use the × in the search field to clear the filter.
 - Opt in to Gravatar photos for commit authors in Settings → Appearance.
   History shows initials when Gravatar is off or no image is available.
   Cached images are available offline and refresh in the background after 24 hours.
@@ -39,10 +42,27 @@ window after an update.
 - "Update branch" on a pull request that is behind its base, with a merge or a rebase.
 - The New pull request dialog suggests reviewers: the people who last worked on the files you
   changed.
+- Split into commits (Changes page): AI sorts your uncommitted work into logical commits with
+  messages. Move blocks between commits, edit the messages, and Cairn makes them in order.
+  Without AI the changes are grouped by folder.
+- "While you were away": after a few hours away, History shows what others put on the main branch,
+  which pull requests merged, and warns when it touches files you are changing. AI can summarize it.
+- Cairn warns on the Changes page when someone else's recent branch changes the same files as you.
+- Try a pull request without leaving your branch: "Try it" checks it out into its own worktree and
+  opens it in a new tab, your editor or a terminal.
+- Review heat map on a pull request's Files tab: files ranked by review risk, with the reasons.
+- Backport a pull request onto release branches, one new pull request per branch, made in separate
+  worktrees.
+- When the pull request at the bottom of a stack merges, Cairn moves the branches built on it onto
+  the main branch, pushes them and retargets their pull requests (Settings → Accounts & remotes).
+- Timeline on the File history page: scrub through a file's versions, with the lines each version
+  added highlighted, or play them back.
 
 ### Fixed
 
 - Cairn no longer installs a downloaded update on close after automatic updates were turned off.
+- The progress card of a pull, push or fetch now closes when it finishes instead of staying at
+  100% "Finishing up".
 
 ## [0.6.0] - 2026-11-14
 

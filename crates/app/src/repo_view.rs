@@ -77,17 +77,20 @@ pub(crate) struct SelectedChange {
 
 pub(crate) struct Loaded {
     status: RepoStatus,
-    commits: Vec<CommitInfo>,
-    rows: Vec<GraphRow>,
-    owners: Vec<Option<String>>,
-    palette: Vec<usize>,
-    owner_colors: std::collections::HashMap<String, usize>,
+    history_revision: Option<HistoryRevision>,
     branches: Vec<Branch>,
     tags: Vec<Tag>,
     stashes: Vec<Stash>,
     remotes: Vec<Remote>,
     in_progress: InProgress,
     worktrees: Vec<cairn_core::refs::Worktree>,
+}
+
+#[derive(PartialEq, Eq)]
+struct HistoryRevision {
+    head: cairn_core::status::BranchInfo,
+    refs: String,
+    shallow: Vec<u8>,
 }
 
 pub(crate) struct OpenRepoEvent(pub std::path::PathBuf);
@@ -151,28 +154,31 @@ pub(crate) fn focus_hot(commits: &[CommitInfo], focus: Option<&str>, searching: 
     graph::reachable(commits, &tip.id)
 }
 
-fn load_all(repo: &Repository, settings: &Settings, search: Option<String>, limit: usize, focus: Option<String>) -> cairn_core::Result<Loaded> {
+fn load_history(repo: &Repository, mut opts: LogOptions, focus: Option<&str>) -> cairn_core::Result<(Vec<CommitInfo>, crate::history::HistoryLayout)> {
+    if opts.scope == LogScope::CurrentBranch && !repo.has_commits() {
+        opts.scope = LogScope::AllRefs;
+    }
+    let commits = cairn_core::log::load_log_index(&repo.git, &opts)?;
+    let layout = crate::history::HistoryLayout::compute(&commits, focus, opts.search.is_some());
+    Ok((commits, layout))
+}
+
+fn load_all(repo: &Repository) -> cairn_core::Result<Loaded> {
     let git = &repo.git;
     let status = cairn_core::status::load_status(git)?;
-    let searching = search.is_some();
-    let opts = LogOptions {
-        scope: if settings.graph.all_branches || !repo.has_commits() { LogScope::AllRefs } else { LogScope::CurrentBranch },
-        limit: limit.max(settings.graph.page_size.max(50)),
-        first_parent: settings.graph.first_parent,
-        include_remotes: settings.graph.show_remotes,
-        include_stashes: settings.graph.show_stashes,
-        search,
-        ..Default::default()
-    };
-    let commits = cairn_core::log::load_log(git, &opts)?;
-    let laid = crate::history::HistoryLayout::compute(&commits, focus.as_deref(), searching);
+    let history_revision = (|| {
+        let refs = git.run(["for-each-ref", "--format=%(objectname) %(refname) %(symref)"]).ok()?;
+        let shallow_path = git.run(["rev-parse", "--path-format=absolute", "--git-path", "shallow"]).ok()?;
+        let shallow = match std::fs::read(shallow_path.trim_end()) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return None,
+        };
+        Some(HistoryRevision { head: status.branch.clone(), refs, shallow })
+    })();
     Ok(Loaded {
         status,
-        commits,
-        rows: laid.rows,
-        owners: laid.owners,
-        palette: laid.palette,
-        owner_colors: laid.owner_colors,
+        history_revision,
         branches: cairn_core::refs::list_branches(git).unwrap_or_default(),
         tags: cairn_core::refs::list_tags(git).unwrap_or_default(),
         stashes: cairn_core::refs::list_stashes(git).unwrap_or_default(),
@@ -187,7 +193,7 @@ pub(crate) struct RepoView {
     pub name: SharedString,
     pub settings: Settings,
     pub status: RepoStatus,
-    pub commits: Vec<CommitInfo>,
+    pub commits: Arc<Vec<CommitInfo>>,
     pub rows: Vec<GraphRow>,
     pub owners: Vec<Option<String>>,
     pub palette: Vec<usize>,
@@ -212,7 +218,14 @@ pub(crate) struct RepoView {
     pub trunk: Option<String>,
     pub clashes: std::collections::HashMap<String, Vec<String>>,
     conflict_sig: String,
-    pub history_limit: usize,
+    pub history_query: Option<LogOptions>,
+    history_revision: Option<HistoryRevision>,
+    history_task: Option<Task<()>>,
+    reload_task: Option<Task<()>>,
+    pub history_row_details: std::collections::HashMap<String, cairn_core::log::CommitRowDetails>,
+    pub history_row_task: Option<Task<()>>,
+    pub history_failed_rows: std::collections::HashSet<String>,
+    history_search_task: Option<Task<()>>,
     pub loading_more: bool,
     pub history_visible: std::ops::Range<usize>,
     pub history_width: std::rc::Rc<std::cell::Cell<f32>>,
@@ -222,6 +235,8 @@ pub(crate) struct RepoView {
     pub branch_filter: crate::pages::branches::BranchFilter,
     pub live_op: Option<crate::live_op::LiveOp>,
     pub live_cancel: Option<cairn_core::git::CancelHandle>,
+    /// Where the running operation reports its progress; its watcher stops once this changes.
+    pub live_progress: Option<crate::live_op::SharedProgress>,
     pub busy_warned: bool,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
@@ -262,6 +277,7 @@ pub(crate) struct RepoView {
     pub releases: crate::pages::releases::ReleasesState,
     pub search_page: crate::pages::search::SearchState,
     pub issues: crate::pages::issues::IssuesState,
+    pub aware: crate::awareness::Awareness,
     focus: FocusHandle,
     watcher: Option<crate::watcher::RepoWatcher>,
     pub(crate) _tasks: Vec<Task<()>>,
@@ -289,10 +305,19 @@ impl RepoView {
         let body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 10).placeholder(tr("changes.body_placeholder")));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("history.search_placeholder")));
         cx.subscribe(&summary, |_, _, _: &gpui_kit::component::input::InputEvent, cx| cx.notify()).detach();
-        cx.subscribe(&search, |this: &mut Self, s, ev: &gpui_kit::component::input::InputEvent, cx| {
-            let empty = s.read(cx).value().is_empty();
-            if matches!(ev, gpui_kit::component::input::InputEvent::PressEnter { .. }) || (empty && matches!(ev, gpui_kit::component::input::InputEvent::Change)) {
-                this.reload(cx);
+        cx.subscribe(&search, |this: &mut Self, _, ev: &gpui_kit::component::input::InputEvent, cx| {
+            match ev {
+                gpui_kit::component::input::InputEvent::PressEnter { .. } => {
+                    this.history_search_task = None;
+                    this.reload(cx);
+                }
+                gpui_kit::component::input::InputEvent::Change => {
+                    this.history_search_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                        let _ = this.update(cx, |this, cx| this.reload(cx));
+                    }));
+                }
+                _ => {}
             }
         })
         .detach();
@@ -301,7 +326,7 @@ impl RepoView {
             name,
             settings,
             status: RepoStatus::default(),
-            commits: Vec::new(),
+            commits: Arc::default(),
             rows: Vec::new(),
             owners: Vec::new(),
             palette: Vec::new(),
@@ -326,7 +351,14 @@ impl RepoView {
             trunk: None,
             clashes: Default::default(),
             conflict_sig: String::new(),
-            history_limit: 0,
+            history_query: None,
+            history_revision: None,
+            history_task: None,
+            reload_task: None,
+            history_row_details: Default::default(),
+            history_row_task: None,
+            history_failed_rows: Default::default(),
+            history_search_task: None,
             loading_more: false,
             history_visible: 0..0,
             history_width: Default::default(),
@@ -336,6 +368,7 @@ impl RepoView {
             branch_filter: Default::default(),
             live_op: None,
             live_cancel: None,
+            live_progress: None,
             busy_warned: false,
             multi_select: Vec::new(),
             last_clicked: None,
@@ -376,6 +409,7 @@ impl RepoView {
             releases: crate::pages::releases::ReleasesState::new(window, cx),
             search_page: crate::pages::search::SearchState::new(window, cx),
             issues: crate::pages::issues::IssuesState::new(window, cx),
+            aware: Default::default(),
             focus: cx.focus_handle(),
             watcher: None,
             _tasks: Vec::new(),
@@ -457,13 +491,50 @@ impl RepoView {
     fn start_pr_polling(&mut self, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
             let mut last: std::collections::HashMap<u64, (String, String)> = std::collections::HashMap::new();
+            let mut open_before: Vec<(u64, String)> = Vec::new();
             let mut first = true;
             loop {
                 let Ok((git, settings)) = this.read_with(cx, |v, _| (v.git(), v.settings.clone())) else { return };
-                let wanted = settings.remotes.show_prs_in_graph || settings.notifications.ci_finished || settings.notifications.reviews;
+                let wanted = settings.remotes.show_prs_in_graph || settings.notifications.ci_finished || settings.notifications.reviews || settings.remotes.auto_restack;
                 if wanted {
-                    let prs = cx.background_executor().spawn(async move { cairn_core::stack::list_prs(&git).ok() }).await;
+                    let g = git.clone();
+                    let prs = cx.background_executor().spawn(async move { cairn_core::stack::list_prs(&g).ok() }).await;
                     let Some(prs) = prs else { return };
+                    let vanished: Vec<(u64, String)> = if first { Vec::new() } else { open_before.iter().filter(|(n, _)| !prs.iter().any(|p| p.number == *n)).cloned().collect() };
+                    open_before = prs.iter().map(|p| (p.number, p.head.clone())).collect();
+                    if settings.remotes.auto_restack && !vanished.is_empty() {
+                        let Ok((remote, trunk, dir)) = this.read_with(cx, |v, _| (v.default_remote().unwrap_or_else(|| "origin".into()), v.trunk.clone().unwrap_or_else(|| "main".into()), v.worktree_base().join("restack"))) else { return };
+                        let open_prs = prs.clone();
+                        let notes = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let mut notes = Vec::new();
+                                for (number, head) in vanished {
+                                    if cairn_core::stack::children_of(&git, &head).is_empty() || !cairn_core::stack::pr_merged(&git, number) {
+                                        continue;
+                                    }
+                                    for r in cairn_core::stack::restack_after_merge(&git, &remote, &trunk, &head, &open_prs, &dir) {
+                                        notes.push(match r {
+                                            cairn_core::stack::Restacked::Moved(b) => t!("restack.moved", branch = b, n = number, trunk = trunk.clone()).to_string(),
+                                            cairn_core::stack::Restacked::Conflict(b) => t!("restack.conflict", branch = b, n = number).to_string(),
+                                            cairn_core::stack::Restacked::Skipped(b) => t!("restack.skipped", branch = b, n = number).to_string(),
+                                        });
+                                    }
+                                }
+                                notes
+                            })
+                            .await;
+                        if !notes.is_empty()
+                            && this
+                                .update(cx, |v, cx| {
+                                    v.pending_notice = Some(notes.join("\n"));
+                                    v.reload(cx);
+                                })
+                                .is_err()
+                        {
+                            return;
+                        }
+                    }
                     let mut notices = Vec::new();
                     for p in &prs {
                         let done = !p.checks.is_empty() && p.checks.iter().all(|c| matches!(c.state(), "passed" | "failed" | "skipped"));
@@ -564,6 +635,7 @@ impl RepoView {
             }
             Page::FileHistory => {
                 self.load_blame_files(cx);
+                self.file_history.timeline = std::env::var("CAIRN_DEBUG_TIMELINE").is_ok();
                 if let Ok(f) = std::env::var("CAIRN_DEBUG_FILE") {
                     self.open_file_history(f, cx);
                 }
@@ -634,6 +706,32 @@ impl RepoView {
 
     pub(crate) fn git(&self) -> Git {
         self.repo.git.clone()
+    }
+
+    /// The folder new worktrees of this repository go in: the one set in Settings → Workspace,
+    /// or a `<name>-worktrees` folder next to the repository.
+    ///
+    /// # Returns
+    /// The folder, which may not exist yet.
+    pub(crate) fn worktree_base(&self) -> std::path::PathBuf {
+        if self.settings.workspace.worktree_dir.trim().is_empty() {
+            self.repo.root.parent().map(|p| p.join(format!("{}-worktrees", self.name))).unwrap_or_else(|| self.repo.root.join("..worktrees"))
+        } else {
+            std::path::PathBuf::from(self.settings.workspace.worktree_dir.trim()).join(self.name.to_string())
+        }
+    }
+
+    /// The worktree a pull request is tried out in.
+    ///
+    /// # Arguments
+    /// * `number` - the pull request
+    ///
+    /// # Returns
+    /// The folder, and whether that worktree exists now.
+    pub(crate) fn try_dir(&self, number: u64) -> (std::path::PathBuf, bool) {
+        let dir = self.worktree_base().join(format!("pr-{number}"));
+        let exists = self.worktrees.iter().any(|w| crate::app::same(&w.path, &dir));
+        (dir, exists)
     }
 
     pub(crate) fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
@@ -830,16 +928,22 @@ impl RepoView {
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         let repo = self.repo.clone();
-        let settings = self.settings.clone();
         let search = Some(self.search.read(cx).value().trim().to_string()).filter(|s| !s.is_empty());
-        let limit = self.history_limit;
-        let focus = self.focus_branch.clone();
-        let task = cx.spawn(async move |this, cx| {
-            let loaded = cx.background_executor().spawn(async move { load_all(&repo, &settings, search, limit, focus) }).await;
+        let graph = &self.settings.graph;
+        let opts = LogOptions {
+            scope: if graph.all_branches { LogScope::AllRefs } else { LogScope::CurrentBranch },
+            limit: None,
+            first_parent: graph.first_parent,
+            include_remotes: graph.show_remotes,
+            include_stashes: graph.show_stashes,
+            search,
+            ..Default::default()
+        };
+        self.reload_task = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx.background_executor().spawn(async move { load_all(&repo) }).await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 match loaded {
-                    Ok(l) => this.apply_loaded(l, cx),
+                    Ok(loaded) => this.apply_loaded(loaded, opts, cx),
                     Err(e) => {
                         this.loaded_once = true;
                         log_error(&e.to_string());
@@ -847,12 +951,77 @@ impl RepoView {
                 }
                 cx.notify();
             });
-        });
-        self._tasks.push(task);
-        self._tasks.retain(|t| !t.is_ready());
+        }));
     }
 
-    fn apply_loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
+    fn refresh_history(&mut self, opts: LogOptions, revision: Option<HistoryRevision>, cx: &mut Context<Self>) {
+        let query_changed = self.history_query.as_ref() != Some(&opts);
+        if !query_changed && revision.is_some() && self.history_revision == revision {
+            self.history_failed_rows.clear();
+            return;
+        }
+        let repo = self.repo.clone();
+        let focus = self.focus_branch.clone();
+        let requested_focus = focus.clone();
+        if self.history_revision != revision || revision.is_none() {
+            self.history_row_task = None;
+            self.history_row_details.clear();
+            self.history_failed_rows.clear();
+        }
+        self.history_query = Some(opts.clone());
+        self.history_revision = revision;
+        self.loading_more = true;
+        self.history_task = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx.background_executor().spawn(async move { load_history(&repo, opts, focus.as_deref()) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_more = false;
+                match loaded {
+                    Ok((commits, layout)) => {
+                        if query_changed {
+                            this.history_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                        }
+                        this.apply_history(commits, layout, cx);
+                        if this.focus_branch != requested_focus {
+                            this.refresh_history_layout(cx);
+                        }
+                    }
+                    Err(err) => {
+                        this.history_revision = None;
+                        log_error(&err.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn apply_history(&mut self, commits: Vec<CommitInfo>, layout: crate::history::HistoryLayout, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        let first_load = self.commits.is_empty();
+        let before = self.commits.iter().take(50).map(|c| c.id.clone()).collect();
+        self.commits = Arc::new(commits);
+        self.last_clicked = None;
+        layout.apply(self);
+        self.mark_fresh(&before, cx);
+        let commits = &self.commits;
+        self.multi_select.retain(|id| commits.iter().any(|c| &c.id == id));
+        if self.multi_select.len() < 2 {
+            self.multi_select.clear();
+        }
+        #[cfg(debug_assertions)]
+        if first_load
+            && let Some(n) = std::env::var("CAIRN_DEBUG_MULTI").ok().and_then(|v| v.parse::<usize>().ok())
+        {
+            self.multi_select = self.commits.iter().skip(1).take(n).map(|c| c.id.clone()).collect();
+        }
+        if self.selected_commit.as_ref().is_none_or(|id| !self.commits.iter().any(|commit| &commit.id == id))
+            && let Some(first) = self.commits.first()
+        {
+            self.select_commit(first.id.clone(), cx);
+        }
+    }
+
+    fn apply_loaded(&mut self, l: Loaded, opts: LogOptions, cx: &mut Context<Self>) {
         let before_behind = self.status.branch.behind;
         let had_conflicts = self.status.conflicted().next().is_some();
         let had_status = self.loaded_once;
@@ -864,24 +1033,7 @@ impl RepoView {
             }
         }
         self.status = l.status;
-        let before: std::collections::HashSet<String> = if self.loaded_once { self.commits.iter().take(50).map(|c| c.id.clone()).collect() } else { Default::default() };
-        self.commits = l.commits;
-        self.mark_fresh(&before, cx);
-        let commits = &self.commits;
-        self.multi_select.retain(|id| commits.iter().any(|c| &c.id == id));
-        if self.multi_select.len() < 2 {
-            self.multi_select.clear();
-        }
-        #[cfg(debug_assertions)]
-        if !self.loaded_once
-            && let Some(n) = std::env::var("CAIRN_DEBUG_MULTI").ok().and_then(|v| v.parse::<usize>().ok())
-        {
-            self.multi_select = self.commits.iter().skip(1).take(n).map(|c| c.id.clone()).collect();
-        }
-        self.rows = l.rows;
-        self.owners = l.owners;
-        self.palette = l.palette;
-        self.owner_colors = l.owner_colors;
+        self.refresh_history(opts, l.history_revision, cx);
         self.branches = l.branches;
         self.tags = l.tags;
         self.stashes = l.stashes;
@@ -890,7 +1042,7 @@ impl RepoView {
         self.in_progress = l.in_progress;
         let first_load = !self.loaded_once;
         self.loaded_once = true;
-        if first_load && !self.status.is_clean() && self.commits.is_empty() {
+        if first_load && !self.status.is_clean() && self.status.branch.oid.is_none() && self.branches.is_empty() {
             self.page = Page::Changes;
         }
         let has_conflicts = self.status.conflicted().next().is_some();
@@ -912,13 +1064,8 @@ impl RepoView {
                 self.line_selection.clear();
             }
         }
-        if self.selected_commit.is_none()
-            && let Some(first) = self.commits.first()
-        {
-            let id = first.id.clone();
-            self.select_commit(id, cx);
-        }
         self.check_conflicts(cx);
+        self.after_loaded(cx);
     }
 
     /// Finds branches and pull requests that would conflict with the branch they go into, in the
@@ -1087,6 +1234,7 @@ impl RepoView {
         let sink = progress.clone();
         let cancel = cairn_core::git::CancelHandle::default();
         self.live_cancel = Some(cancel.clone());
+        self.live_progress = Some(progress.clone());
         let git = self
             .git()
             .with_progress(move |phase, done| {
@@ -1111,6 +1259,7 @@ impl RepoView {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 this.live_cancel = None;
+                this.live_progress = None;
                 let ok = result.is_ok();
                 let cancelled = matches!(result, Err(cairn_core::Error::Cancelled));
                 let shown = if cancelled {
@@ -1245,6 +1394,23 @@ impl RepoView {
     }
 
     fn handle_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The input handles its standard Paste action first. Handle an unclaimed Windows Ctrl+V
+        // here as well, while preserving the selection and caret in the History search field.
+        #[cfg(windows)]
+        if self.page == Page::History
+            && ev.keystroke.key.eq_ignore_ascii_case("v")
+            && ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.shift
+            && !ev.keystroke.modifiers.alt
+            && self.search.read(cx).focus_handle(cx).is_focused(window)
+            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        {
+            self.search.update(cx, |search, cx| search.replace(text.trim(), window, cx));
+            self.history_search_task = None;
+            self.reload(cx);
+            cx.stop_propagation();
+            return;
+        }
         if ev.keystroke.key_char.as_deref() == Some("?") && !window.has_focused_input(cx) {
             crate::palette::open_keymap(self.settings.keyboard.vim_keys, window, cx);
             return;
@@ -1910,8 +2076,7 @@ impl RepoView {
             .when(clash, |d| d.child(item(IconName::TriangleAlert, t!("conflicts_early.with", base = self.trunk.clone().unwrap_or_else(|| "main".into())).to_string().into(), theme.red)))
             .child(div().flex_1())
             .when_some(self.busy.clone(), |d, b| d.child(hstack().gap_1p5().child(gpui_kit::component::spinner::Spinner::new().xsmall()).child(b)))
-            .when(self.loading_more, |d| d.child(tr("history.loading_more")))
-            .child(crate::widgets::plural("status_bar.commits", self.commits.len()))
+            .when(!self.loading_more, |d| d.child(crate::widgets::plural("status_bar.commits", self.commits.len())))
     }
 }
 

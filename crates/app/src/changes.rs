@@ -361,6 +361,7 @@ impl RepoView {
         let file = f.clone();
         let root = self.repo.root.clone();
         let view = cx.entity();
+        let overlap = self.overlap_for(&f.path).map(|o| t!("overlap.file_tip", who = o.author.clone(), branch = o.branch.clone()).to_string());
         div()
             .id(SharedString::from(format!("{}-{}", if staged { "s" } else { "u" }, f.path)))
             .group("file-row")
@@ -383,6 +384,15 @@ impl RepoView {
                     .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
                     .when(!dir.is_empty(), |d| d.child(div().truncate().text_size(px(11.)).text_color(theme.muted_foreground).child(dir.trim_end_matches('/').to_string()))),
             )
+            .when_some(overlap, |d, tip| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("overlap-{}-{}", staged, f.path)))
+                        .flex_none()
+                        .child(icon(IconName::Users).xsmall().text_color(theme.yellow))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)),
+                )
+            })
             .child(
                 div()
                     .invisible()
@@ -488,12 +498,14 @@ impl RepoView {
         let all_unstaged_paths: Vec<String> = unstaged.iter().map(|f| f.path.clone()).collect();
         let all_staged_paths: Vec<String> = staged.iter().map(|f| f.path.clone()).collect();
         let discard_all = unstaged.clone();
+        let overlap_banner = self.render_overlap_banner(cx);
 
         v_flex()
             .id("file-list")
             .size_full()
             .overflow_y_scroll()
             .p_1()
+            .children(overlap_banner)
             .when(!conflicted.is_empty(), |d| {
                 d.child(section_label(t!("changes.conflicted", n = conflicted.len()).to_string(), cx))
                     .children(conflicted.iter().map(|f| {
@@ -602,6 +614,17 @@ impl RepoView {
                         .label(tr("changes.write_message"))
                         .tooltip(tr("changes.write_message_tip"))
                         .on_click(cx.listener(|this, _, window, cx| this.suggest_message(window, cx))),
+                )
+            })
+            .when(!self.amend && self.committable_files() > 0, |d| {
+                d.child(
+                    crate::widgets::framed_if(Button::new("split-commits"), Tone::Plain, self.busy.is_none(), cx)
+                        .w_full()
+                        .h(px(30.))
+                        .icon(icon(IconName::Split))
+                        .label(tr("split_work.button"))
+                        .tooltip(tr("split_work.button_tip"))
+                        .on_click(cx.listener(|_, _, window, cx| crate::split_changes::open(cx.entity(), window, cx))),
                 )
             })
             .child(

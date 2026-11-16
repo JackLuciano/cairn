@@ -3,6 +3,8 @@
 mod ai;
 mod app;
 mod assist;
+mod awareness;
+mod backport;
 mod branch_actions;
 mod branch_picker;
 mod changes;
@@ -29,6 +31,7 @@ mod goto_file;
 mod issue_branch;
 mod new_pr;
 mod settings_dialog;
+mod split_changes;
 mod skeleton;
 mod sync;
 mod theme;

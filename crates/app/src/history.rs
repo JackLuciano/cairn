@@ -2,6 +2,7 @@ use cairn_core::graph::{GraphRow, LinePart};
 use cairn_core::log::{CommitDetails, CommitInfo, RefKind};
 use cairn_core::settings::{DateFormat, GraphStyle};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::{ActiveTheme, Sizable, WindowExt as _, h_flex, v_flex};
@@ -321,7 +322,11 @@ impl HistoryLayout {
         let hot = crate::repo_view::focus_hot(commits, focus, searching);
         let owners = if searching { vec![None; commits.len()] } else { cairn_core::graph::branch_owners(commits) };
         let (palette, owner_colors) = cairn_core::graph::owner_colors(&owners);
-        let rows = cairn_core::graph::layout_focused(commits, hot.as_deref(), (!searching).then_some(palette.as_slice()));
+        let rows = if searching {
+            cairn_core::graph::layout_filtered(commits)
+        } else {
+            cairn_core::graph::layout_focused(commits, hot.as_deref(), Some(&palette))
+        };
         Self { rows, owners, palette, owner_colors }
     }
 
@@ -330,6 +335,9 @@ impl HistoryLayout {
         if self.rows.len() != view.commits.len() {
             return;
         }
+        let (lane_width, graph_width) = graph_metrics(self.rows.iter().map(|row| row.width).max().unwrap_or(1).max(1));
+        view.graph_w = graph_width;
+        view.graph_lane_w = lane_width;
         view.rows = self.rows;
         view.owners = self.owners;
         view.palette = self.palette;
@@ -499,11 +507,25 @@ impl RepoView {
         if self.focus_branch.as_deref().is_some_and(|n| self.current_branch() == Some(n)) {
             self.focus_branch = None;
         }
-        let searching = !self.search.read(cx).value().trim().is_empty();
+        self.refresh_history_layout(cx);
+    }
+
+    pub(crate) fn refresh_history_layout(&mut self, cx: &mut Context<Self>) {
+        let searching = self.history_query.as_ref().is_some_and(|query| query.search.is_some());
         let commits = self.commits.clone();
         let focus = self.focus_branch.clone();
+        let requested_focus = focus.clone();
+        let requested_commits = commits.clone();
         cx.notify();
-        self.spawn_bg(move || HistoryLayout::compute(&commits, focus.as_deref(), searching), |this, laid, _| laid.apply(this), cx);
+        self.spawn_bg(
+            move || HistoryLayout::compute(&commits, focus.as_deref(), searching),
+            move |this, laid, _| {
+                if std::sync::Arc::ptr_eq(&this.commits, &requested_commits) && this.focus_branch == requested_focus {
+                    laid.apply(this);
+                }
+            },
+            cx,
+        );
     }
 
     /// The color a branch is drawn in, matching its line in the graph.
@@ -523,9 +545,7 @@ impl RepoView {
 
     /// Whether the history has commits of more than one branch, so the branch column helps.
     fn shows_branch_column(&self) -> bool {
-        let mut names = self.owners.iter().flatten();
-        let first = names.next();
-        first.is_some() && names.any(|n| Some(n) != first)
+        self.owner_colors.len() > 1
     }
 
     /// Which optional columns fit next to a readable commit message at the list's current width.
@@ -547,49 +567,30 @@ impl RepoView {
         (show_branch, show_author)
     }
 
-    /// Loads another page of history once the list is scrolled near its end.
-    ///
-    /// # Arguments
-    /// * `last_visible` - index of the last row being drawn
-    fn maybe_load_more(&mut self, last_visible: usize, cx: &mut Context<Self>) {
-        let page = self.settings.graph.page_size.max(50);
-        let limit = self.history_limit.max(page);
-        if self.loading_more || self.commits.len() < limit || last_visible + 20 < self.commits.len() {
+    fn load_visible_history_rows(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        if self.loading_more || self.history_row_task.is_some() {
             return;
         }
-        self.history_limit = limit + page;
-        self.loading_more = true;
+        let missing = |commit: &CommitInfo| !self.history_row_details.contains_key(&commit.id) && !self.history_failed_rows.contains(&commit.id);
+        let Some(first) = range.into_iter().find(|&ix| self.commits.get(ix).is_some_and(missing)) else { return };
+        let page_size = self.settings.graph.page_size.clamp(50, 250);
+        let start = first / page_size * page_size;
+        let end = (start + page_size).min(self.commits.len());
+        let ids: Vec<_> = self.commits[start..end].iter().filter(|commit| missing(commit)).map(|commit| commit.id.clone()).collect();
         let git = self.git();
-        let settings = self.settings.clone();
-        let have = self.commits.clone();
-        let focus = self.focus_branch.clone();
-        let opts = cairn_core::log::LogOptions {
-            scope: if settings.graph.all_branches { cairn_core::log::LogScope::AllRefs } else { cairn_core::log::LogScope::CurrentBranch },
-            limit: page,
-            skip: have.len(),
-            first_parent: settings.graph.first_parent,
-            include_remotes: settings.graph.show_remotes,
-            include_stashes: settings.graph.show_stashes,
-            ..Default::default()
-        };
-        self.spawn_bg(
-            move || {
-                let more = cairn_core::log::load_log(&git, &opts).unwrap_or_default();
-                let mut all = have;
-                let known: std::collections::HashSet<String> = all.iter().map(|c| c.id.clone()).collect();
-                all.extend(more.into_iter().filter(|c| !known.contains(&c.id)));
-                let laid = HistoryLayout::compute(&all, focus.as_deref(), false);
-                (all, laid)
-            },
-            |this, (all, laid), _| {
-                this.loading_more = false;
-                if all.len() >= this.commits.len() {
-                    this.commits = all;
-                    laid.apply(this);
+        self.history_row_task = Some(cx.spawn(async move |this, cx| {
+            let requested_ids = ids.clone();
+            let result = cx.background_executor().spawn(async move { cairn_core::log::load_log_rows(&git, &ids) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.history_row_task = None;
+                match result {
+                    Ok(rows) => this.history_row_details.extend(rows),
+                    Err(err) => crate::repo_view::log_error(&err.to_string()),
                 }
-            },
-            cx,
-        );
+                this.history_failed_rows.extend(requested_ids.into_iter().filter(|id| !this.history_row_details.contains_key(id)));
+                cx.notify();
+            });
+        }));
     }
 
     /// Commits that arrived since the last load, shown with a short slide-in.
@@ -612,7 +613,8 @@ impl RepoView {
             return None;
         }
         let theme = cx.theme().clone();
-        let range = if self.history_visible.is_empty() { 0..self.owners.len().min(30) } else { self.history_visible.start..self.history_visible.end.min(self.owners.len()) };
+        let count = self.owners.len();
+        let range = if self.history_visible.is_empty() { 0..count.min(30) } else { self.history_visible.start.min(count)..self.history_visible.end.min(count) };
         let mut names: Vec<(String, usize)> = Vec::new();
         for owner in self.owners[range].iter().flatten() {
             if !names.iter().any(|(n, _)| n == owner)
@@ -795,6 +797,7 @@ impl RepoView {
         let row = self.rows[ix].clone();
         let theme = cx.theme().clone();
         let selected = if self.multi_select.is_empty() { self.selected_commit.as_deref() == Some(commit.id.as_str()) } else { self.multi_select.contains(&commit.id) };
+        let left_padding = if selected { 10. } else { 12. };
         let is_head = commit.refs.iter().any(|r| r.is_head);
         let graph_w = self.graph_w;
         let lane_w = self.graph_lane_w;
@@ -806,7 +809,10 @@ impl RepoView {
         let id = commit.id.clone();
         let menu_id = commit.id.clone();
         let short = commit.short_id(self.settings.graph.hash_length.clamp(4, 40)).to_string();
-        let time = self.format_time(commit.time);
+        let details = self.history_row_details.get(&commit.id);
+        let awaiting_details = details.is_none() && !self.history_failed_rows.contains(&commit.id);
+        let time = details.map(|details| self.format_time(details.time)).unwrap_or_default();
+        let author = details.map(|details| details.author.clone()).unwrap_or_default();
         let view = cx.entity();
         let faded = row.dim && !selected;
         let (show_branch, show_author) = self.fitting_columns();
@@ -817,6 +823,7 @@ impl RepoView {
 
         let card = self.card_info(ix, cx);
         let fresh = self.fresh.contains(&commit.id);
+        let landed = !selected && self.landed_while_away(&commit.id);
         let row_el = div()
             .id(("commit", ix))
             .h(px(ROW_H))
@@ -825,7 +832,8 @@ impl RepoView {
             .items_center()
             .bg(bg)
             .when(selected, |d| d.bg(linear_gradient(90., linear_color_stop(theme.primary.opacity(0.22), 0.), linear_color_stop(bg, 0.45))).border_l_2().border_color(theme.primary))
-            .tooltip(move |_, cx| cx.new(|cx| CommitCard::new(card.clone(), cx)).into())
+            .when(landed, |d| d.bg(linear_gradient(90., linear_color_stop(theme.blue.opacity(0.1), 0.), linear_color_stop(bg, 0.3))).border_l_2().border_color(theme.blue.opacity(0.8)))
+            .when_some(card, |row, card| row.tooltip(move |_, cx| cx.new(|cx| CommitCard::new(card.clone(), cx)).into()))
             .on_mouse_down(MouseButton::Right, {
                 let id = commit.id.clone();
                 move |_, window, _| {
@@ -857,7 +865,7 @@ impl RepoView {
                 let target = commit.id.clone();
                 move |this, d: &crate::drag::DragCommits, window, cx| this.drop_commits(d.ids.clone(), target.clone(), window, cx)
             }))
-            .pl_3()
+            .pl(px(left_padding))
             .pr_4()
             .gap(px(10.))
             .when(show_graph, |d| {
@@ -909,9 +917,19 @@ impl RepoView {
                         ),
                 )
             })
-            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).child(commit_author_avatar(&commit.author, &commit.email, px(22.), self.settings.appearance.load_gravatar, cx))))
-            .when(show_author, |d| d.child(div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted).child(commit.author.clone())))
-            .child(div().flex_none().w(px(76.)).text_right().text_xs().text_color(muted).child(time))
+            .when(show_author && self.settings.appearance.show_avatars, |d| d.child(div().flex_none().w(px(22.)).when(faded, |d| d.opacity(TEXT_DIM_ALPHA)).when_some(details, |d, details| d.child(commit_author_avatar(&details.author, &details.email, px(22.), self.settings.appearance.load_gravatar, cx)))))
+            .when(show_author, |d| {
+                d.child(
+                    div().flex_none().w(px(110.)).truncate().text_xs().text_color(muted)
+                        .when(awaiting_details, |cell| cell.child(crate::skeleton::history_cell(72., cx)))
+                        .child(author),
+                )
+            })
+            .child(
+                h_flex().flex_none().w(px(76.)).justify_end().text_xs().text_color(muted)
+                    .when(awaiting_details, |cell| cell.child(crate::skeleton::history_cell(46., cx)))
+                    .child(time),
+            )
             .child(div().flex_none().w(px(64.)).text_xs().font_family(theme.mono_font_family.clone()).text_color(muted).child(short))
             .context_menu(move |menu, _window, cx| {
                 let v = view.clone();
@@ -927,7 +945,7 @@ impl RepoView {
         if fresh {
             let tint = theme.primary;
             row_el
-                .with_animation(SharedString::from(format!("fresh-{}", commit.id)), Animation::new(std::time::Duration::from_millis(520)).with_easing(ease_out_quint()), move |d, t| d.opacity(0.2 + 0.8 * t).pl(px(12. + 18. * (1. - t))).bg(tint.opacity(0.18 * (1. - t))))
+                .with_animation(SharedString::from(format!("fresh-{}", commit.id)), Animation::new(std::time::Duration::from_millis(520)).with_easing(ease_out_quint()), move |d, t| d.opacity(0.2 + 0.8 * t).pl(px(left_padding + 18. * (1. - t))).bg(tint.opacity(0.18 * (1. - t))))
                 .into_any_element()
         } else {
             row_el.into_any_element()
@@ -969,17 +987,18 @@ impl RepoView {
     ///
     /// # Returns
     /// The card's data.
-    fn card_info(&self, ix: usize, cx: &Context<Self>) -> CardInfo {
+    fn card_info(&self, ix: usize, cx: &Context<Self>) -> Option<CardInfo> {
         let commit = &self.commits[ix];
+        let details = self.history_row_details.get(&commit.id)?;
         let theme = cx.theme();
         let owner = self.owners.get(ix).cloned().flatten();
-        CardInfo {
+        Some(CardInfo {
             id: commit.id.clone(),
             summary: commit.summary.clone(),
-            author: commit.author.clone(),
-            email: commit.email.clone(),
+            author: details.author.clone(),
+            email: details.email.clone(),
             view: cx.entity().downgrade(),
-            time: commit.time,
+            time: details.time,
             hash: commit.id.chars().take(10).collect(),
             parents: commit.parents.clone(),
             branch_color: owner.as_deref().and_then(|o| self.branch_color(o, cx)),
@@ -1005,22 +1024,13 @@ impl RepoView {
             merge: commit.is_merge(),
             on_branch: !self.rows.get(ix).is_some_and(|r| r.dim),
             git: self.git(),
-        }
+        })
     }
 
     pub(crate) fn render_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        if self.commits.is_empty() {
-            return div()
-                .size_full()
-                .child(empty_state(IconName::GitCommitHorizontal, tr("history.empty_title"), tr("history.empty_body"), cx))
-                .into_any_element();
-        }
         let count = self.commits.len();
-        let lanes = self.rows.iter().map(|r| r.width).max().unwrap_or(1).max(1);
-        let (lane_w, graph_header_w) = graph_metrics(lanes);
-        self.graph_w = graph_header_w;
-        self.graph_lane_w = lane_w;
+        let graph_header_w = self.graph_w;
         let list = uniform_list(
             "history-list",
             count,
@@ -1029,7 +1039,7 @@ impl RepoView {
                     this.history_visible = range.clone();
                     cx.notify();
                 }
-                this.maybe_load_more(range.end, cx);
+                this.load_visible_history_rows(range.clone(), cx);
                 range.map(|ix| this.render_commit_row(ix, cx)).collect::<Vec<_>>()
             }),
         )
@@ -1037,9 +1047,9 @@ impl RepoView {
         .size_full();
         let legend = self.render_legend(cx);
         let debug_card = if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_CARD").ok().and_then(|v| v.parse::<usize>().ok()).filter(|ix| *ix < count) } else { None };
-        let debug_card = debug_card.map(|ix| {
-            let info = self.card_info(ix, cx);
-            window.use_keyed_state(("debug-card", ix), cx, move |_, cx| CommitCard::new(info, cx))
+        let debug_card = debug_card.and_then(|ix| {
+            let info = self.card_info(ix, cx)?;
+            Some(window.use_keyed_state(("debug-card", ix), cx, move |_, cx| CommitCard::new(info, cx)))
         });
 
         let (show_branch, show_author) = self.fitting_columns();
@@ -1109,8 +1119,6 @@ impl RepoView {
                                     .child(segment("scope-branch", tr("history.this_branch"), !all, false, cx))
                                     .child(segment("scope-all", tr("history.all_branches"), all, true, cx))
                             })
-                            .child(div().flex_none().whitespace_nowrap().text_sm().text_color(theme.muted_foreground).child(crate::widgets::plural("history.commits_shown", count)))
-                            .when(self.loading_more, |d| d.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(tr("history.loading_more"))))
                             .when(self.settings.graph.all_branches, |d| {
                                 let view = cx.entity();
                                 let current = self.current_branch().map(str::to_string);
@@ -1130,12 +1138,26 @@ impl RepoView {
                                     d.child(Button::new("history-focus-clear").xsmall().ghost().icon(icon(IconName::X)).tooltip(tr("history.highlight_clear")).on_click(cx.listener(|this, _, _, cx| this.set_focus_branch(None, cx))))
                                 })
                             })
-                            .child(div().flex_1().min_w(px(120.)).max_w(px(280.)).ml_2().child(gpui_kit::component::input::Input::new(&self.search).prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))))
+                            .child(
+                                div().flex_1().min_w(px(200.)).max_w(px(520.)).ml_2().child(
+                                    gpui_kit::component::input::Input::new(&self.search)
+                                        .prefix(icon(IconName::Search).small().text_color(theme.muted_foreground))
+                                        .cleanable(true),
+                                ),
+                            )
                             .child(Button::new("history-deep-search").xsmall().ghost().icon(icon(IconName::SearchCode)).tooltip(tr("search.open_tip")).on_click(cx.listener(|this, _, window, cx| {
                                 let text = this.search.read(cx).value().to_string();
                                 this.open_search(text, window, cx);
                             })))
                             .child(spacer())
+                            .child(
+                                hstack().flex_none().gap_2().text_sm().text_color(theme.muted_foreground)
+                                    .when(self.loading_more, |d| {
+                                        d.when(!self.settings.appearance.reduce_motion, |d| d.child(gpui_kit::component::spinner::Spinner::new().xsmall()))
+                                            .child(tr("history.loading_more"))
+                                    })
+                                    .when(!self.loading_more, |d| d.child(crate::widgets::plural("history.commits_shown", count))),
+                            )
                             .child(toggle_pill("toggle-graph", tr("history.graph"), self.show_graph, cx).on_click(cx.listener(|this, _, _, cx| {
                                 this.show_graph = !this.show_graph;
                                 cx.notify();
@@ -1176,6 +1198,7 @@ impl RepoView {
                                 }))),
                         )
                     })
+                    .children(self.render_away_card(cx))
                     .children(legend)
                     .child(
                         hstack()
@@ -1196,7 +1219,21 @@ impl RepoView {
                             .child(div().w(px(76.)).text_right().child(tr("history.col_date").to_uppercase()))
                             .child(div().w(px(64.)).child(tr("history.col_commit").to_uppercase())),
                     )
-                    .child(div().flex_1().min_h_0().child(list));
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .when(count > 0, |d| {
+                                d.child(list).child(Scrollbar::vertical(&self.history_scroll).mode(ScrollbarMode::Always))
+                            })
+                            .when(count == 0 && self.loading_more, |d| {
+                                d.child(crate::skeleton::history_rows(self.settings.appearance.show_avatars, cx))
+                            })
+                            .when(count == 0 && !self.loading_more, |d| {
+                                d.child(empty_state(IconName::GitCommitHorizontal, tr("history.empty_title"), tr("history.empty_body"), cx))
+                            }),
+                    );
         let details = div().size_full().border_l_1().border_color(theme.border).bg(theme.sidebar).child(self.render_commit_details(window, cx));
         if self.detail_file.is_some() {
             return h_flex().size_full().child(main).child(div().flex_none().w(relative(0.5)).min_w(px(380.)).h_full().child(details)).into_any_element();
