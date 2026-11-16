@@ -3,7 +3,9 @@
 All notable changes to Cairn are listed here. Each section is shown in the app's "What's new"
 window after an update.
 
-## [Unreleased]
+## [0.7.1] - 2026-11-16
+
+Fixes a crash when opening an image and endless repository reloads.
 
 ### Fixed
 
