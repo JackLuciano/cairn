@@ -63,6 +63,9 @@ window after an update.
 - Cairn no longer installs a downloaded update on close after automatic updates were turned off.
 - The progress card of a pull, push or fetch now closes when it finishes instead of staying at
   100% "Finishing up".
+- Commits, checkouts and pushes made outside Cairn, such as from a terminal or another tool, show
+  up right away. Cairn now also watches the shared git folder of linked worktrees, no longer drops
+  a refresh that arrives while an operation runs, and refreshes when you switch back to its window.
 
 ## [0.6.0] - 2026-11-14
 
