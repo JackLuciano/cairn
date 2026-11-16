@@ -405,7 +405,10 @@ Windows SmartScreen may ask you to confirm the first time ("More info", then "Ru
 - Windows 10 or 11. Experimental macOS (Apple Silicon and Intel) and Linux x64 builds are attached
   to each release as `.tar.gz` files: plain binaries, not yet signed and without automatic updates.
   On macOS run `xattr -d com.apple.quarantine cairn` once after unpacking.
-- [Git](https://git-scm.com/download/win) 2.40 or newer on your `PATH`
+- Git 2.40 or newer. On Windows, Cairn installs [Git for Windows](https://git-scm.com/download/win)
+  through WinGet if it cannot find Git. On macOS and Linux, install Git separately.
+  Settings → Advanced shows the detected executable and lets you select a different one,
+  detect Git again, or retry installation.
 - Optional: the [GitHub CLI](https://cli.github.com) for pull requests (run `gh auth login` once)
 
 ## Keyboard shortcuts

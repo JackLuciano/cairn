@@ -25,6 +25,9 @@ pub(crate) struct CairnApp {
     pub sidebar_open: bool,
     pub update: crate::updater::UpdateStatus,
     pub update_message: Option<SharedString>,
+    git_setup: Option<Result<PathBuf, crate::git_setup::SetupError>>,
+    restore_session: bool,
+    git_installing: bool,
     workspace: Option<(Uuid, Entity<crate::workspace_view::WorkspacePanel>)>,
     side_toggled: std::collections::HashSet<String>,
     focus: FocusHandle,
@@ -55,6 +58,9 @@ impl CairnApp {
             sidebar_open: true,
             update: Default::default(),
             update_message: None,
+            git_setup: None,
+            restore_session: true,
+            git_installing: false,
             workspace: None,
             side_toggled: if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SIDE").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default() } else { Default::default() },
             focus: cx.focus_handle(),
@@ -94,21 +100,140 @@ impl CairnApp {
             async move { crate::updater::apply_on_exit(&status, mode) }
         })
         .detach();
-        if app.settings.general.startup == StartupMode::RestoreTabs {
-            let tabs = app.library.open_tabs.clone();
-            let active = app.library.active_tab.clone();
+        app.start_git_setup(true, window, cx);
+        app
+    }
+
+    /// Looks for Git in the background.
+    ///
+    /// # Arguments
+    /// * `ask` - on Windows, offer to install Git when none is found
+    fn start_git_setup(&mut self, ask: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_setup = None;
+        let custom = self.settings.advanced.git_executable.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::git_setup::prepare(&custom) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(path) => this.finish_git_setup(path, window, cx),
+                    Err(error) => {
+                        let missing = matches!(error, crate::git_setup::SetupError::Missing);
+                        this.git_setup = Some(Err(error));
+                        if cfg!(windows) && ask && missing {
+                            #[cfg(windows)]
+                            crate::git_setup::ask_install(cx.entity(), window, cx);
+                        } else if let Some(Err(error)) = &this.git_setup {
+                            window.push_notification(Notification::warning(tr(error.message_key())), cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Installs Git for Windows with WinGet in the background, after the user chose to.
+    pub(crate) fn install_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            if self.git_setup_running() {
+                return;
+            }
+            self.git_setup = None;
+            self.git_installing = true;
+            window.push_notification(Notification::info(tr("git_setup.installing")), cx);
+            cx.spawn_in(window, async move |this, cx| {
+                let result = cx.background_executor().spawn(async move { crate::git_setup::install() }).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.git_installing = false;
+                    match result {
+                        Ok(path) => {
+                            window.push_notification(Notification::success(tr("git_setup.installed")), cx);
+                            this.finish_git_setup(path, window, cx);
+                        }
+                        Err(error) => {
+                            window.push_notification(Notification::error(tr(error.message_key())), cx);
+                            this.git_setup = Some(Err(error));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+        }
+        #[cfg(not(windows))]
+        let _ = (window, cx);
+    }
+
+    fn finish_git_setup(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        cairn_core::git::set_executable(path.clone());
+        self.git_setup = Some(Ok(path));
+        if !std::mem::take(&mut self.restore_session) {
+            return;
+        }
+        if self.settings.general.startup == StartupMode::RestoreTabs {
+            let tabs = self.library.open_tabs.clone();
+            let active = self.library.active_tab.clone();
             for path in tabs {
-                app.open_repo_inner(&path, false, window, cx);
+                self.open_repo_inner(&path, false, window, cx);
             }
             if let Some(active) = active
-                && let Some(ix) = app.tabs.iter().position(|t| same(&t.read(cx).repo.root, &active))
+                && let Some(ix) = self.tabs.iter().position(|t| same(&t.read(cx).repo.root, &active))
             {
-                app.active = Some(ix);
+                self.active = Some(ix);
             }
         }
         #[cfg(debug_assertions)]
         cx.defer_in(window, |this, window, cx| this.debug_hooks(window, cx));
-        app
+    }
+
+    pub(crate) fn git_ready(&self) -> bool {
+        self.git_executable().is_some()
+    }
+
+    pub(crate) fn git_executable(&self) -> Option<&Path> {
+        self.git_setup.as_ref()?.as_ref().ok().map(PathBuf::as_path)
+    }
+
+    pub(crate) fn git_setup_running(&self) -> bool {
+        self.git_setup.is_none()
+    }
+
+    pub(crate) fn git_setup_message(&self) -> Option<&'static str> {
+        match &self.git_setup {
+            None if self.git_installing => Some("git_setup.installing"),
+            None => Some("git_setup.checking"),
+            Some(Err(error)) => Some(error.message_key()),
+            Some(Ok(_)) => None,
+        }
+    }
+
+    pub(crate) fn use_automatic_git(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.git_setup_running() {
+            return false;
+        }
+        if !self.settings.advanced.git_executable.is_empty() {
+            let mut settings = self.settings.clone();
+            settings.advanced.git_executable.clear();
+            if let Err(error) = settings.save() {
+                window.push_notification(Notification::error(error.to_string()), cx);
+                return false;
+            }
+            self.settings = settings;
+        }
+        self.start_git_setup(false, window, cx);
+        true
+    }
+
+    fn require_git(&self, window: &mut Window, cx: &mut App) -> bool {
+        if let Some(message) = self.git_setup_message() {
+            window.push_notification(Notification::warning(tr(message)), cx);
+            return false;
+        }
+        true
     }
 
     #[cfg(debug_assertions)]
@@ -141,6 +266,8 @@ impl CairnApp {
         }
         match std::env::var("CAIRN_DEBUG_DIALOG").as_deref() {
             Ok("palette") => crate::palette::open(cx.entity(), window, cx),
+            #[cfg(windows)]
+            Ok("git_install") => crate::git_setup::ask_install(cx.entity(), window, cx),
             Ok("whats_new") => crate::whats_new::debug_open(window, cx),
             Ok("assist") => {
                 if let Some(tab) = self.active_tab() {
@@ -320,20 +447,43 @@ impl CairnApp {
     }
 
     pub(crate) fn save_library(&mut self, cx: &mut Context<Self>) {
-        self.library.open_tabs = self.tabs.iter().map(|t| t.read(cx).repo.root.clone()).collect();
-        self.library.active_tab = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.read(cx).repo.root.clone());
+        if !self.restore_session {
+            self.library.open_tabs = self.tabs.iter().map(|t| t.read(cx).repo.root.clone()).collect();
+            self.library.active_tab = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.read(cx).repo.root.clone());
+        }
         if let Err(e) = self.library.save() {
             crate::repo_view::log_error(&format!("saving library: {e}"));
         }
     }
 
-    pub(crate) fn apply_settings(&mut self, settings: Settings, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply_settings(&mut self, settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let git_changed = settings.advanced.git_executable != self.settings.advanced.git_executable;
+        let git = if git_changed {
+            if self.git_setup_running() {
+                window.push_notification(Notification::warning(tr("git_setup.checking")), cx);
+                return false;
+            }
+            if settings.advanced.git_executable.is_empty() {
+                crate::git_setup::detect()
+            } else {
+                match crate::git_setup::custom_executable(&settings.advanced.git_executable) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        window.push_notification(Notification::error(tr(error.message_key())), cx);
+                        return false;
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = settings.save() {
+            window.push_notification(Notification::error(e.to_string()), cx);
+            return false;
+        }
         let language_changed = settings.general.language != self.settings.general.language;
         cairn_core::git::set_command_logging(settings.advanced.log_git_commands);
         self.settings = settings.clone();
-        if let Err(e) = settings.save() {
-            window.push_notification(Notification::error(e.to_string()), cx);
-        }
         if language_changed {
             let locale = crate::platform::resolve_language(settings.general.language).code();
             rust_i18n::set_locale(locale);
@@ -344,10 +494,19 @@ impl CairnApp {
             let s = settings.clone();
             tab.update(cx, |v, cx| v.update_settings(s, cx));
         }
+        if let Some(path) = git {
+            self.finish_git_setup(path, window, cx);
+        } else if git_changed {
+            self.start_git_setup(false, window, cx);
+        }
         cx.notify();
+        true
     }
 
     fn open_repo_inner(&mut self, path: &Path, notify_errors: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.git_ready() {
+            return false;
+        }
         if let Some(ix) = self.tabs.iter().position(|t| same(&t.read(cx).repo.root, path)) {
             self.active = Some(ix);
             return true;
@@ -446,6 +605,9 @@ impl CairnApp {
     }
 
     pub(crate) fn open_repo(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_git(window, cx) {
+            return;
+        }
         if self.open_repo_inner(path, true, window, cx) {
             self.save_library(cx);
         }
@@ -531,6 +693,9 @@ impl CairnApp {
     }
 
     pub(crate) fn clone_repository(&mut self, category: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_git(window, cx) {
+            return;
+        }
         let view = cx.entity();
         let base = self.settings.general.clone_dir.clone();
         crate::dialogs::text_prompt(
@@ -576,6 +741,9 @@ impl CairnApp {
     }
 
     pub(crate) fn init_repository(&mut self, category: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_git(window, cx) {
+            return;
+        }
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1606,7 +1774,8 @@ impl Focusable for CairnApp {
 impl Render for CairnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        if let (None, Some(Some(id))) = (self.active, self.open_category) {
+        let git_ready = self.git_ready();
+        if git_ready && let (None, Some(Some(id))) = (self.active, self.open_category) {
             let repos: Vec<(PathBuf, String)> = self.library.repos_in(Some(id)).iter().filter(|r| r.path.exists()).map(|r| (r.path.clone(), r.name.clone())).collect();
             let stale = self.workspace.as_ref().is_none_or(|(wid, p)| *wid != id || p.read(cx).paths.len() != repos.len());
             if repos.len() >= 2 && stale {

@@ -8,6 +8,7 @@ mod backport;
 mod branch_actions;
 mod branch_picker;
 mod changes;
+mod git_setup;
 mod coauthors;
 mod guard;
 mod gravatar;

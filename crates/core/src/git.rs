@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::RwLock;
 
 use crate::{Error, Result};
 
@@ -9,6 +10,25 @@ use crate::{Error, Result};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 static LOG_COMMANDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GIT_EXECUTABLE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Selects the executable used by Cairn's Git commands. On Windows its folder is also put on
+/// `PATH`, so tools Cairn starts, such as the GitHub CLI, find the same Git.
+///
+/// # Arguments
+/// * `path` - the Git executable
+pub fn set_executable(path: PathBuf) {
+    #[cfg(windows)]
+    if let Some(dir) = path.parent() {
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        if !std::env::split_paths(&current).any(|p| p == dir)
+            && let Ok(joined) = std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current)))
+        {
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+    }
+    *GIT_EXECUTABLE.write().expect("Git executable lock") = Some(path);
+}
 
 /// Turns logging of every git command to `git.log` in the data folder on or off.
 ///
@@ -238,7 +258,9 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = Command::new("git");
+        let mut cmd = git_command(
+            GIT_EXECUTABLE.read().expect("Git executable lock").as_deref().unwrap_or(Path::new("git")),
+        );
         cmd.current_dir(&self.dir)
             .args(["-c", "core.quotepath=false", "-c", "color.ui=false"])
             .args(args)
@@ -249,11 +271,6 @@ impl Git {
             .stderr(Stdio::piped());
         for (k, v) in &self.env {
             cmd.env(k, v);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NO_WINDOW);
         }
         cmd
     }
@@ -389,7 +406,18 @@ fn map_spawn_error(err: std::io::Error) -> Error {
     }
 }
 
-/// Checks that a usable `git` executable is on PATH.
+fn git_command(executable: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// Checks the Git executable selected for Cairn.
 ///
 /// # Returns
 /// The `git --version` text, or `None` when git cannot be started.
@@ -398,6 +426,13 @@ pub fn git_version() -> Option<String> {
         .run(["--version"])
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+/// Probes an executable before selecting it for Git commands.
+pub fn git_version_at(executable: &Path) -> Option<String> {
+    let output = git_command(executable).arg("--version").stdin(Stdio::null()).output().ok()?;
+    let version = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.status.success() && version.starts_with("git version ")).then(|| version.to_owned())
 }
 
 #[cfg(test)]

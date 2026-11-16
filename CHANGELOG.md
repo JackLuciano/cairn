@@ -7,6 +7,9 @@ window after an update.
 
 ### Added
 
+- Cairn detects Git in the background. When Git is missing, it offers to install Git for Windows
+  through WinGet or to choose an existing Git. Settings → Advanced shows the detected executable
+  and lets you browse for another, detect Git again, or install Git.
 - History shows the total commit count and lets you drag the scrollbar anywhere in the list.
   Row details load as you scroll. Search by commit message, author name, email, or hash,
   and use the × in the search field to clear the filter.
