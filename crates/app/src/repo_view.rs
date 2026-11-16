@@ -254,6 +254,8 @@ pub(crate) struct RepoView {
     pub search: Entity<InputState>,
     pub img_mode: u8,
     pub img_amount: f32,
+    /// The image versions last extracted for an image diff, keyed by the revisions they came from.
+    pub img_cache: Option<(String, crate::diff_view::ImagePair)>,
     pub change_pane: crate::diff_view::DiffPane,
     pub commit_pane: crate::diff_view::DiffPane,
     pub page_pane: crate::diff_view::DiffPane,
@@ -386,6 +388,7 @@ impl RepoView {
             search,
             img_mode: 0,
             img_amount: 0.5,
+            img_cache: None,
             change_pane: crate::diff_view::DiffPane::new(cx),
             commit_pane: crate::diff_view::DiffPane::new(cx),
             page_pane: crate::diff_view::DiffPane::new(cx),
@@ -933,6 +936,7 @@ impl RepoView {
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.img_cache = None;
         let repo = self.repo.clone();
         let search = Some(self.search.read(cx).value().trim().to_string()).filter(|s| !s.is_empty());
         let graph = &self.settings.graph;

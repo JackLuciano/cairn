@@ -441,8 +441,8 @@ impl RepoView {
 
     fn render_diff_body(&mut self, source: DiffSource, diff: &FileDiff, cx: &mut Context<Self>) -> AnyElement {
         if diff.is_binary {
-            if let Some((old, new)) = image_pair(source, diff, cx) {
-                return render_image_diff(old, new, cx).into_any_element();
+            if let Some((old, new)) = image_pair(self, source, diff) {
+                return render_image_diff(old, new, self.img_mode, self.img_amount, cx).into_any_element();
             }
             return empty_state(IconName::FileImage, tr("diff.binary_title"), tr("diff.binary_body"), cx).into_any_element();
         }
@@ -606,42 +606,59 @@ fn blob_to_file(git: &cairn_core::Git, spec: &str, ext: &str) -> Option<std::pat
     Some(path)
 }
 
-fn image_pair(source: DiffSource, diff: &FileDiff, cx: &mut Context<RepoView>) -> Option<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)> {
+/// The before and after versions of an image, as files on disk.
+pub(crate) type ImagePair = (Option<std::path::PathBuf>, Option<std::path::PathBuf>);
+
+/// Extracts both versions of a changed image, reusing the last extraction when the revisions match.
+///
+/// # Arguments
+/// * `view` - the repository view showing the diff
+/// * `source` - which diff surface the image belongs to
+/// * `diff` - the image's diff
+fn image_pair(view: &mut RepoView, source: DiffSource, diff: &FileDiff) -> Option<ImagePair> {
     let ext = diff.path.rsplit('.').next()?.to_lowercase();
     if !IMAGE_EXT.contains(&ext.as_str()) {
         return None;
     }
-    let view = cx.entity().read(cx);
-    let git = view.git();
     let old_path = diff.old_path.clone().unwrap_or_else(|| diff.path.clone());
-    let pair = match source {
+    let (old_spec, new_spec) = match source {
         DiffSource::Change => {
-            let staged = view.change.as_ref().is_some_and(|c| c.staged);
-            if staged {
-                (blob_to_file(&git, &format!("HEAD:{old_path}"), &ext), blob_to_file(&git, &format!(":{}", diff.path), &ext))
+            if view.change.as_ref().is_some_and(|c| c.staged) {
+                (Some(format!("HEAD:{old_path}")), Some(format!(":{}", diff.path)))
             } else {
-                let worktree = view.repo.root.join(&diff.path);
-                (blob_to_file(&git, &format!(":{old_path}"), &ext), worktree.exists().then_some(worktree))
+                (Some(format!(":{old_path}")), None)
             }
         }
         DiffSource::CommitFile => {
             let id = view.selected_commit.clone()?;
-            (blob_to_file(&git, &format!("{id}^:{old_path}"), &ext), blob_to_file(&git, &format!("{id}:{}", diff.path), &ext))
+            (Some(format!("{id}^:{old_path}")), Some(format!("{id}:{}", diff.path)))
         }
         DiffSource::Page => {
             let (old, new) = view.page_revs.clone()?;
-            (old.and_then(|o| blob_to_file(&git, &format!("{o}:{old_path}"), &ext)), blob_to_file(&git, &format!("{new}:{}", diff.path), &ext))
+            (old.map(|o| format!("{o}:{old_path}")), Some(format!("{new}:{}", diff.path)))
         }
     };
-    Some(pair)
+    let key = format!("{old_spec:?}|{new_spec:?}|{}", diff.path);
+    if let Some((cached, pair)) = &view.img_cache
+        && *cached == key
+    {
+        return Some(pair.clone());
+    }
+    let git = view.git();
+    let old = old_spec.and_then(|s| blob_to_file(&git, &s, &ext));
+    let new = match new_spec {
+        Some(s) => blob_to_file(&git, &s, &ext),
+        None => {
+            let worktree = view.repo.root.join(&diff.path);
+            worktree.exists().then_some(worktree)
+        }
+    };
+    view.img_cache = Some((key, (old.clone(), new.clone())));
+    Some((old, new))
 }
 
-fn render_image_diff(old: Option<std::path::PathBuf>, new: Option<std::path::PathBuf>, cx: &mut Context<RepoView>) -> impl IntoElement + use<> {
+fn render_image_diff(old: Option<std::path::PathBuf>, new: Option<std::path::PathBuf>, mode: u8, amount: f32, cx: &mut Context<RepoView>) -> impl IntoElement + use<> {
     let theme = cx.theme().clone();
-    let (mode, amount) = {
-        let v = cx.entity().read(cx);
-        (v.img_mode, v.img_amount)
-    };
     let checker = theme.muted;
     let frame = |label: SharedString, path: Option<std::path::PathBuf>, color: Hsla| {
         v_flex()
