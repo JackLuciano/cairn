@@ -3,7 +3,10 @@
 All notable changes to Cairn are listed here. Each section is shown in the app's "What's new"
 window after an update.
 
-## [Unreleased]
+## [0.7.0] - 2026-11-16
+
+Issues, CI checks and releases inside Cairn, AI split into commits, GitHub notifications, auto-saved
+work, a faster History, and Cairn offers to install Git when it is missing.
 
 ### Added
 
