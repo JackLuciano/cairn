@@ -64,11 +64,14 @@ impl RepoView {
                 let now = progress.lock().ok().and_then(|p| p.clone());
                 let running = this
                     .update(cx, |v, cx| {
+                        if !v.live_progress.as_ref().is_some_and(|p| Arc::ptr_eq(p, &progress)) {
+                            return false;
+                        }
                         if let Some((phase, done)) = now {
                             v.live_op = Some(LiveOp { label: label.clone(), phase, done, finished: None });
                             cx.notify();
                         }
-                        v.busy.is_some()
+                        true
                     })
                     .unwrap_or(false);
                 if !running {

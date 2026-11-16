@@ -58,6 +58,8 @@ window after an update.
 ### Fixed
 
 - Cairn no longer installs a downloaded update on close after automatic updates were turned off.
+- The progress card of a pull, push or fetch now closes when it finishes instead of staying at
+  100% "Finishing up".
 
 ## [0.6.0] - 2026-11-14
 
