@@ -235,6 +235,8 @@ pub(crate) struct RepoView {
     pub branch_filter: crate::pages::branches::BranchFilter,
     pub live_op: Option<crate::live_op::LiveOp>,
     pub live_cancel: Option<cairn_core::git::CancelHandle>,
+    /// Where the running operation reports its progress; its watcher stops once this changes.
+    pub live_progress: Option<crate::live_op::SharedProgress>,
     pub busy_warned: bool,
     pub multi_select: Vec<String>,
     pub last_clicked: Option<usize>,
@@ -366,6 +368,7 @@ impl RepoView {
             branch_filter: Default::default(),
             live_op: None,
             live_cancel: None,
+            live_progress: None,
             busy_warned: false,
             multi_select: Vec::new(),
             last_clicked: None,
@@ -1231,6 +1234,7 @@ impl RepoView {
         let sink = progress.clone();
         let cancel = cairn_core::git::CancelHandle::default();
         self.live_cancel = Some(cancel.clone());
+        self.live_progress = Some(progress.clone());
         let git = self
             .git()
             .with_progress(move |phase, done| {
@@ -1255,6 +1259,7 @@ impl RepoView {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 this.live_cancel = None;
+                this.live_progress = None;
                 let ok = result.is_ok();
                 let cancelled = matches!(result, Err(cairn_core::Error::Cancelled));
                 let shown = if cancelled {
