@@ -5,7 +5,6 @@ use cairn_core::git::git_version_at;
 #[derive(Debug)]
 pub(crate) enum SetupError {
     InvalidPath,
-    #[cfg(not(windows))]
     Missing,
     #[cfg(windows)]
     WinGetMissing,
@@ -17,7 +16,6 @@ impl SetupError {
     pub(crate) fn message_key(&self) -> &'static str {
         match self {
             Self::InvalidPath => "git_setup.invalid_path",
-            #[cfg(not(windows))]
             Self::Missing => "git_setup.missing",
             #[cfg(windows)]
             Self::WinGetMissing => "git_setup.winget_missing",
@@ -51,19 +49,65 @@ pub(crate) fn detect() -> Option<PathBuf> {
         .find(|path| git_version_at(path).is_some())
 }
 
+/// Finds the Git to use without installing anything.
+///
+/// # Arguments
+/// * `custom` - the executable chosen in Settings, or empty to detect one
+///
+/// # Returns
+/// The executable, or why none can be used.
 pub(crate) fn prepare(custom: &str) -> Result<PathBuf, SetupError> {
     if !custom.is_empty() {
         return custom_executable(custom);
     }
-    if let Some(path) = detect() {
-        return Ok(path);
-    }
-    #[cfg(windows)]
-    {
-        install_with_winget()
-    }
-    #[cfg(not(windows))]
-    Err(SetupError::Missing)
+    detect().ok_or(SetupError::Missing)
+}
+
+/// Asks whether to install Git, choose an existing one, or leave it for now.
+///
+/// # Arguments
+/// * `app` - the app that installs Git or opens Settings
+#[cfg(windows)]
+pub(crate) fn ask_install(app: gpui_kit::Entity<crate::app::CairnApp>, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+    use gpui_kit::component::button::{Button, ButtonVariants};
+    use gpui_kit::component::{ActiveTheme, WindowExt, h_flex, v_flex};
+    use gpui_kit::*;
+
+    use crate::widgets::tr;
+
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let theme = cx.theme().clone();
+        let install = app.clone();
+        let choose = app.clone();
+        dialog
+            .w(px(480.))
+            .bg(theme.popover.opacity(1.))
+            .title(tr("git_setup.ask_title"))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(div().whitespace_normal().child(tr("git_setup.ask_body")))
+                    .child(div().whitespace_normal().text_xs().text_color(theme.muted_foreground).child(tr("git_setup.ask_license"))),
+            )
+            .footer(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(Button::new("git-later").ghost().label(tr("git_setup.ask_later")).on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(Button::new("git-choose").outline().label(tr("git_setup.ask_choose")).on_click(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        crate::settings_dialog::request_category("advanced");
+                        let settings = choose.read(cx).settings.clone();
+                        crate::settings_dialog::open(choose.clone(), settings, window, cx);
+                    }))
+                    .child(Button::new("git-install").primary().label(tr("git_setup.ask_install")).on_click(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        install.update(cx, |app, cx| app.install_git(window, cx));
+                    })),
+            )
+    });
 }
 
 #[cfg(windows)]
@@ -93,7 +137,6 @@ fn registered_git_dir(root: windows::Win32::System::Registry::HKEY) -> Option<Pa
     let key = w!("Software\\GitForWindows");
     let name = w!("InstallPath");
     let mut bytes = 0;
-    // RegGetValueW reports the size in bytes, including the terminating UTF-16 NUL.
     unsafe { RegGetValueW(root, key, name, RRF_RT_REG_SZ, None, None, Some(&mut bytes)) }.ok().ok()?;
     let mut value = vec![0u16; (bytes as usize).div_ceil(2)];
     unsafe {
@@ -108,8 +151,13 @@ fn install_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|dir| dir.join("Cairn").join("Git"))
 }
 
+/// Installs Git for Windows for this user with WinGet, accepting its license terms. Only run
+/// after the user chose to install.
+///
+/// # Returns
+/// The installed executable, or why the install failed.
 #[cfg(windows)]
-fn install_with_winget() -> Result<PathBuf, SetupError> {
+pub(crate) fn install() -> Result<PathBuf, SetupError> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -145,7 +193,6 @@ fn install_with_winget() -> Result<PathBuf, SetupError> {
                 SetupError::InstallFailed
             }
         })?;
-    // WinGet can report an already-installed package as a non-zero exit.
     detect().ok_or_else(|| {
         crate::repo_view::log_error(&format!("WinGet Git install: {status}"));
         SetupError::InstallFailed

@@ -603,7 +603,7 @@ settings:
   watch_files_desc: "Turn off for huge repositories if Cairn feels slow."
   clone_dir: "Default clone folder"
   git_executable: "Git executable"
-  git_executable_desc: "Choose a Git executable or use automatic detection. On Windows, Cairn installs Git if it cannot find it."
+  git_executable_desc: "Choose a Git executable or use automatic detection. On Windows, Cairn offers to install Git if it cannot find it."
   git_browse: "Browse"
   git_pick: "Choose the Git executable"
   git_auto_detect: "Auto-detect"
@@ -1178,6 +1178,14 @@ notify:
 
 git_setup:
   checking: "Checking for Git in the background…"
+  installing: "Installing Git for Windows…"
+  installed: "Git for Windows is installed."
+  ask_title: "Cairn needs Git"
+  ask_body: "Git isn't installed on this computer. Cairn can install Git for Windows for you with WinGet, or you can choose a Git you already have."
+  ask_license: "Installing accepts the Git for Windows license terms."
+  ask_install: "Install Git"
+  ask_choose: "Choose existing…"
+  ask_later: "Not now"
   invalid_path: "Choose a working Git executable in Settings → Advanced."
   missing: "Install Git or select an existing Git executable in Settings."
   winget_missing: "WinGet is unavailable. Install Git for Windows manually or choose an existing Git executable in Settings."

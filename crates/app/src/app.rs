@@ -27,6 +27,7 @@ pub(crate) struct CairnApp {
     pub update_message: Option<SharedString>,
     git_setup: Option<Result<PathBuf, crate::git_setup::SetupError>>,
     restore_session: bool,
+    git_installing: bool,
     workspace: Option<(Uuid, Entity<crate::workspace_view::WorkspacePanel>)>,
     side_toggled: std::collections::HashSet<String>,
     focus: FocusHandle,
@@ -59,6 +60,7 @@ impl CairnApp {
             update_message: None,
             git_setup: None,
             restore_session: true,
+            git_installing: false,
             workspace: None,
             side_toggled: if cfg!(debug_assertions) { std::env::var("CAIRN_DEBUG_SIDE").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default() } else { Default::default() },
             focus: cx.focus_handle(),
@@ -98,11 +100,15 @@ impl CairnApp {
             async move { crate::updater::apply_on_exit(&status, mode) }
         })
         .detach();
-        app.start_git_setup(window, cx);
+        app.start_git_setup(true, window, cx);
         app
     }
 
-    fn start_git_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Looks for Git in the background.
+    ///
+    /// # Arguments
+    /// * `ask` - on Windows, offer to install Git when none is found
+    fn start_git_setup(&mut self, ask: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.git_setup = None;
         let custom = self.settings.advanced.git_executable.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -111,8 +117,14 @@ impl CairnApp {
                 match result {
                     Ok(path) => this.finish_git_setup(path, window, cx),
                     Err(error) => {
-                        window.push_notification(Notification::warning(tr(error.message_key())), cx);
+                        let missing = matches!(error, crate::git_setup::SetupError::Missing);
                         this.git_setup = Some(Err(error));
+                        if cfg!(windows) && ask && missing {
+                            #[cfg(windows)]
+                            crate::git_setup::ask_install(cx.entity(), window, cx);
+                        } else if let Some(Err(error)) = &this.git_setup {
+                            window.push_notification(Notification::warning(tr(error.message_key())), cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -120,6 +132,40 @@ impl CairnApp {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Installs Git for Windows with WinGet in the background, after the user chose to.
+    pub(crate) fn install_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            if self.git_setup_running() {
+                return;
+            }
+            self.git_setup = None;
+            self.git_installing = true;
+            window.push_notification(Notification::info(tr("git_setup.installing")), cx);
+            cx.spawn_in(window, async move |this, cx| {
+                let result = cx.background_executor().spawn(async move { crate::git_setup::install() }).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.git_installing = false;
+                    match result {
+                        Ok(path) => {
+                            window.push_notification(Notification::success(tr("git_setup.installed")), cx);
+                            this.finish_git_setup(path, window, cx);
+                        }
+                        Err(error) => {
+                            window.push_notification(Notification::error(tr(error.message_key())), cx);
+                            this.git_setup = Some(Err(error));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+        }
+        #[cfg(not(windows))]
+        let _ = (window, cx);
     }
 
     fn finish_git_setup(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -158,6 +204,7 @@ impl CairnApp {
 
     pub(crate) fn git_setup_message(&self) -> Option<&'static str> {
         match &self.git_setup {
+            None if self.git_installing => Some("git_setup.installing"),
             None => Some("git_setup.checking"),
             Some(Err(error)) => Some(error.message_key()),
             Some(Ok(_)) => None,
@@ -177,7 +224,7 @@ impl CairnApp {
             }
             self.settings = settings;
         }
-        self.start_git_setup(window, cx);
+        self.start_git_setup(false, window, cx);
         true
     }
 
@@ -219,6 +266,8 @@ impl CairnApp {
         }
         match std::env::var("CAIRN_DEBUG_DIALOG").as_deref() {
             Ok("palette") => crate::palette::open(cx.entity(), window, cx),
+            #[cfg(windows)]
+            Ok("git_install") => crate::git_setup::ask_install(cx.entity(), window, cx),
             Ok("whats_new") => crate::whats_new::debug_open(window, cx),
             Ok("assist") => {
                 if let Some(tab) = self.active_tab() {
@@ -448,7 +497,7 @@ impl CairnApp {
         if let Some(path) = git {
             self.finish_git_setup(path, window, cx);
         } else if git_changed {
-            self.start_git_setup(window, cx);
+            self.start_git_setup(false, window, cx);
         }
         cx.notify();
         true

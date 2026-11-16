@@ -659,7 +659,10 @@ impl SettingsPanel {
                     .when(cfg!(windows) && missing, |actions| {
                         actions.child(Button::new("install-git").small().primary().label(tr("settings.git_install"))
                             .disabled(running)
-                            .on_click(cx.listener(|this, _, window, cx| this.use_automatic_git(window, cx))))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.app.update(cx, |app, cx| app.install_git(window, cx));
+                                cx.notify();
+                            })))
                     }),
             )
             .when_some(message, |d, key| d.child(div().text_xs().text_color(muted).child(tr(key))))
@@ -1381,7 +1384,6 @@ fn render_preview(s: &Settings, cx: &App) -> AnyElement {
 }
 
 pub(crate) fn open(app: Entity<CairnApp>, settings: Settings, window: &mut Window, cx: &mut App) {
-    // Settings can be opened from a CairnApp update. Build the panel after that update releases the app.
     window.defer(cx, move |window, cx| {
         let panel = cx.new(|cx| SettingsPanel::new(app, settings, window, cx));
         window.open_dialog(cx, move |dialog, _, cx| dialog.w(px(1040.)).bg(cx.theme().popover.opacity(1.)).close_button(true).child(panel.clone()));

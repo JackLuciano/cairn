@@ -12,8 +12,21 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 static LOG_COMMANDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GIT_EXECUTABLE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
-/// Selects the executable used by Cairn's Git commands.
+/// Selects the executable used by Cairn's Git commands. On Windows its folder is also put on
+/// `PATH`, so tools Cairn starts, such as the GitHub CLI, find the same Git.
+///
+/// # Arguments
+/// * `path` - the Git executable
 pub fn set_executable(path: PathBuf) {
+    #[cfg(windows)]
+    if let Some(dir) = path.parent() {
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        if !std::env::split_paths(&current).any(|p| p == dir)
+            && let Ok(joined) = std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current)))
+        {
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+    }
     *GIT_EXECUTABLE.write().expect("Git executable lock") = Some(path);
 }
 

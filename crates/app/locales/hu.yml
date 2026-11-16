@@ -603,7 +603,7 @@ settings:
   watch_files_desc: "Kapcsold ki óriási repóknál, ha a Cairn lassúnak tűnik."
   clone_dir: "Alapértelmezett klónozási mappa"
   git_executable: "Git futtatható fájl"
-  git_executable_desc: "Válassz Git futtatható fájlt, vagy indíts automatikus keresést. Windowson a Cairn telepíti a Git-et, ha nem találja."
+  git_executable_desc: "Válassz Git futtatható fájlt, vagy indíts automatikus keresést. Windowson a Cairn felajánlja a Git telepítését, ha nem találja."
   git_browse: "Tallózás"
   git_pick: "Válaszd ki a Git futtatható fájlját"
   git_auto_detect: "Automatikus keresés"
@@ -1178,6 +1178,14 @@ notify:
 
 git_setup:
   checking: "Git keresése a háttérben…"
+  installing: "A Git for Windows telepítése…"
+  installed: "A Git for Windows telepítve van."
+  ask_title: "A Cairnhez Git kell"
+  ask_body: "Ezen a gépen nincs Git. A Cairn feltelepítheti neked a Git for Windowst a WinGettel, vagy kiválaszthatsz egy meglévő Git-et."
+  ask_license: "A telepítéssel elfogadod a Git for Windows licencfeltételeit."
+  ask_install: "Git telepítése"
+  ask_choose: "Meglévő kiválasztása…"
+  ask_later: "Most nem"
   invalid_path: "Válassz egy működő Git futtatható fájlt a Beállítások → Haladó menüben."
   missing: "Telepítsd a Git-et, vagy válassz ki egy meglévő Git futtatható fájlt a beállításokban."
   winget_missing: "A WinGet nem érhető el. Telepítsd kézzel a Git for Windowst, vagy válassz ki egy meglévő Git futtatható fájlt a beállításokban."
