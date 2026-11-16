@@ -86,6 +86,18 @@ impl CairnApp {
             });
             false
         });
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active()
+                && let Some(tab) = this.active_tab()
+            {
+                tab.update(cx, |v, cx| {
+                    if v.busy.is_none() {
+                        v.reload(cx);
+                    }
+                });
+            }
+        })
+        .detach();
         crate::updater::start(window, cx);
         crate::inbox::start(window, cx);
         crate::whats_new::show_after_update(&mut app, window, cx);

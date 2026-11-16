@@ -578,20 +578,26 @@ impl RepoView {
             self.watcher = None;
             return;
         }
-        let Some(watcher) = crate::watcher::RepoWatcher::start(self.repo.root.clone()) else { return };
+        let Some(watcher) = crate::watcher::RepoWatcher::start(self.repo.root.clone(), self.repo.git_dir.clone()) else { return };
         let rx = watcher.rx.clone();
         self.watcher = Some(watcher);
         let task = cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
-                cx.background_executor().timer(crate::watcher::DEBOUNCE).await;
-                while rx.try_recv().is_ok() {}
-                let alive = this.update(cx, |this, cx| {
-                    if this.busy.is_none() {
-                        this.reload(cx);
+                loop {
+                    cx.background_executor().timer(crate::watcher::DEBOUNCE).await;
+                    while rx.try_recv().is_ok() {}
+                    let reloaded = this.update(cx, |this, cx| {
+                        let idle = this.busy.is_none();
+                        if idle {
+                            this.reload(cx);
+                        }
+                        idle
+                    });
+                    match reloaded {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(_) => return,
                     }
-                });
-                if alive.is_err() {
-                    return;
                 }
             }
         });
